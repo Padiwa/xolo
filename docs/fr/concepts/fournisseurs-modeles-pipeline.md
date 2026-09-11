@@ -21,7 +21,7 @@ Un **modèle virtuel** est un modèle personnalisé, exposé exactement comme un
 
 Le pipeline est un graphe de nœuds connectés entre eux par des **ports** typés (`request`, `response`, `string`, `number`, `boolean`). Le moteur de pipeline trie le graphe topologiquement et fait circuler les valeurs d'un nœud à l'autre. Composer plusieurs traitements ne demande aucune ligne de code, juste du câblage dans l'interface.
 
-Les nœuds sont de deux sortes. Les nœuds **intégrés** font partie du serveur : requête entrante, réponse, appel de modèle, modèle avec repli, référence de modèle, valeur fixe, comparaison, sélection, calcul, échantillonnage, contexte de la requête, trace et note. Les **plugins** sont des binaires séparés chargés au démarrage. La page [Nœuds de pipeline](./noeuds-pipeline.md) décrit chacun d'eux, ports et configuration compris.
+Les nœuds sont de deux sortes. Les nœuds **intégrés** font partie du serveur : requête entrante, réponse, appel de modèle, modèle avec repli, référence de modèle, valeur fixe, comparaison, sélection, calcul, échantillonnage, contexte de la requête, trace et note. Les **plugins** sont des binaires séparés chargés au démarrage. La page [Nœuds de pipeline](./noeuds-pipeline/index.md) décrit chacun d'eux, ports et configuration compris.
 
 Plugins livrés avec Xolo :
 

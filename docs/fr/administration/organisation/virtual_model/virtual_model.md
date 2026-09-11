@@ -26,7 +26,7 @@ Pour créer un modèle virtuel :
 
 Cet éditeur permet de configurer des traitements qui seront appliqués automatiquement aux requêtes et aux réponses du modèle.
 
-La palette de gauche liste d'abord les nœuds intégrés, puis les plugins chargés sur cette installation. Le panneau de droite configure le nœud sélectionné. Chaque nœud, ses ports et sa configuration sont décrits dans [Nœuds de pipeline](../../../concepts/noeuds-pipeline.md) ; le fonctionnement général du pipeline dans [Fournisseurs, modèles et pipelines](../../../concepts/fournisseurs-modeles-pipeline.md).
+La palette de gauche liste d'abord les nœuds intégrés, puis les plugins chargés sur cette installation. Le panneau de droite configure le nœud sélectionné. Chaque nœud, ses ports et sa configuration sont décrits dans [Nœuds de pipeline](../../../concepts/noeuds-pipeline/index.md) ; le fonctionnement général du pipeline dans [Fournisseurs, modèles et pipelines](../../../concepts/fournisseurs-modeles-pipeline.md).
 
 ## Exemple : configuration du plugin `system-prompt`
 
