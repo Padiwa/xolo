@@ -69,7 +69,7 @@ Ces plugins lisent la requête et produisent des mesures. Ils ne modifient rien.
 
 ### Décision
 
-
+Ces plugins transforment des mesures en décision quand `compare` et `select` ne suffisent plus.
 
 | Plugin | Rôle |
 | --- | --- |
@@ -78,8 +78,6 @@ Ces plugins lisent la requête et produisent des mesures. Ils ne modifient rien.
 
 ### Transformation de la requête
 
-
-
 | Plugin | Rôle |
 | --- | --- |
 | [`system-prompt`](./plugins/system-prompt.md) | Ajoute un prompt système, ou remplace celui de la requête |
@@ -87,8 +85,6 @@ Ces plugins lisent la requête et produisent des mesures. Ils ne modifient rien.
 | [`time-restriction`](./plugins/time-restriction.md) | Refuse les requêtes hors des plages horaires hebdomadaires configurées, avec un fuseau horaire |
 
 ### Outils et test
-
-
 
 | Plugin | Rôle |
 | --- | --- |

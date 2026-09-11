@@ -2,7 +2,26 @@
 
 > Plugin livré par défaut, famille « Analyse de la requête ». Retour à la [vue d'ensemble des nœuds](../index.md).
 
-**complexity-scorer** évalue la difficulté de la demande courante. Sorties : `complexity` (number entre 0 et 1), `level` (string, de `trivial` à `very_complex`), `has_code` (boolean), `constraint_count`, `word_count`, `context_tokens`, `estimated_output_tokens` (number).
+**complexity-scorer** évalue la difficulté de la demande courante.
+
+## Ports
+
+| Port | Sens | Type | Requis |
+| --- | --- | --- | --- |
+| `request` | entrée | request | oui |
+| `complexity` | sortie | number | — |
+| `level` | sortie | string | — |
+| `has_code` | sortie | boolean | — |
+| `constraint_count` | sortie | number | — |
+| `word_count` | sortie | number | — |
+| `context_tokens` | sortie | number | — |
+| `estimated_output_tokens` | sortie | number | — |
+
+## Configuration
+
+Aucune configuration. `level` va de `trivial` à `very_complex`.
+
+## En pratique
 
 ![Ports du plugin complexity-scorer](../screenshots/inspector-scorer.png)
 
