@@ -10,3 +10,4 @@ index.bleve
 opencode.json
 node_modules
 /.env.bak
+/.vscode
