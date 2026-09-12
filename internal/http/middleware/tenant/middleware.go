@@ -87,6 +87,26 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (model.Tenant, erro
 	return tenant, nil
 }
 
+// CanonicalHost returns the normalized host designated by host, without
+// querying the store: it answers "could this host name a tenant", not "does
+// that tenant exist". In multi-tenant mode it extracts the tenant slug with the
+// same validation used by Resolve, then rebuilds the host from the configured
+// pattern. Callers that build public URLs from a request host use it so that
+// neither a forged host, its casing nor a client-supplied port can leak into a
+// generated URL.
+func (r *Resolver) CanonicalHost(host string) (string, bool) {
+	if !r.multiTenant {
+		return strings.ToLower(stripPort(host)), true
+	}
+
+	slug, ok := r.slugFromHost(host)
+	if !ok {
+		return "", false
+	}
+
+	return r.hostPrefix + slug + r.hostSuffix, true
+}
+
 // slugFromHost extracts the tenant slug framed by the configured pattern.
 func (r *Resolver) slugFromHost(host string) (string, bool) {
 	host = strings.ToLower(stripPort(host))

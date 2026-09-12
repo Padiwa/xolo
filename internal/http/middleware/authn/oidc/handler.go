@@ -2,20 +2,25 @@ package oidc
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 
+	"github.com/bornholm/go-x/slogx"
+	"github.com/gorilla/sessions"
+	"github.com/pkg/errors"
+	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
+	"github.com/xolo-gateway/xolo/internal/http/handler/webui/common"
 	"github.com/xolo-gateway/xolo/internal/http/middleware/authn/oauth2token"
 	"github.com/xolo-gateway/xolo/internal/http/middleware/authn/oidctoken"
-	"github.com/gorilla/sessions"
 )
 
 type ProviderWithJWKS struct {
-	ID          string
-	Label      string
-	Icon       string
+	ID           string
+	Label        string
+	Icon         string
 	DiscoveryURL string
-	Issuer      string
-	JWKSURL     string
+	Issuer       string
+	JWKSURL      string
 	// IntrospectionURL, ClientID and ClientSecret, when set, enable RFC 7662
 	// access-token introspection for this provider (see ProvidersWithIntrospection).
 	IntrospectionURL string
@@ -32,11 +37,12 @@ type ProviderWithJWKS struct {
 }
 
 type Handler struct {
-	mux              *http.ServeMux
-	sessionStore     sessions.Store
-	sessionName      string
-	providers       []Provider
+	mux               *http.ServeMux
+	sessionStore      sessions.Store
+	sessionName       string
+	providers         []Provider
 	providersWithJWKS []ProviderWithJWKS
+	resolveProvider   ProviderResolver
 }
 
 // ServeHTTP implements http.Handler.
@@ -47,18 +53,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func NewHandler(sessionStore sessions.Store, funcs ...OptionFunc) *Handler {
 	opts := NewOptions(funcs...)
 	h := &Handler{
-		mux:              http.NewServeMux(),
-		sessionStore:     sessionStore,
-		sessionName:      opts.SessionName,
-		providers:       opts.Providers,
+		mux:               http.NewServeMux(),
+		sessionStore:      sessionStore,
+		sessionName:       opts.SessionName,
+		providers:         opts.Providers,
 		providersWithJWKS: opts.ProvidersWithJWKS,
+		resolveProvider:   opts.ResolveProvider,
 	}
 
 	h.mux.HandleFunc("GET /login", h.getLoginPage)
-	h.mux.Handle("GET /providers/{provider}", withContextProvider(http.HandlerFunc(h.handleProvider)))
-	h.mux.Handle("GET /providers/{provider}/callback", withContextProvider(http.HandlerFunc(h.handleProviderCallback)))
+	h.mux.Handle("GET /providers/{provider}", h.withContextProvider(http.HandlerFunc(h.handleProvider)))
+	h.mux.Handle("GET /providers/{provider}/callback", h.withContextProvider(http.HandlerFunc(h.handleProviderCallback)))
 	h.mux.HandleFunc("GET /logout", h.handleLogout)
-	h.mux.Handle("GET /providers/{provider}/logout", withContextProvider(http.HandlerFunc(h.handleProviderLogout)))
+	h.mux.Handle("GET /providers/{provider}/logout", h.withContextProvider(http.HandlerFunc(h.handleProviderLogout)))
 
 	return h
 }
@@ -67,12 +74,12 @@ func (h *Handler) ProvidersWithJWKS() []oidctoken.Provider {
 	providers := make([]oidctoken.Provider, 0, len(h.providersWithJWKS))
 	for _, p := range h.providersWithJWKS {
 		providers = append(providers, oidctoken.Provider{
-			ID:          p.ID,
-			Label:      p.Label,
-			Icon:       p.Icon,
+			ID:           p.ID,
+			Label:        p.Label,
+			Icon:         p.Icon,
 			DiscoveryURL: p.DiscoveryURL,
-			Issuer:      p.Issuer,
-			JWKSURL:     p.JWKSURL,
+			Issuer:       p.Issuer,
+			JWKSURL:      p.JWKSURL,
 		})
 	}
 	return providers
@@ -104,11 +111,44 @@ func (h *Handler) ProvidersForTokenValidation() []oauth2token.Provider {
 
 var _ http.Handler = &Handler{}
 
-func withContextProvider(h http.Handler) http.Handler {
+// withContextProvider names the goth provider the request must be served by.
+// gothic looks up the "provider" and ":provider" query parameters before the
+// context value, so both are stripped here: otherwise any client could pick the
+// provider of another host. Only then does the context value win over the
+// route parameter, which is what lets a multi-tenant instance answer on a
+// host-scoped provider while the route keeps the bare provider ID.
+func (h *Handler) withContextProvider(next http.Handler) http.Handler {
 	fn := func(w http.ResponseWriter, r *http.Request) {
 		provider := r.PathValue("provider")
-		r = r.WithContext(context.WithValue(r.Context(), "provider", provider))
-		h.ServeHTTP(w, r)
+
+		if h.resolveProvider != nil {
+			resolved, err := h.resolveProvider(provider, httpCtx.BaseURL(r.Context()).String())
+			if err != nil {
+				if errors.Is(err, ErrProviderNotFound) {
+					common.HandleError(w, r, common.NewHTTPError(http.StatusNotFound))
+					return
+				}
+
+				slog.ErrorContext(
+					r.Context(),
+					"could not resolve oidc provider",
+					slog.String("provider", provider),
+					slogx.Error(errors.WithStack(err)),
+				)
+				common.HandleError(w, r, common.NewHTTPError(http.StatusBadGateway))
+				return
+			}
+
+			provider = resolved
+		}
+
+		query := r.URL.Query()
+		query.Del("provider")
+		query.Del(":provider")
+
+		r = r.Clone(context.WithValue(r.Context(), "provider", provider))
+		r.URL.RawQuery = query.Encode()
+		next.ServeHTTP(w, r)
 	}
 
 	return http.HandlerFunc(fn)

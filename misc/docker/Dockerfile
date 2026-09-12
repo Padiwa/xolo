@@ -1,11 +1,18 @@
-FROM golang:1.27.0 AS build
+# Kept at or above the Go version goreleaser@latest requires: the Makefile
+# installs it unpinned, so a toolchain older than its floor fails the build.
+FROM golang:1.27.1 AS build
 
 RUN apt-get update \
   && apt-get install -y make git
 
+# The plugin SDK is a nested module pulled in by a local `replace`, so its own
+# go.mod has to be readable here too — otherwise this layer resolves the
+# replacement to a path that does not exist yet and the download fails.
 RUN --mount=type=cache,target=/go/pkg/mod/ \
   --mount=type=bind,source=go.sum,target=go.sum \
   --mount=type=bind,source=go.mod,target=go.mod \
+  --mount=type=bind,source=pkg/pluginsdk/go.sum,target=pkg/pluginsdk/go.sum \
+  --mount=type=bind,source=pkg/pluginsdk/go.mod,target=pkg/pluginsdk/go.mod \
   go mod download -x
 
 WORKDIR /src

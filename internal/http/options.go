@@ -13,6 +13,11 @@ type Options struct {
 	// is canceled before the server closes their connections.
 	ShutdownTimeout time.Duration
 	BaseURL         string
+	// BaseURLResolver returns the public base URL a given request must build its
+	// links and redirects against. It defaults to the static BaseURL; a
+	// multi-tenant deployment overrides it so every tenant is served links on its
+	// own host instead of the instance-wide one.
+	BaseURLResolver func(r *http.Request) string
 	Mounts          map[string]http.Handler
 	Routes          map[string]http.Handler
 	CORS            cors.Options
@@ -41,6 +46,15 @@ func NewOptions(funcs ...OptionFunc) *Options {
 	for _, fn := range funcs {
 		fn(opts)
 	}
+
+	// Resolved after the options ran so the fallback closes over the final
+	// BaseURL, whichever order WithBaseURL and WithBaseURLResolver were given in.
+	if opts.BaseURLResolver == nil {
+		opts.BaseURLResolver = func(*http.Request) string {
+			return opts.BaseURL
+		}
+	}
+
 	return opts
 }
 
@@ -68,6 +82,16 @@ func WithShutdownTimeout(timeout time.Duration) OptionFunc {
 func WithBaseURL(baseURL string) OptionFunc {
 	return func(opts *Options) {
 		opts.BaseURL = baseURL
+	}
+}
+
+// WithBaseURLResolver derives the public base URL from the request instead of
+// using a single instance-wide value. Set it when the same process serves
+// several hostnames, so links, redirects and OAuth callbacks stay on the host
+// the request came in on.
+func WithBaseURLResolver(resolve func(r *http.Request) string) OptionFunc {
+	return func(opts *Options) {
+		opts.BaseURLResolver = resolve
 	}
 }
 

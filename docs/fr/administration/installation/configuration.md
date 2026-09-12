@@ -45,6 +45,8 @@ XOLO_HTTP_AUTHN_OIDC_PROVIDER_KEYCLOAK_LABEL="Mon SSO"
 XOLO_HTTP_AUTHN_OIDC_PROVIDER_KEYCLOAK_SCOPES=openid,profile,email
 ```
 
+L'URL de découverte est obligatoire. Xolo télécharge le document au démarrage, avec un délai maximal de 10 secondes. Si le document est inaccessible ou incomplet, le serveur refuse de démarrer, en mode mono-tenant comme en multi-tenant. Le document doit contenir `issuer`, `authorization_endpoint`, `token_endpoint` et `jwks_uri`. Chacun de ces champs, ainsi que `userinfo_endpoint`, `introspection_endpoint` et `end_session_endpoint` quand ils sont présents, doit être une URL absolue en `http` ou `https`.
+
 Pour valider des jetons d'accès opaques côté API (introspection RFC 7662, ou UserInfo à défaut) plutôt que des ID Tokens OIDC autoportés, activez `XOLO_HTTP_AUTHN_OAUTH2TOKEN_ENABLED=true`.
 
 ## Stockage
@@ -102,6 +104,32 @@ Le schéma est créé et migré automatiquement au démarrage. Il n'existe pas d
 | `XOLO_PROVISIONNING_API_TLS_KEY_FILE` | _(requis si activé)_ | Clé privée du serveur (PEM). |
 | `XOLO_PROVISIONNING_API_TLS_CLIENT_CA_FILE` | _(requis si activé)_ | Autorité vérifiant les certificats clients. |
 | `XOLO_PROVISIONNING_API_SHUTDOWN_TIMEOUT` | `10s` | Délai d'arrêt gracieux. |
+
+## Multi-tenant
+
+Désactivé par défaut : l'instance possède un unique tenant `default`, créé par la migration et jamais exposé à ses utilisateurs — pas de sous-domaine, pas de changement d'URL. Une fois activé, le tenant est identifié par l'hôte de la requête, et un hôte ne correspondant à aucun tenant répond 404 : un sous-domaine inconnu ne doit pas révéler que l'instance existe.
+
+Les tenants se créent exclusivement par l'[API de provisioning](../provisioning/provisioning.md) ; `POST /v1/tenants` répond 409 tant que `XOLO_MULTITENANCY_ENABLED` vaut `false`.
+
+| Variable | Défaut | Description |
+| --- | --- | --- |
+| `XOLO_MULTITENANCY_ENABLED` | `false` | Active la résolution du tenant par nom d'hôte. |
+| `XOLO_MULTITENANCY_HOST_PATTERN` | _(requis si activé)_ | Gabarit d'hôte contenant exactement une fois le marqueur `{tenant}`, par exemple `{tenant}.xolo.example.com`. Il peut porter un port, ignoré lors de la comparaison. Le serveur refuse de démarrer s'il est absent ou mal formé. |
+| `XOLO_MULTITENANCY_DEFAULT_TENANT_SLUG` | `default` | Tenant servi lorsque le multi-tenant est désactivé. |
+
+### Conséquences sur la configuration HTTP
+
+`XOLO_HTTP_BASE_URL` doit alors être **absolue** — schéma et hôte — sous peine de refus de démarrage. Elle n'est plus l'URL de l'instance mais le gabarit dont chaque tenant dérive la sienne : son schéma et son chemin sont conservés, son hôte est remplacé par celui de la requête. Liens, redirections et URL de rappel OAuth restent ainsi sur l'hôte du tenant, ce qui est nécessaire : le cookie de session est propre à un hôte et la session porte le tenant sur lequel elle a été ouverte.
+
+L'URL de rappel à déclarer auprès du fournisseur d'identité varie donc par tenant :
+
+```
+https://{tenant}.xolo.example.com/auth/oidc/providers/{fournisseur}/callback
+```
+
+Un fournisseur acceptant un `redirect_uri` à joker (Keycloak, Authentik…) couvre tous les tenants d'une seule déclaration. Une OAuth App GitHub n'accepte qu'une URL de rappel unique et Google n'accepte que des URI exactes : ces deux fournisseurs imposent une déclaration par sous-domaine, ce qui les rend impraticables au-delà de quelques tenants.
+
+Prévoyez enfin un DNS et un certificat TLS joker (`*.xolo.example.com`) sur le reverse proxy placé devant Xolo, et passez `XOLO_HTTP_SESSION_COOKIE_SECURE=true`.
 
 ## Taux de change et tâches de fond
 

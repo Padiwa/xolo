@@ -53,7 +53,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
 
-			ctx = httpCtx.SetBaseURL(ctx, s.opts.BaseURL)
+			ctx = httpCtx.SetBaseURL(ctx, s.opts.BaseURLResolver(r))
 			ctx = httpCtx.SetCurrentURL(ctx, r.URL)
 
 			// Le repli de la barre latérale est un choix de l'utilisateur, écrit

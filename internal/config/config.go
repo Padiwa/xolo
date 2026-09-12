@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/hex"
+	"net/url"
 	"os"
 	"strings"
 
@@ -121,6 +122,33 @@ func (c *Config) Validate() error {
 
 	if err := c.Multitenancy.Validate(); err != nil {
 		return errors.WithStack(err)
+	}
+
+	if err := validateMultitenantBaseURL(c.HTTP.BaseURL, c.Multitenancy.Enabled); err != nil {
+		return errors.WithStack(err)
+	}
+
+	return nil
+}
+
+// validateMultitenantBaseURL enforces the one cross-section rule multi-tenancy
+// adds: the base URL must be absolute. In single-tenant mode a relative value
+// is fine — the whole instance lives on one host and its links can stay
+// relative. In multi-tenant mode it is the template every tenant URL is derived
+// from, scheme included, and it is what OAuth callbacks are built on; a
+// relative value would produce callbacks no identity provider can return to.
+func validateMultitenantBaseURL(baseURL string, multitenancyEnabled bool) error {
+	if !multitenancyEnabled {
+		return nil
+	}
+
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return errors.Errorf("XOLO_HTTP_BASE_URL %q is not a valid URL", baseURL)
+	}
+
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return errors.Errorf("XOLO_HTTP_BASE_URL must be absolute (for instance https://xolo.example.com) when XOLO_MULTITENANCY_ENABLED is true, got %q", baseURL)
 	}
 
 	return nil

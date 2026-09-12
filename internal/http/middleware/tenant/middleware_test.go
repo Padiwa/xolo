@@ -164,3 +164,77 @@ func TestMultiTenant(t *testing.T) {
 		})
 	}
 }
+
+func TestCanonicalHostMatching(t *testing.T) {
+	multi := config.Multitenancy{
+		Enabled:           true,
+		HostPattern:       "{tenant}.xolo.example.com",
+		DefaultTenantSlug: model.DefaultTenantSlug,
+	}
+
+	for name, testCase := range map[string]struct {
+		conf config.Multitenancy
+		host string
+		want bool
+	}{
+		"framed by the pattern":       {conf: multi, host: "acme.xolo.example.com", want: true},
+		"port is ignored":             {conf: multi, host: "acme.xolo.example.com:3002", want: true},
+		"case is ignored":             {conf: multi, host: "ACME.Xolo.Example.Com", want: true},
+		"outside the pattern":         {conf: multi, host: "evil.example.com", want: false},
+		"bare suffix names no tenant": {conf: multi, host: "xolo.example.com", want: false},
+		"slug is not a dns label":     {conf: multi, host: "not_a_label.xolo.example.com", want: false},
+		"empty host":                  {conf: multi, host: "", want: false},
+		"single tenant matches anything": {
+			conf: config.Multitenancy{Enabled: false, DefaultTenantSlug: model.DefaultTenantSlug},
+			host: "whatever.example.com",
+			want: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resolver := tenant.NewResolver(newStore(), testCase.conf)
+
+			if _, got := resolver.CanonicalHost(testCase.host); got != testCase.want {
+				t.Errorf("CanonicalHost(%q) matched: got %t, want %t", testCase.host, got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestResolverCanonicalHost(t *testing.T) {
+	resolver := tenant.NewResolver(newStore(), config.Multitenancy{
+		Enabled:           true,
+		HostPattern:       "{tenant}.XOLO.Example.Com:3002",
+		DefaultTenantSlug: model.DefaultTenantSlug,
+	})
+
+	for name, testCase := range map[string]struct {
+		host string
+		want string
+		ok   bool
+	}{
+		"normalizes case from the pattern and request": {
+			host: "AcMe.Xolo.EXAMPLE.com",
+			want: "acme.xolo.example.com",
+			ok:   true,
+		},
+		"drops the request port": {
+			host: "acme.xolo.example.com:9999",
+			want: "acme.xolo.example.com",
+			ok:   true,
+		},
+		"rejects a foreign host": {
+			host: "acme.example.org",
+			ok:   false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, ok := resolver.CanonicalHost(testCase.host)
+			if ok != testCase.ok {
+				t.Fatalf("matched: got %t, want %t", ok, testCase.ok)
+			}
+			if got != testCase.want {
+				t.Errorf("canonical host: got %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}

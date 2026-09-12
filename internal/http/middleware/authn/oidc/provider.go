@@ -33,9 +33,13 @@ func (h *Handler) handleProviderCallback(w http.ResponseWriter, r *http.Request)
 
 	slog.DebugContext(ctx, "authenticated user", slog.Any("user", gothUser))
 
+	// A multi-tenant instance registers one goth provider per tenant host, so the
+	// name goth hands back carries that host. Identities are keyed on
+	// (tenant, provider, subject): strip it, or the same account would be a
+	// different user on every hostname it ever signed in from.
 	user := &authn.User{
 		Email:       gothUser.Email,
-		Provider:    gothUser.Provider,
+		Provider:    BaseProviderID(gothUser.Provider),
 		DisplayName: getUserDisplayName(gothUser),
 	}
 
