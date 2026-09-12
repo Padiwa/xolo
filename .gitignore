@@ -11,3 +11,4 @@ opencode.json
 node_modules
 /.env.bak
 /.vscode
+/.conclave.yaml
