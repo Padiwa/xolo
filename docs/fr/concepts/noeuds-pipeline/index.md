@@ -36,8 +36,8 @@ Ils font partie du serveur. Ils n'exigent aucun binaire de plugin et se comporte
 | --- | --- |
 | [`generator et sink`](./noeuds-integres.md#generator-et-sink) | Entrée et sortie obligatoires du pipeline |
 | [`model`](./noeuds-integres.md#model) | Appelle un modèle réel ou virtuel |
-| [`model_ref`](./noeuds-integres.md#model-ref) | Émet le nom d'un modèle choisi dans une liste |
-| [`model_fallback`](./noeuds-integres.md#model-fallback) | Essaie plusieurs modèles dans l'ordre jusqu'au premier qui répond |
+| [`model_ref`](./noeuds-integres.md#model_ref) | Émet le nom d'un modèle choisi dans une liste |
+| [`model_fallback`](./noeuds-integres.md#model_fallback) | Essaie plusieurs modèles dans l'ordre jusqu'au premier qui répond |
 | [`value`](./noeuds-integres.md#value) | Émet une valeur fixe |
 | [`compare`](./noeuds-integres.md#compare) | Compare un nombre à un seuil et émet un booléen |
 | [`select`](./noeuds-integres.md#select) | Choisit une chaîne selon un booléen |
