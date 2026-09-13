@@ -1,5 +1,11 @@
 package main
 
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+)
+
 const (
 	partTypeToolUse    = "tool_use"
 	partTypeToolResult = "tool_result"
@@ -158,5 +164,123 @@ func anonymizeLeaves(v any, anonymize func(string) (string, error)) (any, error)
 		return out, nil
 	default:
 		return v, nil
+	}
+}
+
+// fieldToolCalls is where an OpenAI-compatible client puts the assistant's tool
+// calls: a sibling of `content`, not one of its parts.
+const fieldToolCalls = "tool_calls"
+
+// anonymizeToolCalls rewrites the arguments of OpenAI-shaped tool calls,
+// returning the rewritten list and whether anything was there to rewrite.
+//
+// The Anthropic equivalent (`tool_use.input`) is a JSON object inside the
+// message content, which the part loop reaches. `tool_calls` sits outside
+// `content` entirely and would otherwise travel in clear — the same data, one
+// shape protected and the other not.
+//
+// `id`, `type` and the function `name` are left alone for the same reason as in
+// a `tool_use` block: they pair the call with its result.
+func anonymizeToolCalls(raw any, anonymize func(string) (string, error)) ([]any, bool, error) {
+	calls, ok := raw.([]any)
+	if !ok || len(calls) == 0 {
+		return nil, false, nil
+	}
+
+	out := make([]any, 0, len(calls))
+	for _, call := range calls {
+		callMap, ok := call.(map[string]any)
+		if !ok {
+			out = append(out, call)
+			continue
+		}
+		fn, ok := callMap["function"].(map[string]any)
+		if !ok {
+			out = append(out, call)
+			continue
+		}
+		rewritten, err := anonymizeArgumentsValue(fn["arguments"], anonymize)
+		if err != nil {
+			// The calls already rewritten are handed back with the error: their
+			// values are in the session mapping either way, so dropping them
+			// here would send them in clear under a placeholder the model is
+			// told to reuse.
+			out = append(out, calls[len(out):]...)
+			return out, true, err
+		}
+		if rewritten == nil {
+			out = append(out, call)
+			continue
+		}
+
+		copiedFn := make(map[string]any, len(fn))
+		for k, v := range fn {
+			copiedFn[k] = v
+		}
+		copiedFn["arguments"] = rewritten
+
+		copiedCall := make(map[string]any, len(callMap))
+		for k, v := range callMap {
+			copiedCall[k] = v
+		}
+		copiedCall["function"] = copiedFn
+		out = append(out, copiedCall)
+	}
+
+	return out, true, nil
+}
+
+// anonymizeToolArguments rewrites the string leaves of a tool call's
+// `arguments`, which is a JSON document carried as a string. A payload that
+// does not parse is rewritten as the plain text it then is, rather than
+// forwarded untouched.
+func anonymizeToolArguments(args string, anonymize func(string) (string, error)) (string, error) {
+	var decoded any
+	dec := json.NewDecoder(strings.NewReader(args))
+	// Without this, every number becomes a float64 and is re-encoded from it.
+	// A 19-digit identifier or a nanosecond timestamp does not survive that
+	// trip: 9223372036854775807 comes back as 9223372036854776000, and the tool
+	// runs against something the model never asked for. json.Number keeps the
+	// literal as it was written, and being a named type it falls through the
+	// `case string` of anonymizeLeaves untouched.
+	dec.UseNumber()
+	if err := dec.Decode(&decoded); err != nil {
+		return anonymize(args)
+	}
+
+	walked, err := anonymizeLeaves(decoded, anonymize)
+	if err != nil {
+		return "", err
+	}
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	// The arguments are read by the tool, not by a browser: escaping `<`, `>`
+	// and `&` would alter a payload the client has to execute verbatim.
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(walked); err != nil {
+		return "", err
+	}
+	return strings.TrimRight(buf.String(), "\n"), nil
+}
+
+// anonymizeArgumentsValue rewrites the `arguments` of one call, whatever shape
+// it arrived in, and returns nil when there is nothing to rewrite.
+//
+// The spec says a string, and that is what the field holds in practice. An SDK
+// that pre-parses it into an object is the other shape seen in the wild, and
+// forwarding that one untouched would be the very leak this file exists to
+// close, so it is walked in place instead.
+func anonymizeArgumentsValue(raw any, anonymize func(string) (string, error)) (any, error) {
+	switch args := raw.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		if args == "" {
+			return nil, nil
+		}
+		return anonymizeToolArguments(args, anonymize)
+	default:
+		return anonymizeLeaves(args, anonymize)
 	}
 }
