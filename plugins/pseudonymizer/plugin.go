@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -559,7 +560,128 @@ func (p *Plugin) PostResponse(_ context.Context, in *proto.PostResponseInput) (*
 		restored = removedPartsWarning(state.RemovedParts) + restored
 	}
 
-	return &proto.PostResponseOutput{ModifiedResponseContent: restored}, nil
+	// The model reads pseudonymized arguments in its own history and derives new
+	// calls from what it read — Read(path="/home/⟦PERSON_1⟧/notes.md"). Left
+	// alone, the placeholder reaches the client, which runs the call against a
+	// path that does not exist.
+	restoredToolCalls, err := deanonymizeToolCalls(in.ResponseToolCallsJson, state.Mapping)
+	if err != nil {
+		slog.Warn("pseudonymizer: could not restore the response tool calls",
+			slog.Any("error", err),
+		)
+		restoredToolCalls = ""
+	}
+
+	return &proto.PostResponseOutput{
+		ModifiedResponseContent: restored,
+		ModifiedToolCallsJson:   restoredToolCalls,
+	}, nil
+}
+
+// deanonymizeToolCalls restores the placeholders inside the arguments of the
+// response tool calls, returning the rewritten JSON array or an empty string
+// when there was nothing to restore.
+//
+// Only `arguments` is touched: the id and the name of a call pair it with its
+// result, exactly as on the request side.
+func deanonymizeToolCalls(toolCallsJSON string, mapping map[string]string) (string, error) {
+	if toolCallsJSON == "" || len(mapping) == 0 {
+		return "", nil
+	}
+
+	var calls []map[string]any
+	if err := json.Unmarshal([]byte(toolCallsJSON), &calls); err != nil {
+		return "", err
+	}
+
+	changed := false
+	for _, call := range calls {
+		switch args := call["arguments"].(type) {
+		case string:
+			if args == "" {
+				continue
+			}
+			if restored := deanonymizeArguments(args, mapping); restored != args {
+				call["arguments"] = restored
+				changed = true
+			}
+		case nil:
+			continue
+		default:
+			// The host always sends `arguments` pre-serialized, but a decoded
+			// object is the other reasonable reading of the field and skipping
+			// it would leave placeholders in a call nobody can see went wrong.
+			restored, err := anonymizeLeaves(args, func(s string) (string, error) {
+				return deanonymize(s, mapping), nil
+			})
+			if err != nil {
+				continue
+			}
+			before, beforeErr := encodeJSON(args)
+			after, afterErr := encodeJSON(restored)
+			if beforeErr != nil || afterErr != nil || before == after {
+				continue
+			}
+			call["arguments"] = restored
+			changed = true
+		}
+	}
+	if !changed {
+		return "", nil
+	}
+
+	return encodeJSON(calls)
+}
+
+// deanonymizeArguments restores the placeholders inside one call's arguments.
+//
+// The arguments are a JSON document, so the substitution happens on the decoded
+// values and the document is re-encoded around them. Replacing the text of the
+// encoded form instead would work until a restored value carries a backslash or
+// a newline -- a Windows path, a two-line postal address -- and then the
+// arguments stop being parseable and the client cannot run the call at all.
+//
+// Arguments that are not valid JSON fall back to the plain substitution:
+// nothing can be lost that way, and a provider is free to send something else
+// there.
+func deanonymizeArguments(args string, mapping map[string]string) string {
+	var decoded any
+	dec := json.NewDecoder(strings.NewReader(args))
+	// Without this, every number becomes a float64 and is re-encoded from it.
+	// A 19-digit identifier or a nanosecond timestamp does not survive that
+	// trip: 9223372036854775807 comes back as 9223372036854776000, and the
+	// client runs the call against something the model never asked for.
+	// json.Number keeps the literal as it was written, and being a named type
+	// it falls through the `case string` of anonymizeLeaves untouched.
+	dec.UseNumber()
+	if err := dec.Decode(&decoded); err != nil {
+		return deanonymize(args, mapping)
+	}
+
+	restored, err := anonymizeLeaves(decoded, func(s string) (string, error) {
+		return deanonymize(s, mapping), nil
+	})
+	if err != nil {
+		return deanonymize(args, mapping)
+	}
+
+	out, err := encodeJSON(restored)
+	if err != nil {
+		return deanonymize(args, mapping)
+	}
+	return out
+}
+
+// encodeJSON marshals a value without escaping HTML characters, which have no
+// business being escaped inside a tool call argument the client will read back.
+func encodeJSON(v any) (string, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	return strings.TrimRight(buf.String(), "\n"), nil
 }
 
 // injectPlaceholderInstruction prepends an instruction to the conversation's

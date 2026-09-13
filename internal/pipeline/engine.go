@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/bornholm/genai/llm"
 	"github.com/pkg/errors"
@@ -155,7 +156,37 @@ func (e *Engine) RunBackward(
 	tokens *TokensUsed,
 	hadError bool,
 ) (string, error) {
+	result, err := e.RunBackwardWithToolCalls(ctx, exec, responseContent, "", tokens, hadError)
+	return result.ResponseContent, err
+}
+
+// BackwardOutcome is what a backward pass leaves for the caller to send back to
+// the client.
+type BackwardOutcome struct {
+	ResponseContent string
+	// ToolCallsJSON is the tool calls as the pass left them, empty when the
+	// response carried none or when no node rewrote them.
+	ToolCallsJSON string
+}
+
+// RunBackwardWithToolCalls executes nodes in reverse order (post-response pass),
+// carrying the response tool calls alongside its text.
+//
+// The two travel together because a node that rewrote the request has to undo
+// its rewriting on both: a placeholder the model copied into a tool call
+// reaches the client verbatim, which then runs the call against a value that
+// does not exist.
+func (e *Engine) RunBackwardWithToolCalls(
+	ctx context.Context,
+	exec *ForwardExecution,
+	responseContent string,
+	toolCallsJSON string,
+	tokens *TokensUsed,
+	hadError bool,
+) (BackwardOutcome, error) {
 	current := responseContent
+	currentToolCalls := toolCallsJSON
+	rewrittenToolCalls := ""
 	// Iterate in reverse order.
 	for i := len(exec.ExecutedNodes) - 1; i >= 0; i-- {
 		en := exec.ExecutedNodes[i]
@@ -163,16 +194,33 @@ func (e *Engine) RunBackward(
 		if !ok {
 			continue
 		}
-		result, err := ex.Backward(ctx, en.Node, en.NodeState, current, tokens, hadError)
+		result, err := ex.Backward(ctx, BackwardInput{
+			Node:            en.Node,
+			NodeState:       en.NodeState,
+			ResponseContent: current,
+			ToolCallsJSON:   currentToolCalls,
+			Tokens:          tokens,
+			HadError:        hadError,
+		})
 		if err != nil {
-			// Non-fatal: log and continue.
+			// Non-fatal: the response is still worth sending, just without
+			// whatever this node was going to change.
+			slog.WarnContext(ctx, "pipeline: backward pass failed for a node, keeping the response as it stands",
+				slog.String("node", en.Node.ID),
+				slog.String("type", string(en.Node.Type)),
+				slog.Any("error", err),
+			)
 			continue
 		}
 		if result.ModifiedResponseContent != "" {
 			current = result.ModifiedResponseContent
 		}
+		if result.ModifiedToolCallsJSON != "" {
+			currentToolCalls = result.ModifiedToolCallsJSON
+			rewrittenToolCalls = result.ModifiedToolCallsJSON
+		}
 	}
-	return current, nil
+	return BackwardOutcome{ResponseContent: current, ToolCallsJSON: rewrittenToolCalls}, nil
 }
 
 // MayModifyResponse reports whether the backward pass of this execution could
