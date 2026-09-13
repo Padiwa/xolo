@@ -648,7 +648,49 @@ func applyModifiedMessages(ctx context.Context, req *genaiProxy.ProxyRequest, ec
 		return
 	}
 
+	// On the Messages route the system prompt is a top-level field, outside the
+	// messages array the pipeline rewrites. ConvertAnthropicMessagesJSON does not
+	// handle it and llm.WithMessages replaces opts.Messages wholesale, so without
+	// this the client's system prompt is dropped as soon as a node rewrites the
+	// conversation.
+	if req.Type == genaiProxy.RequestTypeMessage {
+		systemMsgs, sysErr := requestSystemMessages(req.Body)
+		if sysErr != nil {
+			// Not reachable on this route: the Messages handler runs
+			// ParseMessagesRequest on the same body before any hook, and answers
+			// 400 on a malformed body or a system prompt that is neither a string
+			// nor an array. Kept so a future caller that skips that parsing loses
+			// the prompt loudly rather than silently.
+			slog.WarnContext(ctx, "pipeline: could not carry the top-level system prompt over the rewritten messages",
+				slog.String("model", req.Model),
+				slog.Any("error", sysErr))
+		} else if len(systemMsgs) > 0 {
+			convertedMsgs = append(systemMsgs, convertedMsgs...)
+		}
+	}
+
 	req.ChatOptions = append(req.ChatOptions, llm.WithMessages(convertedMsgs...))
+}
+
+// requestSystemMessages converts the top-level "system" field of an Anthropic
+// Messages request body into system messages.
+//
+// The conversion itself belongs to genai, which owns the wire format: going
+// through ConvertAnthropicSystemJSON is what keeps a rewritten request and an
+// untouched one producing the same system prompt.
+func requestSystemMessages(body []byte) ([]llm.Message, error) {
+	if len(body) == 0 {
+		return nil, nil
+	}
+
+	var envelope struct {
+		System json.RawMessage `json:"system"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, errors.Wrap(err, "could not parse request body")
+	}
+
+	return genaiProxy.ConvertAnthropicSystemJSON(envelope.System)
 }
 
 // extractMessagesJSON extracts the "messages" JSON array from a chat completions request body.
