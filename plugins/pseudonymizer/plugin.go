@@ -252,13 +252,20 @@ func (p *Plugin) PreRequest(ctx context.Context, in *proto.PreRequestInput) (*pr
 		// personnelles jusqu'au modèle.
 		anonymizeFailures int
 		lastAnonymizeErr  error
-		// leakTypeCounts et leakEntities comptent ce que Detect trouve dans un
-		// contenu volontairement transmis sans réécriture (bloc thinking, appel
-		// web_search, type de bloc non reconnu) : jamais ajouté à
-		// session.Mapping, donc tenu à part de typeCounts pour que ce dernier
-		// reste cohérent avec le nombre d'entités réellement pseudonymisées.
-		leakTypeCounts = map[string]int{}
-		leakEntities   int
+		// leakValues holds what Detect found in content deliberately forwarded
+		// without rewriting (a thinking block, a web_search call, an
+		// unrecognized block type). Never added to session.Mapping, so kept
+		// apart from typeCounts, which stays about what was actually replaced.
+		//
+		// Keyed by entity type and a digest of the normalized surface form,
+		// which does two things. Distinct values, because the event sets this
+		// count beside `entities` — len(session.Mapping) — and one address
+		// quoted five times in a thinking block is one leak, not five. And a
+		// digest rather than the text, because deduplicating does not require
+		// holding the personal data itself for the life of the request. The
+		// normalization matches the session's, so the two sides count the same
+		// unit: "Marc Durand" and "marc durand" are one value on both.
+		leakValues = map[string]bool{}
 	)
 
 	// detectKept expose la détection en lecture seule sur laquelle s'appuient les
@@ -268,33 +275,29 @@ func (p *Plugin) PreRequest(ctx context.Context, in *proto.PreRequestInput) (*pr
 		if err != nil {
 			return nil, err
 		}
-		return keepDetectedTypes(entities, cfg.SkipTypes), nil
+		kept := keepDetectedTypes(entities, cfg.SkipTypes)
+		for _, e := range kept {
+			leakValues[leakKey(e)] = true
+		}
+		return kept, nil
 	}
 
-	// detectLeak scanne en lecture seule un contenu qui ne sera pas réécrit et
-	// compte ce qu'il trouve, sans jamais toucher session.Mapping.
+	// detectLeak scanne en lecture seule un contenu qui ne sera pas réécrit.
+	// Le comptage se fait dans detectKept, une fois par valeur distincte.
 	detectLeak := func(text string) {
 		if text == "" {
 			return
 		}
-		entities, err := detectKept(text)
-		if err != nil {
+		if _, err := detectKept(text); err != nil {
 			slog.WarnContext(ctx, "pseudonymizer: failed to scan unpseudonymized content", slog.Any("error", err))
-			return
 		}
-		countEntities(leakTypeCounts, entities)
-		leakEntities += len(entities)
 	}
 
 	// detectLeakIn fait le même travail sur une forme entière, quelle qu'elle
-	// soit. Le total partiel est crédité même en cas d'erreur : detectLeaves a
-	// déjà inscrit dans leakTypeCounts ce qu'il avait trouvé avant d'échouer, et
-	// le jeter laisserait leak_types nommer des types que leak_entities ne
-	// compte pas — voire aucun événement du tout si ce scan était la seule
-	// source de fuite.
+	// soit. Un scan qui échoue à mi-parcours garde ce qu'il avait déjà trouvé :
+	// detectKept inscrit chaque valeur au fil de la descente.
 	detectLeakIn := func(v any, partType string) {
-		n, err := detectLeaves(v, detectKept, leakTypeCounts)
-		leakEntities += n
+		err := detectLeaves(v, detectKept)
 		if err != nil {
 			slog.WarnContext(ctx, "pseudonymizer: failed to scan unpseudonymized part",
 				slog.String("type", partType),
@@ -371,7 +374,7 @@ func (p *Plugin) PreRequest(ctx context.Context, in *proto.PreRequestInput) (*pr
 				}
 				partType, _ := partMap["type"].(string)
 				switch {
-				case partType == partTypeText || partType == partTypeInputText:
+				case isTextPart(partType):
 					// Both spellings carry the text in a `text` field: "text" on
 					// the Messages and Chat Completions routes, "input_text" on
 					// OpenAI Responses. Matching only the first left Responses
@@ -434,10 +437,11 @@ func (p *Plugin) PreRequest(ctx context.Context, in *proto.PreRequestInput) (*pr
 					// bash_code_execution_tool_result's stdout reopens the same
 					// 400 on those turns. That needs a live test against the
 					// provider to settle, not another reading of the docs.
-					if input, ok := partMap["input"].(map[string]any); ok {
-						query, _ := input["query"].(string)
-						detectLeak(query)
-					}
+					// The whole block, not just `input.query`: the web search
+					// input also carries `user_location` with a city and a
+					// region, and the allowed/blocked domain lists. All of it
+					// leaves in clear, so all of it is counted.
+					detectLeakIn(partMap, partType)
 					slog.DebugContext(ctx, "pseudonymizer: web_search server_tool_use left untouched",
 						slog.String("role", role),
 					)
@@ -631,6 +635,8 @@ func (p *Plugin) PreRequest(ctx context.Context, in *proto.PreRequestInput) (*pr
 	// found unpseudonymizable in content forwarded in clear (thinking, an
 	// excluded web_search query, an unrecognized part type), or a
 	// non-anonymizable attachment had to be removed.
+	leakEntities := len(leakValues)
+	leakTypeCounts := leakTypesOf(leakValues)
 	if len(session.Mapping) > 0 || len(removedParts) > 0 || leakEntities > 0 {
 		var parts []string
 		if len(session.Mapping) > 0 {
