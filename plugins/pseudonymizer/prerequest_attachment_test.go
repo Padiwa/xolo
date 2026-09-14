@@ -249,6 +249,92 @@ func TestPreRequest_AttachmentDisabledFallsBackToThePolicy(t *testing.T) {
 	}
 }
 
+// A part type the plugin does not recognize used to fall to the same default
+// as an attachment — read as a file, found to carry no inline bytes, and
+// refused or stripped. It carries no more inline bytes now than before, but
+// isAttachmentPart no longer claims it, so it is forwarded untouched instead
+// of being treated as an unreadable file.
+// THE REGRESSION BORNHOLM'S SECOND REVIEW ON #32 CAUGHT. input_audio genuinely
+// carries a human-supplied file (base64 in input_audio.data) — narrowing
+// default: to isAttachmentPart must not let it slip into the "unknown type,
+// forward untouched" bucket alongside tool and thinking blocks, or an
+// operator who set unsupported_attachments: block loses that protection
+// without a word.
+func TestPreRequest_InputAudioFollowsTheAttachmentPolicy(t *testing.T) {
+	cfg := attachmentConfig(t)
+	cfg.UnsupportedAttachments = "block"
+
+	out := preRequestWithParts(t, cfg, []any{
+		map[string]any{
+			"type": "input_audio",
+			"input_audio": map[string]any{
+				"data":   "UklGRiQAAABXQVZFZm10IBAAAAABAAEA",
+				"format": "wav",
+			},
+		},
+	})
+
+	if out.Allowed {
+		t.Fatalf("input_audio carries a real file and must follow unsupported_attachments, got Allowed=true")
+	}
+}
+
+// Same shape of bug for container_upload: a file already uploaded to the code
+// execution container by file_id, referenced but never inlined — a real
+// attachment, not a tool or thinking block.
+func TestPreRequest_ContainerUploadFollowsTheAttachmentPolicy(t *testing.T) {
+	cfg := attachmentConfig(t)
+	cfg.UnsupportedAttachments = "block"
+
+	out := preRequestWithParts(t, cfg, []any{
+		map[string]any{
+			"type":    "container_upload",
+			"file_id": "file_abc123",
+		},
+	})
+
+	if out.Allowed {
+		t.Fatalf("container_upload references a real file and must follow unsupported_attachments, got Allowed=true")
+	}
+}
+
+func TestPreRequest_UnrecognizedPartTypeIsLeftUntouched(t *testing.T) {
+	cfg := attachmentConfig(t)
+	cfg.UnsupportedAttachments = "block"
+
+	out := preRequestWithParts(t, cfg, []any{
+		map[string]any{
+			"type":  "some_future_provider_block",
+			"value": "peu importe",
+		},
+	})
+
+	if !out.Allowed {
+		t.Fatalf("an unrecognized part type must never refuse the request, got: %s", out.RejectionReason)
+	}
+	parts := userMessageParts(t, out)
+	if len(parts) != 1 {
+		t.Fatalf("expected the part kept as is, got %#v", parts)
+	}
+	part, ok := parts[0].(map[string]any)
+	if !ok || part["type"] != "some_future_provider_block" || part["value"] != "peu importe" {
+		t.Errorf("part was altered instead of forwarded as is: %#v", parts[0])
+	}
+}
+
+func TestIsAttachmentPart(t *testing.T) {
+	for _, partType := range []string{"file", "input_file", "input_image", "input_audio", "image_url", "document", "image", "container_upload"} {
+		if !isAttachmentPart(partType) {
+			t.Errorf("isAttachmentPart(%q) = false, want true", partType)
+		}
+	}
+	for _, partType := range []string{"text", "tool_use", "tool_result", "thinking", "redacted_thinking", "some_future_provider_block", ""} {
+		if isAttachmentPart(partType) {
+			t.Errorf("isAttachmentPart(%q) = true, want false", partType)
+		}
+	}
+}
+
 func TestPreRequest_AttachmentSharesPseudonymsWithTheMessage(t *testing.T) {
 	cfg := attachmentConfig(t)
 

@@ -4,12 +4,92 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+
+	"github.com/bornholm/go-anon/pkg/ner"
 )
 
 const (
+	// partTypeText is how the Messages and Chat Completions routes name a text
+	// part; partTypeInputText is the OpenAI Responses spelling of the same
+	// thing, carrying its text in the same `text` field.
+	partTypeText      = "text"
+	partTypeInputText = "input_text"
+
 	partTypeToolUse    = "tool_use"
 	partTypeToolResult = "tool_result"
+
+	// Server-side and MCP tools follow the same call/result shapes as a
+	// client-side tool_use/tool_result — only the type name differs.
+	partTypeServerToolUse       = "server_tool_use"
+	partTypeMCPToolUse          = "mcp_tool_use"
+	partTypeWebSearchToolResult = "web_search_tool_result"
+	partTypeMCPToolResult       = "mcp_tool_result"
+
+	// partTypeCodeExecutionToolResult is the legacy code execution tool's
+	// result type (code_execution_20250522 and earlier). Current tool
+	// versions (code_execution_20250825 and later) split it in two, neither
+	// of which is named "code_execution_tool_result":
+	// partTypeBashCodeExecutionToolResult covers running a command;
+	// text_editor_code_execution_tool_result covers file operations (view,
+	// create, str_replace) and is not handled here — its content shape
+	// differs by command and none of its fields are consistently free text,
+	// so isAttachmentPart returns false for it and it falls through to
+	// PreRequest's catch-all default:, which forwards it untouched (scanned
+	// read-only for visibility) rather than guessed at.
+	partTypeCodeExecutionToolResult     = "code_execution_tool_result"
+	partTypeBashCodeExecutionToolResult = "bash_code_execution_tool_result"
+
+	partTypeThinking         = "thinking"
+	partTypeRedactedThinking = "redacted_thinking"
 )
+
+// callShapedToolParts carries its payload in "input", correlated to its
+// result by "id".
+var callShapedToolParts = map[string]bool{
+	partTypeToolUse:       true,
+	partTypeServerToolUse: true,
+	partTypeMCPToolUse:    true,
+}
+
+// resultShapedToolParts carries its payload in "content", correlated to its
+// call by "tool_use_id", and actually gets that content rewritten.
+var resultShapedToolParts = map[string]bool{
+	partTypeToolResult:                  true,
+	partTypeCodeExecutionToolResult:     true,
+	partTypeBashCodeExecutionToolResult: true,
+	partTypeMCPToolResult:               true,
+}
+
+// passthroughToolParts are agent tool blocks recognized as such — so
+// isToolPart is true and they never reach the attachment path — but forwarded
+// byte for byte instead of rewritten.
+//
+// web_search_tool_result's content is a list of `web_search_result` blocks —
+// url, title, page_age, and an encrypted_content the API requires back
+// unchanged on the next turn, the same provider-signature contract as
+// encrypted `thinking` — or, on failure, a
+// {"type":"web_search_tool_result_error",...} object. Neither shape is a
+// `text` block, and the documentation asks for the assistant's content blocks
+// to round-trip as a whole rather than field by field, so even `title`, which
+// is free text, is not singled out for rewriting.
+//
+// PreRequest owns these: it intercepts them before anonymizeToolPart, which
+// has no way to scan what it forwards. They are listed apart from
+// resultShapedToolParts so that map's members are exactly the ones that take
+// the "content" rewrite path.
+var passthroughToolParts = map[string]bool{
+	partTypeWebSearchToolResult: true,
+}
+
+// codeExecutionResultTypes carries {type, stdout, stderr, return_code,
+// content} — or, on failure, {type, error_code} — as an object, not a list,
+// under both the legacy and the current bash tool. return_code must stay a
+// number and type/error_code are protocol enums, not user text; stdout and
+// stderr are the only free-text fields.
+var codeExecutionResultTypes = map[string]bool{
+	partTypeCodeExecutionToolResult:     true,
+	partTypeBashCodeExecutionToolResult: true,
+}
 
 // nonTextToolPayloadNotice replaces a tool payload the plugin cannot read.
 //
@@ -24,16 +104,33 @@ const (
 const nonTextToolPayloadNotice = "[non-textual content removed by the pseudonymizer]"
 
 // isToolPart reports whether a message part is an agent tool block rather than
-// a document attached by a human.
+// a document attached by a human — a client tool call/result, a server-side
+// tool (web search, code execution), or an MCP tool.
 //
-// The distinction matters because the two look alike to the attachment path —
-// neither carries inline file bytes — but they are not the same thing. A
+// The distinction matters because these look alike to the attachment path —
+// none carries inline file bytes — but they are not the same thing. A
 // `tool_result` is text the model itself asked for, which the pseudonymizer can
 // rewrite like any other message content. Treating it as an unreadable
 // attachment removes it, and an agent whose read tools return nothing keeps
 // working blind.
 func isToolPart(partType string) bool {
-	return partType == partTypeToolUse || partType == partTypeToolResult
+	return callShapedToolParts[partType] || resultShapedToolParts[partType] || passthroughToolParts[partType]
+}
+
+// isUnrewritableThinkingPart reports whether a message part is a `thinking` or
+// `redacted_thinking` block.
+//
+// Both are provider-signed: the model must receive the exact bytes it
+// produced on a later turn, or it rejects them as tampered. `redacted_thinking`
+// carries no plaintext at all — its `data` is an opaque encrypted blob. A
+// `thinking` block does carry readable text, but rewriting it invalidates the
+// `signature` field alongside it just as surely as touching the signature
+// itself would; there is no way to pseudonymize the visible half of a
+// signed pair. Such a block is passed through unmodified rather than routed to
+// the attachment path, which would refuse or strip it and break the
+// conversation for any client using extended thinking.
+func isUnrewritableThinkingPart(partType string) bool {
+	return partType == partTypeThinking || partType == partTypeRedactedThinking
 }
 
 // anonymizeToolPart returns a copy of an agent tool block with its textual
@@ -49,8 +146,8 @@ func anonymizeToolPart(part map[string]any, anonymize func(string) (string, erro
 	}
 
 	partType, _ := part["type"].(string)
-	switch partType {
-	case partTypeToolUse:
+	switch {
+	case callShapedToolParts[partType]:
 		// Only the arguments are rewritten. `id` and `name` correlate the call
 		// with its result: renaming them would break the pairing the model
 		// relies on to read its own history.
@@ -65,7 +162,7 @@ func anonymizeToolPart(part map[string]any, anonymize func(string) (string, erro
 		updated["input"] = walked
 		return updated, nil
 
-	case partTypeToolResult:
+	case resultShapedToolParts[partType]:
 		switch c := part["content"].(type) {
 		case nil:
 			return updated, nil
@@ -87,8 +184,37 @@ func anonymizeToolPart(part map[string]any, anonymize func(string) (string, erro
 			}
 			updated["content"] = out
 			return updated, nil
+		case map[string]any:
+			if !codeExecutionResultTypes[partType] {
+				// An object where the spec describes a list (a plain
+				// tool_result, say). Not a shape this switch knows how to
+				// read, so — same answer as the default case below — it is
+				// not forwarded either.
+				updated["content"] = nonTextToolPayloadNotice
+				return updated, nil
+			}
+			// Only stdout/stderr are free text, so only those are rewritten.
+			// Replacing the whole object with a string, as the default case
+			// below does, would itself violate the schema.
+			rewritten := make(map[string]any, len(c))
+			for k, v := range c {
+				rewritten[k] = v
+			}
+			for _, field := range []string{"stdout", "stderr"} {
+				text, ok := c[field].(string)
+				if !ok {
+					continue
+				}
+				anonText, err := anonymize(text)
+				if err != nil {
+					return nil, err
+				}
+				rewritten[field] = anonText
+			}
+			updated["content"] = rewritten
+			return updated, nil
 		default:
-			// An object, a number — not a shape the spec describes. It is not
+			// A bare number, bool — not a shape the spec describes. It is not
 			// read, so it is not forwarded either.
 			updated["content"] = nonTextToolPayloadNotice
 			return updated, nil
@@ -164,6 +290,77 @@ func rewriteLeaves(v any, rewrite func(string) (string, error)) (any, error) {
 		return out, nil
 	default:
 		return v, nil
+	}
+}
+
+// keepDetectedTypes drops from a Detect result the entity types the operator
+// disabled through `skip_types`.
+//
+// Detect does not do this itself: it returns the recognizer's raw output,
+// where Anonymize first filters on the EntityTypes the node fills in from
+// `skip_types`. Without the same filter on the read-only path, a disabled type
+// would be absent from `types` and present in `leak_types`, and the two
+// counters — which the event presents side by side — would be measuring
+// different sets.
+func keepDetectedTypes(entities []ner.Entity, skipTypes []string) []ner.Entity {
+	if len(skipTypes) == 0 || len(entities) == 0 {
+		return entities
+	}
+	skipped := make(map[string]bool, len(skipTypes))
+	for _, t := range skipTypes {
+		skipped[t] = true
+	}
+	kept := make([]ner.Entity, 0, len(entities))
+	for _, e := range entities {
+		if !skipped[string(e.Type)] {
+			kept = append(kept, e)
+		}
+	}
+	return kept
+}
+
+// detectLeaves walks a decoded JSON value read-only, running detect over
+// every string leaf and folding what it finds into counts, without rewriting
+// anything. It returns the total number of entities found.
+//
+// The counterpart to anonymizeLeaves for content this plugin forwards
+// unpseudonymized on purpose (a thinking block, an unrecognized part type):
+// there is no mapping to build and nothing to reuse a placeholder for, only
+// a leak an operator should not have to infer from a debug log.
+func detectLeaves(v any, detect func(string) ([]ner.Entity, error), counts map[string]int) (int, error) {
+	switch value := v.(type) {
+	case string:
+		if value == "" {
+			return 0, nil
+		}
+		entities, err := detect(value)
+		if err != nil {
+			return 0, err
+		}
+		countEntities(counts, entities)
+		return len(entities), nil
+	case map[string]any:
+		total := 0
+		for _, sub := range value {
+			n, err := detectLeaves(sub, detect, counts)
+			total += n
+			if err != nil {
+				return total, err
+			}
+		}
+		return total, nil
+	case []any:
+		total := 0
+		for _, sub := range value {
+			n, err := detectLeaves(sub, detect, counts)
+			total += n
+			if err != nil {
+				return total, err
+			}
+		}
+		return total, nil
+	default:
+		return 0, nil
 	}
 }
 

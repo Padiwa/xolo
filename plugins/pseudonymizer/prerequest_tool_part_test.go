@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/bornholm/go-anon/pkg/ner"
 )
 
 const toolPartSecret = "sophie.guerin@exemple.fr"
@@ -281,6 +283,59 @@ func TestAnonymizeToolPart_PropagatesAnonymizerFailure(t *testing.T) {
 				t.Errorf("expected the failure to travel up, got none")
 			}
 		})
+	}
+}
+
+func TestIsToolPart_RecognizesEveryCallAndResultShape(t *testing.T) {
+	for _, partType := range []string{
+		"tool_use", "tool_result",
+		"server_tool_use", "mcp_tool_use",
+		"web_search_tool_result", "code_execution_tool_result",
+		"bash_code_execution_tool_result", "mcp_tool_result",
+	} {
+		if !isToolPart(partType) {
+			t.Errorf("isToolPart(%q) = false, want true", partType)
+		}
+	}
+	for _, partType := range []string{"text", "document", "thinking", "redacted_thinking", ""} {
+		if isToolPart(partType) {
+			t.Errorf("isToolPart(%q) = true, want false", partType)
+		}
+	}
+}
+
+// Detect returns the recognizer's raw output where Anonymize filters on
+// EntityTypes first, so the read-only path has to reapply skip_types itself —
+// otherwise a type the operator disabled is absent from `types` and present in
+// `leak_types`, and the two counters stop measuring the same set.
+func TestKeepDetectedTypes_DropsSkippedTypes(t *testing.T) {
+	entities := []ner.Entity{{Type: "EMAIL"}, {Type: "PER"}, {Type: "EMAIL"}, {Type: "LOC"}}
+
+	kept := keepDetectedTypes(entities, []string{"EMAIL"})
+	if len(kept) != 2 {
+		t.Fatalf("len(kept) = %d, want 2: both EMAIL entities dropped", len(kept))
+	}
+	for _, e := range kept {
+		if e.Type == "EMAIL" {
+			t.Errorf("a skipped type survived the filter: %#v", kept)
+		}
+	}
+
+	if got := keepDetectedTypes(entities, nil); len(got) != len(entities) {
+		t.Errorf("no skip_types configured should keep everything, got %d of %d", len(got), len(entities))
+	}
+}
+
+func TestIsUnrewritableThinkingPart(t *testing.T) {
+	for _, partType := range []string{"thinking", "redacted_thinking"} {
+		if !isUnrewritableThinkingPart(partType) {
+			t.Errorf("isUnrewritableThinkingPart(%q) = false, want true", partType)
+		}
+	}
+	for _, partType := range []string{"text", "tool_use", "tool_result", ""} {
+		if isUnrewritableThinkingPart(partType) {
+			t.Errorf("isUnrewritableThinkingPart(%q) = true, want false", partType)
+		}
 	}
 }
 
