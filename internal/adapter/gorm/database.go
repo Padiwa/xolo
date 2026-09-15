@@ -270,6 +270,38 @@ func createGetDatabase(db *gorm.DB) func(ctx context.Context) (*gorm.DB, error) 
 						return errors.WithStack(tx.Migrator().DropIndex(&UsageRecord{}, "idx_usage_org_payg_cost"))
 					},
 				},
+				{
+					// Subscription counterpart of the index above: (org_id, provider_id,
+					// plan_covered, created_at, user_id) serves the fair-share allocator's
+					// plan-wide aggregations, the DISTINCT count of active users from the
+					// index alone. Without it that count, which runs on every proxy request
+					// of a subscription provider, scans every row of the org over the
+					// window and filters provider and plan afterwards.
+					ID: "202609150001",
+					Migrate: func(tx *gorm.DB) error {
+						return errors.WithStack(tx.AutoMigrate(&UsageRecord{}))
+					},
+					Rollback: func(tx *gorm.DB) error {
+						return errors.WithStack(tx.Migrator().DropIndex(&UsageRecord{}, "idx_usage_org_prov_plan"))
+					},
+				},
+				{
+					// (org_id, provider_id, plan_covered, user_id, created_at) for the
+					// per-user presence probe of the fair-share allocator. The index
+					// above puts user_id after the created_at range, so an equality on
+					// the caller cannot bound it and the probe would walk the window.
+					//
+					// Both indexes are tags on the same model, so the AutoMigrate of
+					// 202609150001 already creates this one on a database that skipped
+					// both. This entry exists so the index has a rollback of its own.
+					ID: "202609150002",
+					Migrate: func(tx *gorm.DB) error {
+						return errors.WithStack(tx.AutoMigrate(&UsageRecord{}))
+					},
+					Rollback: func(tx *gorm.DB) error {
+						return errors.WithStack(tx.Migrator().DropIndex(&UsageRecord{}, "idx_usage_org_prov_user"))
+					},
+				},
 			})
 
 			m.InitSchema(func(tx *gorm.DB) error {

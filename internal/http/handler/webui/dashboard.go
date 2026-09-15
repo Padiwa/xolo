@@ -15,6 +15,7 @@ import (
 	"github.com/xolo-gateway/xolo/internal/adapter/cache"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
+	"github.com/xolo-gateway/xolo/internal/core/service"
 	"github.com/xolo-gateway/xolo/internal/estimator"
 	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
 	common "github.com/xolo-gateway/xolo/internal/http/handler/webui/common/component"
@@ -566,9 +567,11 @@ func (h *Handler) serveUserUsageCSV(w http.ResponseWriter, r *http.Request, user
 }
 
 // buildDashboardSubscriptionUsage builds subscription plan consumption for one org,
-// scoped to a single user's personal fair-share: budgets and concurrency limits are
-// divided by the org member count, and usage figures reflect only this user. Window
-// timing (reset countdowns) is a window-level property and stays org-wide.
+// scoped to a single user's personal share, and usage figures reflect only this
+// user. Rolling-window budgets go through the same allocator as the enforcer, so
+// the denominators shown are the ones a request is actually decided against;
+// concurrency limits keep the static division by the member count. Window timing
+// (reset countdowns) is a window-level property and stays org-wide.
 func (h *Handler) buildDashboardSubscriptionUsage(ctx context.Context, orgID model.OrgID, userID model.UserID) []orgcomponent.SubscriptionProviderUsage {
 	providers, err := h.providerStore.ListProviders(ctx, orgID)
 	if err != nil {
@@ -604,7 +607,8 @@ func (h *Handler) buildDashboardSubscriptionUsage(ctx context.Context, orgID mod
 		}
 
 		for _, c := range plan.Constraints {
-			// Apply fair-share division to the constraint budgets shown as denominators.
+			// Fall back to the static share; rolling windows below replace it with
+			// the allowance the enforcer actually grants right now.
 			cu := orgcomponent.SubscriptionConstraintUsage{Constraint: fairShareConstraint(c, memberCount)}
 
 			switch c.Kind {
@@ -615,12 +619,35 @@ func (h *Handler) buildDashboardSubscriptionUsage(ctx context.Context, orgID mod
 					cu.WindowStart = since
 					cu.Anchored = c.IsAnchored()
 					cu.ResetAt = c.NextResetAt(now)
-					tokens, value, sumErr := h.usageStore.SumUserPlanUsageSince(ctx, userID, orgID, p.ID(), since)
-					if sumErr != nil {
-						slog.WarnContext(ctx, "could not sum user plan usage", slogx.Error(sumErr))
-					} else {
-						cu.TokensUsed = tokens
-						cu.ValueUsed = value
+					// Read the plan-wide totals once and hand them to the allocator,
+					// as the proxy hot path does: this page is rendered on every visit
+					// and a weekly window is the most expensive of them. Not read at
+					// all when the allocation will not apply — the aggregation would
+					// be paid for nothing.
+					var planUsage *service.PlanUsage
+					planUsageFailed := false
+					if fairShareApplies(h.fairShare, c, userID, memberCount) {
+						if planTokens, planValue, sumErr := h.usageStore.SumPlanUsageSince(ctx, orgID, p.ID(), since); sumErr != nil {
+							slog.WarnContext(ctx, "could not sum org plan usage", slogx.Error(sumErr))
+							planUsageFailed = true
+						} else {
+							planUsage = &service.PlanUsage{Tokens: planTokens, Value: planValue}
+						}
+					}
+					// Show the same denominators the enforcer decides against, so a
+					// varying allowance stays readable instead of looking arbitrary.
+					// The allocation reads this user's totals on the way, so they are
+					// taken from it rather than summed a second time.
+					// When the plan-wide sum already failed, the allocator would only
+					// run the same aggregation against the same struggling store.
+					if planUsageFailed || !applyFairShare(ctx, h.fairShare, &cu, c, orgID, p.ID(), userID, memberCount, now, planUsage) {
+						tokens, value, sumErr := h.usageStore.SumUserPlanUsageSince(ctx, userID, orgID, p.ID(), since)
+						if sumErr != nil {
+							slog.WarnContext(ctx, "could not sum user plan usage", slogx.Error(sumErr))
+						} else {
+							cu.TokensUsed = tokens
+							cu.ValueUsed = value
+						}
 					}
 					// Window free-up hint is a window-level property → org-wide oldest record.
 					if oldest, oldestErr := h.usageStore.EarliestPlanUsageSince(ctx, orgID, p.ID(), since); oldestErr != nil {
@@ -646,6 +673,68 @@ func (h *Handler) buildDashboardSubscriptionUsage(ctx context.Context, orgID mod
 	}
 
 	return result
+}
+
+// fairShareApplies reports whether a per-user allocation can be computed for a
+// constraint at all: there must be a budget to divide, a user to divide it for,
+// and a membership to divide it between. Shared by applyFairShare and by the
+// plan-wide read that feeds it, so neither runs when the other would give up.
+func fairShareApplies(fairShare *service.FairShareService, c model.PlanConstraint, userID model.UserID, memberCount int64) bool {
+	return fairShare != nil && memberCount > 0 && userID != "" && (c.TokenBudget != nil || c.ValueBudget != nil)
+}
+
+// applyFairShare replaces a constraint's budgets with the allowance the
+// subscription enforcer grants the viewer right now, and records how each was
+// produced. Any failure degrades to the static budget/members share, exactly as
+// the enforcer does — a dashboard promising more than the enforcer allows is
+// worse than one showing a conservative figure.
+func applyFairShare(
+	ctx context.Context,
+	fairShare *service.FairShareService,
+	cu *orgcomponent.SubscriptionConstraintUsage,
+	c model.PlanConstraint,
+	orgID model.OrgID,
+	providerID model.ProviderID,
+	userID model.UserID,
+	memberCount int64,
+	now time.Time,
+	planUsage *service.PlanUsage,
+) bool {
+	if !fairShareApplies(fairShare, c, userID, memberCount) {
+		return false
+	}
+
+	share, err := fairShare.Resolve(ctx, service.FairShareRequest{
+		OrgID:       orgID,
+		ProviderID:  providerID,
+		UserID:      userID,
+		MemberCount: int(memberCount),
+		Constraint:  c,
+		Now:         now,
+		PlanUsage:   planUsage,
+	})
+	if err != nil {
+		slog.WarnContext(ctx, "could not resolve fair-share denominators", slogx.Error(err))
+		return false
+	}
+
+	if share.TokenAllowance != nil {
+		c.TokenBudget = share.TokenAllowance
+	}
+	if share.ValueAllowance != nil {
+		c.ValueBudget = share.ValueAllowance
+	}
+
+	cu.Constraint = c
+	cu.TokensUsed = share.UserTokens
+	cu.ValueUsed = share.UserValue
+	cu.TokenMode = share.TokenMode
+	cu.ValueMode = share.ValueMode
+	cu.ActiveUsers = share.ActiveUsers
+	cu.MemberCount = int(memberCount)
+	cu.ShareDegraded = share.CountDegraded
+
+	return true
 }
 
 // fairShareConstraint returns a copy of the constraint whose budgets (token, value,

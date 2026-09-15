@@ -370,3 +370,108 @@ func scenarioUsageStorePlanUsage(t *testing.T, store *xologorm.Store) {
 		t.Errorf("expected a zero time outside the window, got %v", earliest)
 	}
 }
+
+func TestUsageStore_CountActivePlanUsers(t *testing.T) {
+	eachBackend(t, scenarioUsageStoreCountActivePlanUsers)
+}
+
+func scenarioUsageStoreCountActivePlanUsers(t *testing.T, store *xologorm.Store) {
+	ctx := context.Background()
+	f := usageFixture{
+		orgID:       model.NewOrgID(),
+		otherOrgID:  model.NewOrgID(),
+		userA:       model.NewUserID(),
+		userB:       model.NewUserID(),
+		appID:       model.NewApplicationID(),
+		providerID:  model.NewProviderID(),
+		otherProvID: model.NewProviderID(),
+		modelID:     model.NewLLMModelID(),
+	}
+
+	plan := func(user model.UserID, appID model.ApplicationID, orgID model.OrgID, providerID model.ProviderID) *model.BaseUsageRecord {
+		r := model.NewUsageRecord(user, appID, orgID, providerID, f.modelID,
+			"fast", "", 100, 10, 50, 0, "USD", model.CostSourceComputed, "")
+		r.SetPlanCovered(true)
+		r.SetProviderCost(100)
+		return r
+	}
+
+	records := []*model.BaseUsageRecord{
+		// Two records for the same user must count as one active user.
+		plan(f.userA, "", f.orgID, f.providerID),
+		plan(f.userA, "", f.orgID, f.providerID),
+		plan(f.userB, "", f.orgID, f.providerID),
+		// Application traffic has no user to share a budget with.
+		plan("", f.appID, f.orgID, f.providerID),
+		// Neither another provider nor another org may leak into the count.
+		plan(model.NewUserID(), "", f.orgID, f.otherProvID),
+		plan(model.NewUserID(), "", f.otherOrgID, f.providerID),
+	}
+	// PAYG traffic is not covered by the plan and must be ignored too.
+	records = append(records, model.NewUsageRecord(model.NewUserID(), "", f.orgID, f.providerID, f.modelID,
+		"fast", "", 100, 10, 50, 1_000, "USD", model.CostSourceComputed, ""))
+
+	for i, r := range records {
+		if err := store.RecordUsage(ctx, r); err != nil {
+			t.Fatalf("RecordUsage(%d): %v", i, err)
+		}
+	}
+
+	count, err := store.CountActivePlanUsersSince(ctx, f.orgID, f.providerID, time.Now().Add(-time.Hour), "")
+	if err != nil {
+		t.Fatalf("CountActivePlanUsersSince: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 active plan users, got %d", count)
+	}
+
+	// Excluding a user leaves the others: callers allocating for a user add them
+	// back themselves, which is exact whether or not they have consumed yet.
+	count, err = store.CountActivePlanUsersSince(ctx, f.orgID, f.providerID, time.Now().Add(-time.Hour), f.userA)
+	if err != nil {
+		t.Fatalf("CountActivePlanUsersSince (excluding userA): %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 active plan user once userA is excluded, got %d", count)
+	}
+
+	// Excluding a user who never consumed changes nothing.
+	count, err = store.CountActivePlanUsersSince(ctx, f.orgID, f.providerID, time.Now().Add(-time.Hour), model.NewUserID())
+	if err != nil {
+		t.Fatalf("CountActivePlanUsersSince (excluding a stranger): %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 active plan users, got %d", count)
+	}
+
+	// Presence is the per-caller half of the same question.
+	for _, tc := range []struct {
+		user model.UserID
+		want bool
+	}{
+		{f.userA, true},
+		{f.userB, true},
+		{model.NewUserID(), false},
+	} {
+		present, err := store.HasPlanUsageSince(ctx, tc.user, f.orgID, f.providerID, time.Now().Add(-time.Hour))
+		if err != nil {
+			t.Fatalf("HasPlanUsageSince(%s): %v", tc.user, err)
+		}
+		if present != tc.want {
+			t.Errorf("HasPlanUsageSince(%s) = %v, want %v", tc.user, present, tc.want)
+		}
+	}
+	// Another provider's usage does not make the user present on this one.
+	if present, err := store.HasPlanUsageSince(ctx, f.userA, f.orgID, f.otherProvID, time.Now().Add(-time.Hour)); err != nil || present {
+		t.Errorf("HasPlanUsageSince on the other provider = (%v, %v), want (false, nil)", present, err)
+	}
+
+	// Outside the window nobody is active.
+	count, err = store.CountActivePlanUsersSince(ctx, f.orgID, f.providerID, time.Now().Add(time.Hour), "")
+	if err != nil {
+		t.Fatalf("CountActivePlanUsersSince (future): %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected no active plan user outside the window, got %d", count)
+	}
+}

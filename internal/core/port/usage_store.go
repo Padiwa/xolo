@@ -24,6 +24,25 @@ type UsageStore interface {
 	// SumUserPlanUsageSince aggregates subscription-covered (plan_covered=true) usage for a specific
 	// user+provider+org since the given time. Used to enforce per-user fair-share rolling-window budgets.
 	SumUserPlanUsageSince(ctx context.Context, userID model.UserID, orgID model.OrgID, providerID model.ProviderID, since time.Time) (tokens int64, providerValue int64, err error)
+	// CountActivePlanUsersSince counts the distinct users who consumed
+	// subscription-covered (plan_covered=true) usage for a provider+org since the
+	// given time. It sizes the shared part of the per-user fair-share allocation,
+	// so that the plan budget left unused by quiet members is redistributed to the
+	// members actually competing for it. Requests without a user (application
+	// tokens) are not counted.
+	//
+	// excludeUserID, when set, is left out of the count. Callers allocating for a
+	// user add them back unconditionally, which is exact whether or not they have
+	// consumed yet — inferring their presence from a zero usage sum is not, since
+	// a request can be recorded with no billable token.
+	CountActivePlanUsersSince(ctx context.Context, orgID model.OrgID, providerID model.ProviderID, since time.Time, excludeUserID model.UserID) (int64, error)
+	// HasPlanUsageSince reports whether the user consumed subscription-covered
+	// (plan_covered=true) usage for a provider+org since the given time. It is a
+	// probe that stops at the first matching row, bounded to the caller's rows on
+	// the window by idx_usage_org_prov_user. The allocator uses it to tell whether
+	// the caller is already among the counted active users, so the expensive
+	// count itself can be shared by everyone on the plan.
+	HasPlanUsageSince(ctx context.Context, userID model.UserID, orgID model.OrgID, providerID model.ProviderID, since time.Time) (bool, error)
 	// EarliestPlanUsageSince returns the creation time of the oldest subscription-covered
 	// (plan_covered=true) usage record for a provider+org still inside the rolling window
 	// starting at `since`. Used to display when the window will next free up. Returns a zero

@@ -2,11 +2,15 @@ package component
 
 import (
 	"fmt"
+	"math"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	common "github.com/xolo-gateway/xolo/internal/http/handler/webui/common/component"
 	"github.com/xolo-gateway/xolo/internal/http/handler/webui/templui/component/button"
+	"github.com/xolo-gateway/xolo/internal/http/handler/webui/templui/component/collapsible"
 	"github.com/xolo-gateway/xolo/internal/http/handler/webui/templui/component/form"
 	"github.com/xolo-gateway/xolo/internal/http/handler/webui/templui/component/icon"
 	"github.com/xolo-gateway/xolo/internal/http/handler/webui/templui/component/input"
@@ -25,7 +29,14 @@ import (
 //   - plan_c{i}_token_budget         (number of tokens, empty = no limit)
 //   - plan_c{i}_value_budget         (dollars, empty = no limit)
 //   - plan_c{i}_max_concurrent       (integer, empty = no limit)
-templ SubscriptionPlanEditor(plan *model.SubscriptionPlan, readonly bool) {
+//   - plan_c{i}_reserve_ratio        (percent 0-100, empty = allocator default)
+//   - plan_c{i}_pace_slack           (percent 0-100, empty = allocator default)
+//   - plan_c{i}_happy_hour_start     (percent 1-100, empty = allocator default; 100 disables)
+//   - plan_c{i}_happy_hour_max_lead  (duration, e.g. "1h", "2d"; empty = allocator default)
+// submitted, when not nil, is the form as it was posted: the page is being
+// rendered back with an error, and every field shows what the operator typed —
+// the rejected value included — rather than what is stored.
+templ SubscriptionPlanEditor(plan *model.SubscriptionPlan, readonly bool, submitted url.Values) {
 	{{ constraints := []model.PlanConstraint(nil) }}
 	{{ planLabel := "" }}
 	if plan != nil {
@@ -55,7 +66,7 @@ templ SubscriptionPlanEditor(plan *model.SubscriptionPlan, readonly bool) {
 					data-rows-count="plan-constraint-count"
 				>
 					for i, c := range constraints {
-						@planConstraintRow(i, c, readonly)
+						@planConstraintRow(i, c, readonly, submitted)
 					}
 				</div>
 			</div>
@@ -78,14 +89,14 @@ templ SubscriptionPlanEditor(plan *model.SubscriptionPlan, readonly bool) {
 	// des noms à trou (plan_c{i}_kind, …) que la renumérotation réécrit.
 	if !readonly {
 		<template id="plan-constraint-tpl">
-			@planConstraintRow(-1, model.PlanConstraint{}, false)
+			@planConstraintRow(-1, model.PlanConstraint{}, false, nil)
 		</template>
 	}
 }
 
 // planConstraintRow renders one constraint entry.
 // idx = -1 → template row; names use placeholder "{i}" replaced by JS.
-templ planConstraintRow(idx int, c model.PlanConstraint, readonly bool) {
+templ planConstraintRow(idx int, c model.PlanConstraint, readonly bool, submitted url.Values) {
 	{{ idxKey := fmt.Sprintf("%d", idx) }}
 	if idx == -1 {
 		{{ idxKey = "{i}" }}
@@ -97,31 +108,49 @@ templ planConstraintRow(idx int, c model.PlanConstraint, readonly bool) {
 	{{ tokenBudgetName := "plan_c" + idxKey + "_token_budget" }}
 	{{ valueBudgetName := "plan_c" + idxKey + "_value_budget" }}
 	{{ maxConcName := "plan_c" + idxKey + "_max_concurrent" }}
+	{{ reserveName := "plan_c" + idxKey + "_reserve_ratio" }}
+	{{ paceSlackName := "plan_c" + idxKey + "_pace_slack" }}
+	{{ happyStartName := "plan_c" + idxKey + "_happy_hour_start" }}
+	{{ happyLeadName := "plan_c" + idxKey + "_happy_hour_max_lead" }}
 	// Duration value: empty string when zero (template row or unset).
 	{{ durStr := "" }}
 	if c.Duration > 0 {
 		{{ durStr = c.Duration.Duration().String() }}
 	}
+	{{ durStr = submittedOr(submitted, durationName, durStr) }}
 	// Reset countdown value: rendered from the anchor so re-saving is idempotent.
 	{{ resetInStr := "" }}
 	if c.IsAnchored() {
 		{{ resetInStr = formatResetIn(time.Until(c.NextResetAt(time.Now()))) }}
 	}
+	{{ resetInStr = submittedOr(submitted, resetInName, resetInStr) }}
 	// Token budget: display as raw integer.
 	{{ tokenBudgetStr := "" }}
 	if c.TokenBudget != nil {
 		{{ tokenBudgetStr = fmt.Sprintf("%d", *c.TokenBudget) }}
 	}
+	{{ tokenBudgetStr = submittedOr(submitted, tokenBudgetName, tokenBudgetStr) }}
 	// Value budget: display as dollars (microcents / 1_000_000).
 	{{ valueBudgetStr := "" }}
 	if c.ValueBudget != nil {
 		{{ valueBudgetStr = formatBudgetField(*c.ValueBudget) }}
 	}
+	{{ valueBudgetStr = submittedOr(submitted, valueBudgetName, valueBudgetStr) }}
+	// Fair-share tuning: ratios are edited as percentages, empty meaning "default".
+	{{ reserveStr := submittedOr(submitted, reserveName, formatRatioField(c.ReserveRatio)) }}
+	{{ paceSlackStr := submittedOr(submitted, paceSlackName, formatRatioField(c.PaceSlack)) }}
+	{{ happyStartStr := submittedOr(submitted, happyStartName, formatRatioField(c.HappyHourStart)) }}
+	{{ happyLeadStr := "" }}
+	if c.HappyHourMaxLead != nil {
+		{{ happyLeadStr = c.HappyHourMaxLead.Duration().String() }}
+	}
+	{{ happyLeadStr = submittedOr(submitted, happyLeadName, happyLeadStr) }}
 	// Max concurrent: display as integer.
 	{{ maxConcStr := "" }}
 	if c.MaxConcurrent != nil {
 		{{ maxConcStr = fmt.Sprintf("%d", *c.MaxConcurrent) }}
 	}
+	{{ maxConcStr = submittedOr(submitted, maxConcName, maxConcStr) }}
 	// rolling_window visible by default if kind matches (hidden for template row where kind is empty).
 	{{ showRolling := c.Kind == model.ConstraintRollingWindow }}
 	{{ showConcurrency := c.Kind == model.ConstraintConcurrency }}
@@ -261,6 +290,102 @@ templ planConstraintRow(idx int, c model.PlanConstraint, readonly bool) {
 					})
 				</div>
 			</div>
+			// ── Fair-share tuning ──────────────────────────────────────────
+			// Left empty these keep the defaults; they are here because a plan whose
+			// shape differs from the usual one (a handful of heavy users, a weekly
+			// window) is tuned per provider, not per deployment.
+			// collapsible plutôt qu'accordion : accordion.Item rend un
+			// <details name="accordion"> dont le nom est écrit en dur, et des
+			// <details> de même nom forment un groupe exclusif à l'échelle du
+			// document — ouvrir les réglages d'une contrainte fermerait ceux de
+			// toutes les autres. Le JS de collapsible ne travaille que par
+			// délégation et closest(), jamais par identifiant, donc une ligne
+			// clonée depuis le <template> ci-dessus reste autonome.
+			@collapsible.Collapsible(collapsible.Props{
+				Class: "rounded-md border bg-background p-3",
+				// Sans ID explicite, le composant s'en tire un au rendu : la ligne
+				// modèle n'étant rendue qu'une fois, chaque ligne ajoutée clonerait
+				// le même. L'identifiant est donc dérivé de l'index et renuméroté
+				// par le module de lignes répétables, comme les noms de champs.
+				ID:         "plan_c" + idxKey + "_fairshare",
+				Attributes: templ.Attributes{"data-xolo-id": "plan_c{i}_fairshare"},
+			}) {
+				@collapsible.Trigger(collapsible.TriggerProps{Class: "cursor-pointer text-sm font-medium"}) {
+					Répartition entre utilisateurs (optionnel)
+				}
+				@collapsible.Content(collapsible.ContentProps{Class: "pt-3"}) {
+					<div class="space-y-3">
+						@form.Description() {
+							La part de chaque utilisateur est un plancher garanti à tous les membres, plus le reste réparti entre les seuls utilisateurs actifs de la fenêtre. Laisser vide pour les valeurs par défaut.
+						}
+						<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+							<div class="space-y-1">
+								@form.Label() {
+									Réserve garantie (%, défaut 30)
+								}
+								@form.Description() {
+									Part du budget réservée à parts égales entre tous les membres, y compris ceux qui ne consomment pas.
+								}
+								@input.Input(input.Props{
+									Name:        reserveName,
+									Type:        input.TypeNumber,
+									Value:       reserveStr,
+									Placeholder: "30",
+									Disabled:    readonly,
+									Attributes:  templ.Attributes{"data-xolo-name": "plan_c{i}_reserve_ratio", "min": "0", "max": "100", "step": "any"},
+								})
+							</div>
+							<div class="space-y-1">
+								@form.Label() {
+									Tolérance de rythme (%, défaut 15)
+								}
+								@form.Description() {
+									Avance de consommation tolérée sur l'écoulement de la fenêtre avant que les parts ne se resserrent.
+								}
+								@input.Input(input.Props{
+									Name:        paceSlackName,
+									Type:        input.TypeNumber,
+									Value:       paceSlackStr,
+									Placeholder: "15",
+									Disabled:    readonly,
+									Attributes:  templ.Attributes{"data-xolo-name": "plan_c{i}_pace_slack", "min": "0", "max": "100", "step": "any"},
+								})
+							</div>
+							<div class="space-y-1">
+								@form.Label() {
+									Ouverture de fin de fenêtre (%, défaut 90)
+								}
+								@form.Description() {
+									Fraction de la fenêtre au-delà de laquelle le reliquat, qui serait perdu au reset, est réparti entre les actifs. 100 désactive l'ouverture.
+								}
+								@input.Input(input.Props{
+									Name:        happyStartName,
+									Type:        input.TypeNumber,
+									Value:       happyStartStr,
+									Placeholder: "90",
+									Disabled:    readonly,
+									Attributes:  templ.Attributes{"data-xolo-name": "plan_c{i}_happy_hour_start", "min": "1", "max": "100", "step": "any"},
+								})
+							</div>
+							<div class="space-y-1">
+								@form.Label() {
+									Avance maximale de l'ouverture (défaut : 5 % de la fenêtre, entre 30 min et 4 h)
+								}
+								@form.Description() {
+									Borne absolue : sur une fenêtre longue, la fraction ci-dessus ouvrirait des heures avant le reset. Une fenêtre de 5 h s'ouvre 30 min avant, une fenêtre hebdomadaire 4 h avant.
+								}
+								@input.Input(input.Props{
+									Name:        happyLeadName,
+									Value:       happyLeadStr,
+									Placeholder: "ex : 1h, 2d",
+									Disabled:    readonly,
+									Attributes:  templ.Attributes{"data-xolo-name": "plan_c{i}_happy_hour_max_lead"},
+								})
+							</div>
+						</div>
+					</div>
+				}
+			}
 		</div>
 		// ── Concurrency fields ─────────────────────────────────────────────
 		<div
@@ -281,6 +406,36 @@ templ planConstraintRow(idx int, c model.PlanConstraint, readonly bool) {
 			})
 		</div>
 	</div>
+}
+
+// submittedOr returns the value the operator posted for a field, falling back
+// to the stored one. Only a form rendered back with an error carries submitted
+// values; a rejected value is then shown as typed, so the operator sees what
+// was refused instead of an empty field.
+func submittedOr(submitted url.Values, name, stored string) string {
+	if submitted == nil {
+		return stored
+	}
+	if _, ok := submitted[name]; !ok {
+		return stored
+	}
+	return submitted.Get(name)
+}
+
+// formatRatioField renders a stored fraction as the percentage the form edits,
+// trimming the trailing ".0" of whole values. Empty means "use the default".
+func formatRatioField(ratio *float64) string {
+	if ratio == nil {
+		return ""
+	}
+	// Rounded first: the stored fraction times 100 is not exact in float64 for a
+	// handful of whole percentages (7, 14, 28, 29, 55…), and "7.000000000000001"
+	// in the field is the display/engine gap the rest of this form removes.
+	pct := math.Round(*ratio*100*1e6) / 1e6
+	if pct == math.Trunc(pct) {
+		return fmt.Sprintf("%d", int(pct))
+	}
+	return strconv.FormatFloat(pct, 'f', -1, 64)
 }
 
 // formatResetIn renders a remaining duration in a compact, parseable form ("4d13h29m",

@@ -9,6 +9,7 @@ import (
 	genaiProxy "github.com/bornholm/genai/proxy"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
+	"github.com/xolo-gateway/xolo/internal/core/service"
 	"github.com/pkg/errors"
 )
 
@@ -29,6 +30,7 @@ type XoloSubscriptionEnforcer struct {
 func NewXoloSubscriptionEnforcer(
 	providerStore port.ProviderStore,
 	usageStore port.UsageStore,
+	fairShare *service.FairShareService,
 	state *SubscriptionStateDetailed,
 	orgStore port.OrgStore,
 ) *XoloSubscriptionEnforcer {
@@ -37,7 +39,7 @@ func NewXoloSubscriptionEnforcer(
 		orgStore:      orgStore,
 		state:         state,
 		evaluators: map[model.PlanConstraintKind]constraintEvaluator{
-			model.ConstraintRollingWindow: &rollingWindowEvaluator{usageStore: usageStore},
+			model.ConstraintRollingWindow: newRollingWindowEvaluator(usageStore, fairShare),
 			model.ConstraintConcurrency:   &concurrencyEvaluator{state: state},
 		},
 	}
@@ -87,6 +89,7 @@ func (e *XoloSubscriptionEnforcer) PreRequest(ctx context.Context, req *genaiPro
 		ProviderID:  p.ID(),
 		UserID:      userID,
 		MemberCount: memberCount,
+		Currency:    p.Currency(),
 	}
 
 	// Check cooldowns first (fast path, no DB).

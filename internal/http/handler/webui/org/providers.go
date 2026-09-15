@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"reflect"
 	"strconv"
@@ -13,13 +14,13 @@ import (
 	"github.com/a-h/templ"
 	"github.com/bornholm/genai/llm/provider"
 	"github.com/bornholm/go-x/slogx"
+	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
 	"github.com/xolo-gateway/xolo/internal/crypto"
 	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
 	common "github.com/xolo-gateway/xolo/internal/http/handler/webui/common/component"
 	"github.com/xolo-gateway/xolo/internal/http/handler/webui/org/component"
-	"github.com/pkg/errors"
 
 	_ "github.com/bornholm/genai/llm/provider/mistral"
 	_ "github.com/bornholm/genai/llm/provider/openai"
@@ -140,9 +141,9 @@ func (h *Handler) createProvider(w http.ResponseWriter, r *http.Request) {
 	p := model.NewProvider(org.ID(), r.FormValue("name"), r.FormValue("provider_type"), strings.TrimSpace(r.FormValue("base_url")), encryptedKey, r.FormValue("currency"))
 	p.SetCloudTier(cloudTier)
 	p.SetBillingMode(billingMode)
-	if billingMode == model.BillingModeSubscription {
-		p.SetSubscriptionPlan(parseSubscriptionPlanFromForm(r))
-	}
+	// The creation form does not render the plan editor (see provider_form.templ,
+	// which shows it under !IsNew only), so no plan field is ever posted here:
+	// a subscription provider is created without a plan and gets one on edit.
 	if err := h.providerStore.CreateProvider(ctx, p); err != nil {
 		slog.ErrorContext(ctx, "could not create provider", slogx.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -238,18 +239,45 @@ func (h *Handler) updateProvider(w http.ResponseWriter, r *http.Request) {
 		currency = existing.Currency()
 	}
 
+	billingMode := model.BillingMode(r.FormValue("billing_mode"))
+	if billingMode != model.BillingModeSubscription {
+		billingMode = model.BillingModePayg
+	}
+
+	// The plan is parsed before the other validations so that every error path
+	// below renders the form on the plan as typed. Only the plan block makes
+	// that round trip: the retry and rate-limit sections are rendered from the
+	// stored configuration on every error path, as they always were. Parsing
+	// the plan first at least keeps the plan itself whole when one of those
+	// sections is what fails.
+	var subscriptionPlan *model.SubscriptionPlan
+	if billingMode == model.BillingModeSubscription {
+		plan, err := parseSubscriptionPlanFromForm(r)
+		if err != nil {
+			h.renderProviderFormError(w, r, ctx, user, orgSlug, org,
+				providerWithPlan{Provider: existing, billingMode: billingMode, plan: plan}, false,
+				"Forfait : "+err.Error()+".")
+			return
+		}
+		subscriptionPlan = plan
+	}
+	formProvider := providerWithPlan{Provider: existing, billingMode: billingMode, plan: subscriptionPlan}
+	if billingMode != model.BillingModeSubscription {
+		formProvider.plan = existing.SubscriptionPlan()
+	}
+
 	// --- Retry config ---
 	var retryConfig *model.RetryConfig
 	if r.FormValue("retry_enabled") == "on" {
 		delay, err := parseDurationField(r, "retry_delay_value", "retry_delay_unit")
 		if err != nil || delay <= 0 {
-			h.renderProviderFormError(w, r, ctx, user, orgSlug, org, existing, false,
+			h.renderProviderFormError(w, r, ctx, user, orgSlug, org, formProvider, false,
 				"Retry : le délai doit être un entier strictement positif.")
 			return
 		}
 		attempts, _ := strconv.Atoi(r.FormValue("retry_max_attempts"))
 		if attempts < 1 {
-			h.renderProviderFormError(w, r, ctx, user, orgSlug, org, existing, false,
+			h.renderProviderFormError(w, r, ctx, user, orgSlug, org, formProvider, false,
 				"Retry : le nombre de tentatives doit être ≥ 1.")
 			return
 		}
@@ -265,13 +293,13 @@ func (h *Handler) updateProvider(w http.ResponseWriter, r *http.Request) {
 	if r.FormValue("rate_limit_enabled") == "on" {
 		interval, err := parseDurationField(r, "rate_limit_interval_value", "rate_limit_interval_unit")
 		if err != nil || interval <= 0 {
-			h.renderProviderFormError(w, r, ctx, user, orgSlug, org, existing, false,
+			h.renderProviderFormError(w, r, ctx, user, orgSlug, org, formProvider, false,
 				"Rate limit : l'intervalle doit être un entier strictement positif.")
 			return
 		}
 		burst, _ := strconv.Atoi(r.FormValue("rate_limit_max_burst"))
 		if burst < 1 {
-			h.renderProviderFormError(w, r, ctx, user, orgSlug, org, existing, false,
+			h.renderProviderFormError(w, r, ctx, user, orgSlug, org, formProvider, false,
 				"Rate limit : la capacité de burst doit être ≥ 1.")
 			return
 		}
@@ -283,15 +311,6 @@ func (h *Handler) updateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cloudTier, _ := strconv.Atoi(r.FormValue("cloud_tier"))
-	billingMode := model.BillingMode(r.FormValue("billing_mode"))
-	if billingMode != model.BillingModeSubscription {
-		billingMode = model.BillingModePayg
-	}
-	var subscriptionPlan *model.SubscriptionPlan
-	if billingMode == model.BillingModeSubscription {
-		subscriptionPlan = parseSubscriptionPlanFromForm(r)
-	}
-
 	updated := &updatedProviderAdapter{
 		id:               existing.ID(),
 		orgID:            existing.OrgID(),
@@ -518,20 +537,60 @@ func parseActiveParamsField(v string) int64 {
 	return int64(f * 1e9)
 }
 
+// parsePlanRatioField reads one of the fair-share percentages. The stored form is
+// a fraction, the edited one a percentage.
+//
+// An empty field clears the setting, so the allocator applies its default. An
+// unusable one (a typo, a value out of range) is an error rather than a silent
+// fallback: the form is the only writer of a plan, so reading "30 %" as "unset"
+// would erase a setting the operator had deliberately made, and tell them
+// nothing about it.
+func parsePlanRatioField(value string) (*float64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	pct, err := strconv.ParseFloat(value, 64)
+	// ParseFloat accepts "NaN", and NaN is neither < 0 nor > 100: without the
+	// explicit check it would pass the range test, be stored on the constraint,
+	// and fail the whole provider save inside json.Marshal with a bare 500.
+	if err != nil || math.IsNaN(pct) || pct < 0 || pct > 100 {
+		return nil, errors.Errorf("valeur attendue entre 0 et 100, reçu %q", value)
+	}
+	fraction := pct / 100
+	return &fraction, nil
+}
+
 // parseSubscriptionPlanFromForm reads the structured subscription plan fields
-// submitted by the SubscriptionPlanEditor component.
-func parseSubscriptionPlanFromForm(r *http.Request) *model.SubscriptionPlan {
+// submitted by the SubscriptionPlanEditor component. It returns an error the
+// caller is expected to show, rather than dropping a field it cannot read: a
+// tuning value that silently reverts to its default is a setting the operator
+// believes they made.
+// It returns the whole plan alongside the error — every constraint, readable
+// fields filled in — so the caller can re-render the form on what the operator
+// actually typed instead of on what is stored: losing a plan to one mistyped
+// percentage is its own defect.
+func parseSubscriptionPlanFromForm(r *http.Request) (*model.SubscriptionPlan, error) {
 	label := strings.TrimSpace(r.FormValue("plan_label"))
 	countStr := r.FormValue("plan_constraint_count")
 	if countStr == "" {
-		return nil
+		return nil, nil
 	}
 	count, _ := strconv.Atoi(countStr)
 	if count <= 0 && label == "" {
-		return nil
+		return nil, nil
 	}
 
 	constraints := make([]model.PlanConstraint, 0, count)
+	// The first unreadable field is reported, but parsing carries on: the plan
+	// handed back with the error must hold every constraint the operator typed,
+	// or one typo on the first row would wipe the rows below it off the screen.
+	var firstErr error
+	fail := func(err error) {
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
 	for i := range count {
 		prefix := fmt.Sprintf("plan_c%d_", i)
 		kind := model.PlanConstraintKind(r.FormValue(prefix + "kind"))
@@ -559,6 +618,36 @@ func parseSubscriptionPlanFromForm(r *http.Request) *model.SubscriptionPlan {
 			if anchor := computeWindowAnchor(r.FormValue(prefix+"reset_in"), c.Duration.Duration()); anchor != nil {
 				c.WindowAnchor = anchor
 			}
+			// Fair-share tuning. Left empty, each keeps the allocator's default:
+			// the form is the only writer of a plan, so a field it does not read is
+			// a field the next save silently erases.
+			var err error
+			if c.ReserveRatio, err = parsePlanRatioField(r.FormValue(prefix + "reserve_ratio")); err != nil {
+				fail(errors.Wrapf(err, "contrainte « %s » : réserve garantie", c.Label))
+			}
+			if c.PaceSlack, err = parsePlanRatioField(r.FormValue(prefix + "pace_slack")); err != nil {
+				fail(errors.Wrapf(err, "contrainte « %s » : tolérance de rythme", c.Label))
+			}
+			if c.HappyHourStart, err = parsePlanRatioField(r.FormValue(prefix + "happy_hour_start")); err != nil {
+				fail(errors.Wrapf(err, "contrainte « %s » : ouverture de fin de fenêtre", c.Label))
+			}
+			// 0 % ouvrirait la fenêtre entière, ce que l'allocateur refuse de faire :
+			// il retomberait sur son défaut, et l'éditeur réafficherait un réglage
+			// que le moteur n'applique pas. C'est 100 qui désactive l'ouverture.
+			if c.HappyHourStart != nil && *c.HappyHourStart <= 0 {
+				fail(errors.Errorf("contrainte « %s » : l'ouverture de fin de fenêtre doit être strictement supérieure à 0 (100 désactive l'ouverture)", c.Label))
+			}
+			if lead := strings.TrimSpace(r.FormValue(prefix + "happy_hour_max_lead")); lead != "" {
+				// Same parser as the "reset dans" field above: a form that accepts
+				// "4d13h" in one duration field and refuses "1d" in the next is a
+				// trap, and a weekly window makes days the natural unit.
+				if d, ok := parseResetIn(lead); ok && d > 0 {
+					pd := model.PlanDuration(d)
+					c.HappyHourMaxLead = &pd
+				} else {
+					fail(errors.Errorf("contrainte « %s » : l'avance maximale de l'ouverture doit être une durée positive (ex : 1h, 2d)", c.Label))
+				}
+			}
 		case model.ConstraintConcurrency:
 			if mc, err := strconv.Atoi(r.FormValue(prefix + "max_concurrent")); err == nil && mc > 0 {
 				c.MaxConcurrent = &mc
@@ -568,9 +657,9 @@ func parseSubscriptionPlanFromForm(r *http.Request) *model.SubscriptionPlan {
 	}
 
 	if label == "" && len(constraints) == 0 {
-		return nil
+		return nil, nil
 	}
-	return &model.SubscriptionPlan{Label: label, Constraints: constraints}
+	return &model.SubscriptionPlan{Label: label, Constraints: constraints}, firstErr
 }
 
 // computeWindowAnchor turns a "reset dans" countdown (e.g. "4h29m", "4d13h") into an
@@ -984,10 +1073,11 @@ func (h *Handler) renderModelFormError(w http.ResponseWriter, r *http.Request, c
 
 func (h *Handler) renderProviderFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, p model.Provider, isNew bool, errMsg string) {
 	vmodel := component.ProviderFormVModel{
-		Org:      org,
-		Provider: p,
-		IsNew:    isNew,
-		Error:    errMsg,
+		Org:       org,
+		Provider:  p,
+		IsNew:     isNew,
+		Error:     errMsg,
+		Submitted: r.Form,
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
 			SelectedItem: "org-" + orgSlug + "-providers",
@@ -1005,6 +1095,20 @@ func (h *Handler) renderProviderFormError(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusUnprocessableEntity)
 	templ.Handler(component.ProviderForm(vmodel)).ServeHTTP(w, r)
 }
+
+// providerWithPlan renders a stored provider carrying the billing mode and the
+// subscription plan just submitted, when the form comes back in error. The mode
+// matters as much as the plan: a provider being switched from PAYG to
+// subscription would otherwise come back as PAYG, without the plan editor, and
+// be saved as PAYG on resubmit with the typed plan never read.
+type providerWithPlan struct {
+	model.Provider
+	billingMode model.BillingMode
+	plan        *model.SubscriptionPlan
+}
+
+func (p providerWithPlan) BillingMode() model.BillingMode            { return p.billingMode }
+func (p providerWithPlan) SubscriptionPlan() *model.SubscriptionPlan { return p.plan }
 
 func (h *Handler) deleteModel(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()

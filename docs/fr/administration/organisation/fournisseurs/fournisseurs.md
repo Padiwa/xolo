@@ -51,6 +51,81 @@ Adaptez l'hôte et le port à votre déploiement. Pour l'estimation énergétiqu
 
 Après avoir créé un fournisseur, utilisez le bouton **Tester la connexion** pour vérifier que Xolo peut communiquer avec le fournisseur.
 
+## Fournisseurs en abonnement : plan et répartition
+
+Un fournisseur en mode **Abonnement** ne facture pas à l'usage : il vend un volume
+global (des tokens, ou une valeur exprimée dans la devise du fournisseur) pour
+toute l'organisation, sur une fenêtre qui se réinitialise. Le plan décrit ces
+limites sous forme de **contraintes**.
+
+### Contraintes
+
+| Type                     | Champs                                           | Rôle                                                              |
+| ------------------------ | ------------------------------------------------ | ----------------------------------------------------------------- |
+| **Fenêtre glissante**    | Durée, budget tokens, budget valeur              | Volume consommable sur les N dernières heures                     |
+| **Fenêtre fixe**         | Idem + « Reset dans »                            | Idem, mais alignée sur l'heure de réinitialisation du fournisseur |
+| **Concurrence**          | Nombre max de requêtes simultanées               | Requêtes en vol autorisées en même temps                          |
+
+Le champ « Reset dans » se recopie depuis l'écran du fournisseur (par exemple
+`4h29m`) : Xolo le convertit en un ancrage absolu, de sorte que ses fenêtres
+coïncident avec les réinitialisations réelles du forfait.
+
+### Répartition entre utilisateurs
+
+Le budget est commun, mais un utilisateur ne peut pas le consommer en entier. Sa
+part se compose de deux termes :
+
+- un **plancher garanti**, réparti à parts égales entre tous les membres de
+  l'organisation, qu'ils consomment ou non : c'est ce qui protège un utilisateur
+  occasionnel de ceux qui consomment beaucoup. C'est une réservation, non une
+  simple part : la portion commune est plafonnée par ce qui reste réellement
+  distribuable une fois les planchers des absents mis de côté, de sorte qu'un
+  membre arrivant tard dans la fenêtre y retrouve bien sa part. Ce plancher vaut,
+  par défaut, 30 % de l'ancienne part fixe `budget / membres` : il est plus bas
+  que ce que l'ancienne règle garantissait, en échange d'une part nominale bien
+  plus large dès que des membres restent inactifs. Relever la réserve remonte le
+  plancher, mais reprend directement sur la portion commune ;
+- le **reste du budget**, réparti entre les seuls utilisateurs **actifs dans la
+  fenêtre**. Sur une organisation de vingt personnes dont trois utilisent
+  réellement le forfait, chacune de ces trois dispose ainsi d'environ un quart du
+  plan, au lieu d'un vingtième.
+
+Deux mécanismes complètent cette répartition :
+
+- le **rythme** : tant que la consommation globale reste en phase avec
+  l'écoulement de la fenêtre, la part commune est pleinement ouverte ; si le
+  forfait se consomme plus vite que la fenêtre ne s'écoule, les parts se
+  resserrent progressivement vers le plancher garanti, puis se rouvrent quand la
+  consommation rejoint son rythme ;
+- l'**ouverture de fin de fenêtre** : dans les derniers instants avant la
+  réinitialisation, le reliquat serait détruit ; il est alors réparti entre les
+  utilisateurs actifs plutôt que réservé aux membres absents. Cette ouverture ne
+  peut qu'élargir une part : si la répartition du reliquat donnait moins que la
+  part courante, c'est la part courante qui s'applique.
+
+Ces quatre réglages sont facultatifs et se trouvent sous « Répartition entre
+utilisateurs » dans le formulaire de la contrainte. Laissés vides, ils prennent
+leurs valeurs par défaut.
+
+| Réglage                            | Défaut | Effet                                                                                        |
+| ---------------------------------- | ------ | -------------------------------------------------------------------------------------------- |
+| **Réserve garantie**               | 30 %   | Part du budget réservée à parts égales entre tous les membres                                 |
+| **Tolérance de rythme**            | 15 %   | Avance de consommation tolérée avant que les parts ne se resserrent                           |
+| **Ouverture de fin de fenêtre**    | 90 %   | Fraction de la fenêtre au-delà de laquelle le reliquat est réparti entre les actifs ; 100 désactive |
+| **Avance maximale de l'ouverture** | 5 % de la fenêtre, entre 30 min et 4 h | Borne absolue de cette ouverture : 30 min avant le reset d'une fenêtre de 5 h, 4 h avant celui d'une fenêtre hebdomadaire |
+
+Une valeur illisible ou hors bornes est refusée à l'enregistrement, avec un
+message nommant la contrainte concernée : un réglage affiché doit être celui que
+le moteur applique. L'ouverture de fin de fenêtre doit être strictement
+supérieure à 0. C'est 100 qui la désactive.
+
+La part d'un utilisateur dépend du nombre d'utilisateurs actifs au moment de la
+requête : elle peut donc varier au cours d'une même fenêtre, à la hausse comme à
+la baisse. Le tableau de bord affiche, sous chaque jauge d'abonnement, le nombre
+d'utilisateurs actifs sur lequel la part a été calculée, ainsi qu'une mention
+lorsque le rythme resserre la part, lorsque le forfait déjà consommé par les
+autres la plafonne, ou lorsque la fin de fenêtre l'élargit.
+
 ## Configurer la résilience
 
 Dans les paramètres avancés du fournisseur :
