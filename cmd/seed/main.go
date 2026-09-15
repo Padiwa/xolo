@@ -1,5 +1,8 @@
-// Command seed generates a Xolo SQLite database populated with fake but
-// coherent data, meant to be used as a fixture for end-to-end tests.
+// Command seed generates a Xolo database populated with fake but coherent
+// data, meant to be used as a fixture for end-to-end tests and load campaigns.
+//
+// The backend follows the DSN: a "postgres://" URL (or a libpq keyword string)
+// targets PostgreSQL, anything else is a SQLite file path.
 //
 // The generated dataset is fully deterministic: identifiers, API token values
 // and the usage history are derived from a fixed seed, so E2E assertions can
@@ -8,6 +11,7 @@
 // Usage:
 //
 //	go run ./cmd/seed -dsn e2e.sqlite -force
+//	go run ./cmd/seed -dsn 'postgres://xolo:xolo@localhost:5432/xolo?sslmode=disable' -force
 //	XOLO_STORAGE_DATABASE_DSN=e2e.sqlite XOLO_SECRET_KEY=$(cat e2e.sqlite.key) bin/server
 package main
 
@@ -20,11 +24,13 @@ import (
 
 	"github.com/ncruces/go-sqlite3/gormlite"
 	"github.com/pkg/errors"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
 	gormadapter "github.com/xolo-gateway/xolo/internal/adapter/gorm"
 	"github.com/xolo-gateway/xolo/internal/core/port"
+	"github.com/xolo-gateway/xolo/internal/setup"
 
 	_ "github.com/ncruces/go-sqlite3/driver"
 	_ "github.com/ncruces/go-sqlite3/embed"
@@ -32,11 +38,11 @@ import (
 
 func main() {
 	var (
-		dsn       = flag.String("dsn", "e2e.sqlite", "path of the SQLite database to generate")
+		dsn       = flag.String("dsn", "e2e.sqlite", "SQLite file path, or a postgres:// URL / libpq keyword string")
 		secretKey = flag.String("secret-key", defaultSecretKey, "32-byte hex key used to encrypt provider API keys (must match XOLO_SECRET_KEY)")
 		days      = flag.Int("days", 30, "number of days of usage history to generate")
 		randSeed  = flag.Int64("seed", 20260731, "PRNG seed driving the usage history (same seed = same database)")
-		force     = flag.Bool("force", false, "delete the database file (and its -wal/-shm siblings) before generating")
+		force     = flag.Bool("force", false, "wipe the database first: delete the SQLite file (and its -wal/-shm siblings), or DROP the PostgreSQL public schema")
 		verbose   = flag.Bool("verbose", false, "log every SQL statement")
 	)
 	flag.Parse()
@@ -54,12 +60,19 @@ func run(ctx context.Context, dsn, secretKey string, days int, randSeed int64, f
 		return errors.Errorf("secret key must be a 32-byte hex string (64 chars), got %d chars", len(secretKey))
 	}
 
-	if force {
-		if err := removeDatabaseFiles(dsn); err != nil {
-			return errors.WithStack(err)
+	usePostgres := setup.IsPostgresDSN(dsn)
+
+	// On SQLite the database is a file, so wiping it happens before opening.
+	// On PostgreSQL the server is already there and the schema is dropped
+	// after connecting, below.
+	if !usePostgres {
+		if force {
+			if err := removeDatabaseFiles(dsn); err != nil {
+				return errors.WithStack(err)
+			}
+		} else if exists(dsn) {
+			return errors.Errorf("database %q already exists, use -force to overwrite it", dsn)
 		}
-	} else if exists(dsn) {
-		return errors.Errorf("database %q already exists, use -force to overwrite it", dsn)
 	}
 
 	logLevel := logger.Error
@@ -67,7 +80,14 @@ func run(ctx context.Context, dsn, secretKey string, days int, randSeed int64, f
 		logLevel = logger.Info
 	}
 
-	db, err := gorm.Open(gormlite.Open(dsn), &gorm.Config{
+	var dialector gorm.Dialector
+	if usePostgres {
+		dialector = postgres.Open(dsn)
+	} else {
+		dialector = gormlite.Open(dsn)
+	}
+
+	db, err := gorm.Open(dialector, &gorm.Config{
 		Logger: logger.Default.LogMode(logLevel),
 	})
 	if err != nil {
@@ -78,10 +98,16 @@ func run(ctx context.Context, dsn, secretKey string, days int, randSeed int64, f
 	if err != nil {
 		return errors.WithStack(err)
 	}
+	// Seeding is single-threaded and inserts in dependency order; one
+	// connection keeps SQLite happy and costs nothing on PostgreSQL.
 	internalDB.SetMaxOpenConns(1)
 	defer internalDB.Close()
 
-	if err := db.Exec("PRAGMA journal_mode=wal; PRAGMA foreign_keys=on; PRAGMA busy_timeout=5000").Error; err != nil {
+	if usePostgres {
+		if err := preparePostgres(db, force); err != nil {
+			return errors.WithStack(err)
+		}
+	} else if err := db.Exec("PRAGMA journal_mode=wal; PRAGMA foreign_keys=on; PRAGMA busy_timeout=5000").Error; err != nil {
 		return errors.WithStack(err)
 	}
 
@@ -106,12 +132,36 @@ func run(ctx context.Context, dsn, secretKey string, days int, randSeed int64, f
 	}
 
 	// Fold the WAL back into the main file so the fixture can be copied around
-	// as a single artifact.
-	if err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error; err != nil {
-		return errors.WithStack(err)
+	// as a single artifact. PostgreSQL has no such notion.
+	if !usePostgres {
+		if err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error; err != nil {
+			return errors.WithStack(err)
+		}
 	}
 
 	s.report()
+
+	return nil
+}
+
+// preparePostgres wipes the target schema when force is set, and otherwise
+// refuses to seed a database that already holds Xolo tables. Dropping the
+// schema rather than the individual tables also clears the migration history,
+// so the fixture is always rebuilt against the current schema.
+func preparePostgres(db *gorm.DB, force bool) error {
+	if !force {
+		if db.Migrator().HasTable("users") {
+			return errors.New("database already holds Xolo tables, use -force to wipe it")
+		}
+		return nil
+	}
+
+	if err := db.Exec("DROP SCHEMA public CASCADE").Error; err != nil {
+		return errors.Wrap(err, "could not drop schema")
+	}
+	if err := db.Exec("CREATE SCHEMA public").Error; err != nil {
+		return errors.Wrap(err, "could not recreate schema")
+	}
 
 	return nil
 }
