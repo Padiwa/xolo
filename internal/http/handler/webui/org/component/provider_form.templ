@@ -68,8 +68,8 @@ templ ProviderForm(vmodel ProviderFormVModel) {
 									}
 									@selectbox.Content(selectbox.ContentProps{NoSearch: true}) {
 										@selectbox.Group() {
-											for _, t := range []string{"openai", "mistral", "openrouter", "yzma"} {
-												@selectbox.Item(selectbox.ItemProps{Value: t, Selected: !vmodel.IsNew && vmodel.Provider != nil && vmodel.Provider.Type() == t}) {
+											for _, t := range model.ProviderTypes() {
+												@selectbox.Item(selectbox.ItemProps{Value: t, Selected: vmodel.Provider != nil && vmodel.Provider.Type() == t}) {
 													{ t }
 												}
 											}
@@ -87,6 +87,7 @@ templ ProviderForm(vmodel ProviderFormVModel) {
 								@common.InlineSnippet("https://api.openai.com/v1")
 								@common.InlineSnippet("https://api.mistral.ai/v1")
 								@common.InlineSnippet("https://openrouter.ai/api/v1")
+								@common.InlineSnippet("https://api.anthropic.com")
 							}
 							@input.Input(input.Props{
 								ID:          "provider_base_url",
@@ -113,7 +114,13 @@ templ ProviderForm(vmodel ProviderFormVModel) {
 								Placeholder: "sk-...",
 								Class:       "font-mono",
 								Disabled:    readonly,
+								Attributes:  apiKeyAttributes(vmodel),
 							})
+							if vmodel.IsNew && vmodel.Error != "" {
+								@form.Description() {
+									La clé API n'est jamais réaffichée : saisissez-la de nouveau.
+								}
+							}
 						}
 						<div class="grid gap-4 sm:grid-cols-[200px_minmax(0,1fr)]">
 							@form.Item() {
@@ -127,7 +134,7 @@ templ ProviderForm(vmodel ProviderFormVModel) {
 									@selectbox.Content(selectbox.ContentProps{NoSearch: true}) {
 										@selectbox.Group() {
 											for _, c := range model.SupportedCurrencies {
-												@selectbox.Item(selectbox.ItemProps{Value: c, Selected: !vmodel.IsNew && vmodel.Provider != nil && vmodel.Provider.Currency() == c}) {
+												@selectbox.Item(selectbox.ItemProps{Value: c, Selected: vmodel.Provider != nil && vmodel.Provider.Currency() == c}) {
 													{ c }
 												}
 											}
@@ -143,7 +150,7 @@ templ ProviderForm(vmodel ProviderFormVModel) {
 									Utilisé pour l'estimation de consommation énergétique.
 								}
 								{{ currentTier := 0 }}
-								if !vmodel.IsNew && vmodel.Provider != nil {
+								if vmodel.Provider != nil {
 									{{ currentTier = vmodel.Provider.CloudTier() }}
 								}
 								@selectbox.SelectBox(selectbox.Props{ID: "cloud_tier"}) {
@@ -172,7 +179,7 @@ templ ProviderForm(vmodel ProviderFormVModel) {
 									Mode de facturation
 								}
 								{{ currentBillingMode := model.BillingModePayg }}
-								if !vmodel.IsNew && vmodel.Provider != nil {
+								if vmodel.Provider != nil {
 									{{ currentBillingMode = vmodel.Provider.BillingMode() }}
 								}
 								@selectbox.SelectBox(selectbox.Props{ID: "billing_mode"}) {
@@ -407,17 +414,28 @@ templ durationUnitSelect(name string, selected string, readonly bool) {
 	}
 }
 
-// providerName and providerBaseURL read a field of the edited provider, or the
-// empty string on creation — the form is the same template in both cases.
+// apiKeyAttributes makes the API key mandatory on creation only: on edit an
+// empty key means "keep the stored one".
+func apiKeyAttributes(vmodel ProviderFormVModel) templ.Attributes {
+	if vmodel.IsNew {
+		return templ.Attributes{"required": "required"}
+	}
+	return nil
+}
+
+// providerName and providerBaseURL read a field of the provider being
+// edited, or of the one rebuilt from a rejected creation form, so a
+// validation error never costs the administrator what was typed. On a blank
+// creation form Provider is nil and the fields are empty.
 func providerName(vmodel ProviderFormVModel) string {
-	if vmodel.IsNew || vmodel.Provider == nil {
+	if vmodel.Provider == nil {
 		return ""
 	}
 	return vmodel.Provider.Name()
 }
 
 func providerBaseURL(vmodel ProviderFormVModel) string {
-	if vmodel.IsNew || vmodel.Provider == nil {
+	if vmodel.Provider == nil {
 		return ""
 	}
 	return vmodel.Provider.BaseURL()

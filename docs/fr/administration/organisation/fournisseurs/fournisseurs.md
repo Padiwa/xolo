@@ -26,7 +26,7 @@ Un fournisseur est une connexion vers un service LLM externe (OpenAI, Mistral, O
    | Champ                       | Description                                                                                           |
    | --------------------------- | ----------------------------------------------------------------------------------------------------- |
    | **Nom**                     | Nom affiché du fournisseur                                                                            |
-   | **Type**                    | Type de connexion : `openai`, `mistral`, `openrouter`, `yzma`                                         |
+   | **Type**                    | Type de connexion : `openai`, `anthropic`, `mistral`, `openrouter`                                    |
    | **URL de base**             | URL de l'endpoint API (ex: `https://api.openai.com/v1`)                                               |
    | **Clé API**                 | Clé d'authentification auprès du fournisseur                                                          |
    | **Devise**                  | Devise pour la tarification (USD, EUR, etc.)                                                          |
@@ -46,6 +46,24 @@ Xolo n'a pas de type de connexion propre à Ollama ou à vLLM, et n'en a pas bes
 | **Clé API**     | vide, sauf si vous en avez configuré une | celle passée à `--api-key`, sinon vide |
 
 Adaptez l'hôte et le port à votre déploiement. Pour l'estimation énergétique, choisissez le niveau d'infrastructure **Small Provider** : c'est celui qui correspond le mieux à une machine que vous opérez vous-même. La même recette vaut pour tout serveur qui parle le format OpenAI (LM Studio, llama.cpp en mode serveur, LocalAI…).
+
+## Anthropic : utilisez le type `anthropic`
+
+Le type `anthropic` parle l'API Messages native d'Anthropic (`https://api.anthropic.com`), via le SDK officiel. C'est le type à choisir pour un compte Anthropic direct : il transmet les points de cache (`cache_control`) posés par les clients, rejoue les blocs de réflexion signés d'un tour à l'autre et remonte séparément les tokens lus et écrits dans le cache.
+
+| Champ           | Anthropic                                                  |
+| --------------- | ---------------------------------------------------------- |
+| **Type**        | `anthropic`                                                |
+| **URL de base** | `https://api.anthropic.com` (un suffixe `/v1` est toléré)  |
+| **Clé API**     | votre clé `sk-ant-…`                                       |
+
+Un fournisseur Anthropic déclaré avec le type `openai` sur l'endpoint compatible OpenAI continue de fonctionner, mais ce chemin ne transmet pas `cache_control` : les préfixes de prompt ne sont jamais mis en cache et sont facturés au tarif plein à chaque appel. Aucune migration automatique n'est faite ; modifiez le type du fournisseur à la main.
+
+Pensez à renseigner le **coût du prompt en cache** sur les modèles concernés (chez Anthropic, environ 10 % du tarif d'entrée). Laissé vide, ce champ vaut le tarif plein : le coût affiché surestime alors la facture dès que le cache est actif. Les écritures de cache, facturées plus cher que le tarif d'entrée par Anthropic, sont comptées au tarif plein.
+
+Le type `anthropic` envoie `max_tokens` à chaque requête, l'API l'exigeant : la valeur est celle du client, sinon la **fenêtre de sortie** du modèle telle que déclarée dans Xolo, plafonnée à 16 384 tokens. Ce plafond existe parce que, sur cette API, `max_tokens` dimensionne aussi le budget de réflexion (une fraction de `max_tokens` quand le client demande un niveau d'effort) et compte dans la fenêtre de contexte avec l'entrée. Un client qui veut davantage fixe lui-même `max_tokens`, et un client dont le prompt approche la fenêtre de contexte doit le faire aussi : sur cette API, entrée et `max_tokens` doivent tenir ensemble dans la fenêtre. Fenêtre de sortie non renseignée, le provider retombe sur 4096 tokens.
+
+Vérifiez aussi l'**extra_body** des modèles migrés : ses entrées partent en champs de premier niveau de la requête, et l'API Messages n'accepte que les siens. Une clé propre au format OpenAI comme `reasoning_effort` fait échouer toutes les requêtes du modèle.
 
 ## Tester la connexion
 

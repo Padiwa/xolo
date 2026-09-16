@@ -23,6 +23,7 @@ import (
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/pkg/errors"
 
+	_ "github.com/bornholm/genai/llm/provider/anthropic"
 	_ "github.com/bornholm/genai/llm/provider/mistral"
 	_ "github.com/bornholm/genai/llm/provider/openai"
 	_ "github.com/bornholm/genai/llm/provider/openrouter"
@@ -127,15 +128,28 @@ func (r *OrgModelRouter) ResolveModel(ctx context.Context, req *genaiProxy.Proxy
 		return nil, "", errors.Errorf("model '%s' not available in your organization", req.Model)
 	}
 
+	p, err := r.providerStore.GetProviderByID(ctx, llmModel.ProviderID())
+	if err != nil {
+		return nil, "", errors.WithStack(err)
+	}
+
 	// Verify capability for embedding requests
-	if req.Type == genaiProxy.RequestTypeEmbedding && !llmModel.Capabilities().Embeddings {
-		return nil, "", errors.Errorf("model '%s' does not support embeddings", req.Model)
+	if req.Type == genaiProxy.RequestTypeEmbedding {
+		if !llmModel.Capabilities().Embeddings {
+			return nil, "", errors.Errorf("model '%s' does not support embeddings", req.Model)
+		}
+		// The capability can be ticked on a model whose provider type has
+		// no embeddings client (anthropic): say so instead of letting genai
+		// fail with a generic error.
+		if provider.NewEmbeddingsProviderOptions(provider.Name(p.Type())) == nil {
+			return nil, "", errors.Errorf("model '%s' cannot serve embeddings: provider type '%s' has no embeddings client", req.Model, p.Type())
+		}
 	}
 
 	// Store model ID in metadata for UsageTracker
 	req.Metadata[MetaModelID] = string(llmModel.ID())
 
-	client, err := r.clientForModel(ctx, llmModel)
+	client, err := r.clientForProvider(ctx, llmModel, p)
 	if err != nil {
 		return nil, "", errors.WithStack(err)
 	}
@@ -152,7 +166,12 @@ func (r *OrgModelRouter) clientForModel(ctx context.Context, llmModel model.LLMM
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
+	return r.clientForProvider(ctx, llmModel, p)
+}
 
+// clientForProvider is clientForModel for a caller that already holds the
+// model's provider, sparing a second lookup per request.
+func (r *OrgModelRouter) clientForProvider(ctx context.Context, llmModel model.LLMModel, p model.Provider) (llm.Client, error) {
 	if !p.Active() {
 		return nil, errors.Errorf("provider '%s' is not active", p.Name())
 	}
@@ -173,11 +192,19 @@ func (r *OrgModelRouter) clientForModel(ctx context.Context, llmModel model.LLMM
 		return nil, errors.New("provider configuration error")
 	}
 
+	providerName := provider.Name(p.Type())
 	providerOpts := []provider.OptionFunc{
-		withDynamicChatCompletion(provider.Name(p.Type()), p.BaseURL(), decryptedKey, llmModel.RealModel()),
+		withDynamicChatCompletion(providerName, p.BaseURL(), decryptedKey, llmModel.RealModel(), defaultMaxTokensFor(llmModel)),
 	}
 	if llmModel.Capabilities().Embeddings {
-		providerOpts = append(providerOpts, withDynamicEmbeddings(provider.Name(p.Type()), p.BaseURL(), decryptedKey, llmModel.RealModel()))
+		// A provider without an embeddings client (anthropic) must not lose
+		// its chat completions to a capability ticked on the model.
+		if provider.NewEmbeddingsProviderOptions(providerName) == nil {
+			slog.WarnContext(ctx, "model declares the embeddings capability but its provider type has no embeddings client",
+				slog.String("model", string(llmModel.ID())), slog.String("providerType", p.Type()))
+		} else {
+			providerOpts = append(providerOpts, withDynamicEmbeddings(providerName, p.BaseURL(), decryptedKey, llmModel.RealModel()))
+		}
 	}
 
 	client, err := provider.Create(ctx, providerOpts...)
@@ -349,10 +376,43 @@ func withDynamicEmbeddings(name provider.Name, baseURL, apiKey, model string) pr
 	}
 }
 
+// maxTokensProviders lists the provider types whose options carry a
+// MaxTokens field meaning "default when the client sets none". The field is
+// matched by name through reflection, so the allowlist keeps a future
+// provider with a MaxTokens field of another meaning (a hard ceiling, say)
+// from silently inheriting the output window.
+var maxTokensProviders = map[provider.Name]bool{
+	"anthropic": true,
+}
+
+// maxDefaultMaxTokens caps the max_tokens sent on behalf of a client that
+// set none. The model's output window is the natural default, but on the
+// Messages API it also sizes the reasoning budget (a share of max_tokens)
+// and counts against the context window, so a 64k window would turn a
+// request with no max_tokens into a 32k-token thinking budget and reject
+// long prompts that used to pass. 16k keeps long answers possible without
+// either effect getting out of hand; a client wanting more sets max_tokens.
+const maxDefaultMaxTokens int64 = 16_384
+
+// defaultMaxTokensFor returns the max_tokens to use when the client sets
+// none: the model's output window, capped.
+func defaultMaxTokensFor(m model.LLMModel) int64 {
+	window := m.OutputWindow()
+	if window <= 0 {
+		return 0
+	}
+	return min(window, maxDefaultMaxTokens)
+}
+
 // withDynamicChatCompletion crée une OptionFunc pour un provider identifié à runtime.
 // Tous les providers enregistrés embarquent provider.CommonOptions, on utilise
 // la réflexion pour définir BaseURL, APIKey et Model sans type connu à la compilation.
-func withDynamicChatCompletion(name provider.Name, baseURL, apiKey, model string) provider.OptionFunc {
+//
+// maxTokens renseigne le champ MaxTokens des providers listés dans
+// maxTokensProviders (anthropic, dont l'API exige max_tokens) : c'est la
+// fenêtre de sortie du modèle, à défaut de quoi le provider applique son
+// propre défaut. Le champ est lu comme un défaut, jamais comme un plafond.
+func withDynamicChatCompletion(name provider.Name, baseURL, apiKey, model string, maxTokens int64) provider.OptionFunc {
 	return func(o *provider.Options) error {
 		opts := provider.NewChatCompletionProviderOptions(name)
 		if opts == nil {
@@ -363,6 +423,11 @@ func withDynamicChatCompletion(name provider.Name, baseURL, apiKey, model string
 			common.FieldByName("BaseURL").SetString(baseURL)
 			common.FieldByName("APIKey").SetString(apiKey)
 			common.FieldByName("Model").SetString(model)
+		}
+		if maxTokensProviders[name] && maxTokens > 0 {
+			if field := v.FieldByName("MaxTokens"); field.IsValid() && field.CanSet() && field.Kind() == reflect.Int64 {
+				field.SetInt(maxTokens)
+			}
 		}
 		o.ChatCompletion = &provider.ResolvedClientOptions{
 			Provider: name,
