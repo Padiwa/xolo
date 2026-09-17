@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -34,6 +35,12 @@ type Resolver struct {
 	defaultSlug string
 	multiTenant bool
 
+	// singleTenantHost is the canonical host used in single-tenant mode. It is
+	// derived from the configured base URL, never from the request: the only
+	// tenant of a single-tenant deployment is served on whatever hostname the
+	// operator chose, regardless of which Host header the client sends.
+	singleTenantHost string
+
 	// defaultTenant memoizes the single-tenant resolution: it never varies
 	// across requests, so it is worth not hitting the store on every one. Only
 	// a success is memoized — a transient store failure on the first request
@@ -42,15 +49,20 @@ type Resolver struct {
 	defaultTenant model.Tenant
 }
 
-func NewResolver(store port.TenantStore, conf config.Multitenancy) *Resolver {
+// NewResolver builds a tenant resolver from the multitenancy configuration
+// and the configured public base URL. The base URL is only consulted in
+// single-tenant mode, where it gives CanonicalHost a server-controlled host
+// to return instead of echoing whatever Host header a client sent.
+func NewResolver(store port.TenantStore, conf config.Multitenancy, baseURL string) *Resolver {
 	prefix, suffix, _ := strings.Cut(stripPort(conf.HostPattern), config.TenantHostPlaceholder)
 
 	return &Resolver{
-		store:       store,
-		hostPrefix:  strings.ToLower(prefix),
-		hostSuffix:  strings.ToLower(suffix),
-		defaultSlug: conf.DefaultTenantSlug,
-		multiTenant: conf.Enabled,
+		store:            store,
+		hostPrefix:       strings.ToLower(prefix),
+		hostSuffix:       strings.ToLower(suffix),
+		defaultSlug:      conf.DefaultTenantSlug,
+		multiTenant:      conf.Enabled,
+		singleTenantHost: canonicalHostFromBaseURL(baseURL),
 	}
 }
 
@@ -89,22 +101,31 @@ func (r *Resolver) Resolve(ctx context.Context, host string) (model.Tenant, erro
 
 // CanonicalHost returns the normalized host designated by host, without
 // querying the store: it answers "could this host name a tenant", not "does
-// that tenant exist". In multi-tenant mode it extracts the tenant slug with the
-// same validation used by Resolve, then rebuilds the host from the configured
-// pattern. Callers that build public URLs from a request host use it so that
-// neither a forged host, its casing nor a client-supplied port can leak into a
-// generated URL.
+// that tenant exist". In multi-tenant mode it extracts the tenant slug with
+// the same validation used by Resolve, then rebuilds the host from the
+// configured pattern — an empty or out-of-pattern input is rejected with
+// ok=false. In single-tenant mode the request host is ignored entirely and
+// the host of the configured base URL is returned: there is no tenant slug
+// to extract, and the only safe answer is one derived from configuration
+// rather than from the client. A missing or relative base URL is rejected
+// with ok=false on this branch. The contract holds on both branches:
+// neither a forged host, its casing, nor a client-supplied port can leak
+// into a generated URL.
 func (r *Resolver) CanonicalHost(host string) (string, bool) {
-	if !r.multiTenant {
-		return strings.ToLower(stripPort(host)), true
+	if r.multiTenant {
+		slug, ok := r.slugFromHost(host)
+		if !ok {
+			return "", false
+		}
+
+		return r.hostPrefix + slug + r.hostSuffix, true
 	}
 
-	slug, ok := r.slugFromHost(host)
-	if !ok {
+	if r.singleTenantHost == "" {
 		return "", false
 	}
 
-	return r.hostPrefix + slug + r.hostSuffix, true
+	return r.singleTenantHost, true
 }
 
 // slugFromHost extracts the tenant slug framed by the configured pattern.
@@ -160,6 +181,24 @@ func stripPort(host string) string {
 		return h
 	}
 	return host
+}
+
+// canonicalHostFromBaseURL extracts the lower-cased host (port stripped) of a
+// configured base URL. An empty, relative or malformed URL yields an empty
+// string: the resolver then refuses to forge a canonical host in single-tenant
+// mode rather than echoing the request.
+func canonicalHostFromBaseURL(baseURL string) string {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+
+	return strings.ToLower(stripPort(parsed.Host))
 }
 
 // Middleware injects the resolved tenant in the request context. notFound
