@@ -6,73 +6,70 @@ import (
 	"strings"
 	"testing"
 
-	common "github.com/xolo-gateway/xolo/internal/http/handler/webui/common/component"
 	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
+	common "github.com/xolo-gateway/xolo/internal/http/handler/webui/common/component"
 )
 
-// TestModelsSortControlRendersActiveTabs pins the segmented control built
-// from modelsSortControl: the tab matching currentSort must be rendered as
-// a <span> with the active styling, the other tab must be a link pointing
-// at the current URL with the right query parameters swapped in/out, and
-// the order-toggle button must flip the active order without disturbing
-// the sort criterion. A regression that broke WithoutValues('sort', '*')
-// (which panicked in an earlier revision) would be caught here.
+// TestModelsSortControlRendersActiveTabs pins the three-segment sort
+// control built from modelsSortControl: Usage, Prix ↓, Prix ↑. The
+// segment matching the current (sort, order) pair is rendered as a
+// <button> with the active styling, the other two are rendered as
+// <a> links pointing at the current URL with the right query
+// parameters applied. Every link is a plain anchor except the active
+// segment, which stays a <button> so clicking it does nothing. The
+// control uses common.SegmentedNav so it inherits the same visual
+// style as the period selector (24 h / 7 j / 30 j / 12 m).
 func TestModelsSortControlRendersActiveTabs(t *testing.T) {
 	cases := []struct {
 		name         string
 		currentSort  string
 		currentOrder string
-		// activeLabel is the text of the tab rendered as a <span>.
+		// activeLabel is the visible text of the active segment.
 		activeLabel string
-		// inactiveLabel is the text of the tab rendered as an <a>.
-		inactiveLabel string
-		// hrefMustContain and hrefMustNotContain pin the URL mutations
-		// applied to the current URL on the inactive tab.
-		hrefMustContain    []string
-		hrefMustNotContain []string
-		// toggleNextOrder is the order param the toggle must emit in its
-		// href (the opposite of currentOrder).
-		toggleNextOrder string
+		// inactiveLabels are the visible texts of the two inactive
+		// segments, paired with the URL mutations their hrefs must
+		// carry (and must NOT carry).
+		inactiveLabels []inactiveSegment
 	}{
 		{
-			name:               "default sort highlights Usage and links to Price (natural price asc)",
-			currentSort:        "",
-			currentOrder:       "desc",
-			activeLabel:        "Usage",
-			inactiveLabel:      "Prix",
-			hrefMustContain:    []string{"sort=price", "range=7d", "show_all=true"},
-			hrefMustNotContain: []string{"sort=price&sort=price", "order="},
-			toggleNextOrder:    "asc",
+			name:           "default usage view highlights Usage and links to Prix ↓ / Prix ↑",
+			currentSort:    "",
+			currentOrder:   "desc",
+			activeLabel:    "Usage",
+			inactiveLabels: []inactiveSegment{
+				{label: "Prix ↓", mustContain: []string{"sort=price", "order=desc", "range=7d", "show_all=true"}},
+				{label: "Prix ↑", mustContain: []string{"sort=price", "order=asc", "range=7d", "show_all=true"}},
+			},
 		},
 		{
-			name:               "price sort highlights Price and links back to Usage (natural usage desc)",
-			currentSort:        "price",
-			currentOrder:       "asc",
-			activeLabel:        "Prix",
-			inactiveLabel:      "Usage",
-			hrefMustContain:    []string{"range=7d", "show_all=true"},
-			hrefMustNotContain: []string{"sort=", "order="},
-			toggleNextOrder:    "desc",
+			name:           "price desc view highlights Prix ↓ and links to Usage / Prix ↑",
+			currentSort:    "price",
+			currentOrder:   "desc",
+			activeLabel:    "Prix ↓",
+			inactiveLabels: []inactiveSegment{
+				{label: "Usage", mustNotContain: []string{"sort=", "order="}, mustContain: []string{"range=7d", "show_all=true"}},
+				{label: "Prix ↑", mustContain: []string{"sort=price", "order=asc", "range=7d", "show_all=true"}},
+			},
 		},
 		{
-			name:               "price sort desc links back to Usage without order carry-over",
-			currentSort:        "price",
-			currentOrder:       "desc",
-			activeLabel:        "Prix",
-			inactiveLabel:      "Usage",
-			hrefMustContain:    []string{"range=7d", "show_all=true"},
-			hrefMustNotContain: []string{"sort=", "order="},
-			toggleNextOrder:    "asc",
+			name:           "price asc view highlights Prix ↑ and links to Usage / Prix ↓",
+			currentSort:    "price",
+			currentOrder:   "asc",
+			activeLabel:    "Prix ↑",
+			inactiveLabels: []inactiveSegment{
+				{label: "Usage", mustNotContain: []string{"sort=", "order="}, mustContain: []string{"range=7d", "show_all=true"}},
+				{label: "Prix ↓", mustContain: []string{"sort=price", "order=desc", "range=7d", "show_all=true"}},
+			},
 		},
 		{
-			name:               "usage sort asc links to Price without order carry-over",
-			currentSort:        "",
-			currentOrder:       "asc",
-			activeLabel:        "Usage",
-			inactiveLabel:      "Prix",
-			hrefMustContain:    []string{"sort=price", "range=7d", "show_all=true"},
-			hrefMustNotContain: []string{"order="},
-			toggleNextOrder:    "desc",
+			name:           "usage asc view highlights Usage and links to Prix ↓ / Prix ↑ (with order=asc stripped)",
+			currentSort:    "",
+			currentOrder:   "asc",
+			activeLabel:    "Usage",
+			inactiveLabels: []inactiveSegment{
+				{label: "Prix ↓", mustContain: []string{"sort=price", "order=desc", "range=7d", "show_all=true"}},
+				{label: "Prix ↑", mustContain: []string{"sort=price", "order=asc", "range=7d", "show_all=true"}},
+			},
 		},
 	}
 
@@ -88,106 +85,119 @@ func TestModelsSortControlRendersActiveTabs(t *testing.T) {
 			}
 			html := out.String()
 
-			// The active tab must be a <span> with the active styling.
-			activeSpan := `<span class="px-3 py-1 rounded bg-accent text-accent-foreground font-medium">` + tc.activeLabel + `</span>`
-			if !strings.Contains(html, activeSpan) {
-				t.Errorf("expected active span %q in:\n%s", activeSpan, html)
+			// The active segment must be rendered as a <button> with
+			// the active styling (bg-primary-tint + text-primary, as
+			// defined by common.SegmentedNav).
+			activeButton := extractSegment(html, tc.activeLabel)
+			if activeButton == "" {
+				t.Fatalf("could not find segment %q in:\n%s", tc.activeLabel, html)
+			}
+			if !strings.HasPrefix(activeButton, "<button") {
+				t.Errorf("active segment %q must be a <button>, got:\n%s", tc.activeLabel, activeButton)
+			}
+			if !strings.Contains(activeButton, "bg-primary-tint") {
+				t.Errorf("active segment %q must use bg-primary-tint (matching the period selector), got:\n%s", tc.activeLabel, activeButton)
+			}
+			if strings.Contains(activeButton, "href=") {
+				t.Errorf("active segment must NOT carry an href, got:\n%s", activeButton)
 			}
 
-			// An active tab must never carry an href: there is nowhere
-			// to click it. This guards against a future refactor that
-			// renders the active state as an <a> and ends up emitting a
-			// bogus href that could carry the wrong sort param.
-			if strings.Contains(activeSpan, `href=`) {
-				t.Errorf("active tab must not carry an href, got %q", activeSpan)
-			}
-
-			// The inactive tab must be a link pointing at the right URL.
-			// Use "<a " (with the trailing space) rather than a bare "<a"
-			// so future decorative anchors inside the segmented control
-			// (tooltips, etc.) cannot silently satisfy the assertion.
-			inactiveLink := strings.Contains(html, "<a ")
-			if !inactiveLink {
-				t.Fatalf("expected an <a> for the inactive tab, got:\n%s", html)
-			}
-
-			// Extract the href of the inactive tab via a simple search
-			// for the href= attribute immediately preceding the
-			// inactive label.
-			idx := strings.Index(html, tc.inactiveLabel)
-			if idx < 0 {
-				t.Fatalf("could not find inactive label %q in rendered html:\n%s", tc.inactiveLabel, html)
-			}
-			before := html[:idx]
-			hrefStart := strings.LastIndex(before, `href="`)
-			if hrefStart < 0 {
-				t.Fatalf("could not find href attribute before %q", tc.inactiveLabel)
-			}
-			hrefEnd := strings.Index(html[hrefStart+len(`href="`):], `"`)
-			if hrefEnd < 0 {
-				t.Fatalf("unterminated href attribute before %q", tc.inactiveLabel)
-			}
-			href := html[hrefStart+len(`href="`) : hrefStart+len(`href="`)+hrefEnd]
-
-			decoded, err := url.QueryUnescape(href)
-			if err != nil {
-				t.Fatalf("href %q is not valid: %v", href, err)
-			}
-
-			for _, want := range tc.hrefMustContain {
-				if !strings.Contains(decoded, want) {
-					t.Errorf("inactive tab href %q should contain %q", decoded, want)
+			// Each inactive segment must be an <a> whose href carries
+			// the expected mutations.
+			for _, seg := range tc.inactiveLabels {
+				tag := extractSegment(html, seg.label)
+				if tag == "" {
+					t.Fatalf("could not find segment %q in:\n%s", seg.label, html)
 				}
-			}
-			for _, unwanted := range tc.hrefMustNotContain {
-				if strings.Contains(decoded, unwanted) {
-					t.Errorf("inactive tab href %q must NOT contain %q", decoded, unwanted)
+				if !strings.HasPrefix(tag, "<a ") {
+					t.Errorf("inactive segment %q must be an <a>, got:\n%s", seg.label, tag)
 				}
-			}
-
-			// The order-toggle button must be present as a distinct
-			// <a> with an aria-label, and its href must flip the
-			// current order without duplicating it. templ may render
-			// href either before or after aria-label, so we locate the
-			// enclosing <a ...> segment and read the href from it.
-			idxToggle := strings.Index(html, `aria-label="`)
-			if idxToggle < 0 {
-				t.Fatalf("expected the order-toggle button to carry an aria-label, got:\n%s", html)
-			}
-			aStart := strings.LastIndex(html[:idxToggle], "<a ")
-			if aStart < 0 {
-				t.Fatalf("could not find <a ...> for the order-toggle button:\n%s", html)
-			}
-			aEnd := strings.Index(html[aStart:], ">")
-			if aEnd < 0 {
-				t.Fatalf("unterminated <a ...> for the order-toggle button:\n%s", html)
-			}
-			aEnd += aStart
-			toggleSegment := html[aStart:aEnd]
-			hrefStart = strings.Index(toggleSegment, `href="`)
-			if hrefStart < 0 {
-				t.Fatalf("could not find href on the order-toggle button segment %q", toggleSegment)
-			}
-			hrefEnd = strings.Index(toggleSegment[hrefStart+len(`href="`):], `"`)
-			if hrefEnd < 0 {
-				t.Fatalf("unterminated href on the order-toggle button segment %q", toggleSegment)
-			}
-			toggleHref := toggleSegment[hrefStart+len(`href="`) : hrefStart+len(`href="`)+hrefEnd]
-			decodedToggle, err := url.QueryUnescape(toggleHref)
-			if err != nil {
-				t.Fatalf("toggle href %q is not valid: %v", toggleHref, err)
-			}
-			wantOrder := "order=" + tc.toggleNextOrder
-			if !strings.Contains(decodedToggle, wantOrder) {
-				t.Errorf("order-toggle href %q should contain %q", decodedToggle, wantOrder)
-			}
-			// The toggle must not leave a duplicate `order` param on a
-			// URL that already carried one.
-			if strings.Contains(decodedToggle, "order="+tc.toggleNextOrder+"&order=") {
-				t.Errorf("order-toggle href %q must NOT duplicate the order param", decodedToggle)
+				href := extractHref(tag)
+				if href == "" {
+					t.Fatalf("could not find href on inactive segment %q", seg.label)
+				}
+				decoded, err := url.QueryUnescape(href)
+				if err != nil {
+					t.Fatalf("href %q is not valid: %v", href, err)
+				}
+				for _, want := range seg.mustContain {
+					if !strings.Contains(decoded, want) {
+						t.Errorf("inactive segment %q href %q should contain %q", seg.label, decoded, want)
+					}
+				}
+				for _, unwanted := range seg.mustNotContain {
+					if strings.Contains(decoded, unwanted) {
+						t.Errorf("inactive segment %q href %q must NOT contain %q", seg.label, decoded, unwanted)
+					}
+				}
 			}
 		})
 	}
+}
+
+// inactiveSegment pins the URL expectations for one inactive segment of
+// the sort SegmentedNav.
+type inactiveSegment struct {
+	label          string
+	mustContain    []string
+	mustNotContain []string
+}
+
+// extractSegment returns the HTML tag (<button ...>...</button> or <a ...>...</a>)
+// that wraps the given visible label. The label is assumed to be the
+// inner text of the tag (e.g. >Usage< or >Prix ↑<), so we locate it
+// and walk backwards to the nearest <a or <button opener.
+func extractSegment(html string, label string) string {
+	idx := strings.Index(html, label)
+	if idx < 0 {
+		return ""
+	}
+	// Walk back from the label to the nearest opening tag, picking the
+	// last one whose name is 'a' or 'button'.
+	searchFrom := idx
+	for {
+		lt := strings.LastIndex(html[:searchFrom], "<")
+		if lt < 0 {
+			return ""
+		}
+		// Read the tag name (chars until whitespace or '>').
+		rest := html[lt+1:]
+		end := strings.IndexAny(rest, " >\n\t")
+		if end <= 0 {
+			return ""
+		}
+		name := rest[:end]
+		if name == "a" || name == "button" {
+			openEnd := strings.Index(html[lt:], ">")
+			if openEnd < 0 {
+				return ""
+			}
+			openEnd += lt
+			closeTag := "</" + name + ">"
+			closeIdx := strings.Index(html[openEnd:], closeTag)
+			if closeIdx < 0 {
+				return ""
+			}
+			closeIdx += openEnd
+			return html[lt : closeIdx+len(closeTag)]
+		}
+		// Some other tag (e.g. <span>): keep walking back.
+		searchFrom = lt
+	}
+}
+
+// extractHref returns the href attribute value of an anchor tag.
+func extractHref(tag string) string {
+	start := strings.Index(tag, `href="`)
+	if start < 0 {
+		return ""
+	}
+	start += len(`href="`)
+	end := strings.Index(tag[start:], `"`)
+	if end < 0 {
+		return ""
+	}
+	return tag[start : start+end]
 }
 
 // TestModelsPageRangeFormHidesOrderWhenNotExplicit pins the rule that the
@@ -205,9 +215,9 @@ func TestModelsPageRangeFormHidesOrderWhenNotExplicit(t *testing.T) {
 		AppLayoutVModel: common.AppLayoutVModel{
 			Breadcrumbs: []common.BreadcrumbItem{{Label: "X", Href: ""}},
 		},
-		Range:          "7d",
-		Order:          "desc",
-		OrderExplicit:  false, // default view: no ?order=... on the request
+		Range:         "7d",
+		Order:         "desc",
+		OrderExplicit: false, // default view: no ?order=... on the request
 	}
 
 	var out strings.Builder
@@ -233,9 +243,9 @@ func TestModelsPageRangeFormRoundTripsExplicitOrder(t *testing.T) {
 		AppLayoutVModel: common.AppLayoutVModel{
 			Breadcrumbs: []common.BreadcrumbItem{{Label: "X", Href: ""}},
 		},
-		Range:          "7d",
-		Order:          "desc",
-		OrderExplicit:  true,
+		Range:         "7d",
+		Order:         "desc",
+		OrderExplicit: true,
 	}
 
 	var out strings.Builder

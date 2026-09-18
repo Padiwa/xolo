@@ -161,100 +161,52 @@ templ apiExample(language, title, snippet string) {
 	}
 }
 
-// modelsSortControl renders two tabs (Usage / Prix) plus a small toggle
-// button that flips the current sort direction. The toggle's href swaps
-// `order` to the opposite value; the criterion tabs strip both `sort` and
-// `order` so each criterion falls back to its natural default direction
-// when selected (price=asc, usage=desc). The toggle button is the only
-// way to override the default. Every link is a plain anchor: no JS, no
-// form, server-rendered, bookmarkable.
+// modelsSortControl renders a three-segment control (Usage / Prix ↓ /
+// Prix ↑) that mirrors the SegmentedNav used for the period selector
+// (24 h / 7 j / 30 j / 12 m) on the org and personal dashboards. The
+// selected criterion appears with its current direction; clicking any
+// other segment swaps criterion and direction in one click, falling
+// back to the criterion's natural default when the user comes from the
+// other criterion. Every link is a plain anchor: no JS, no form,
+// server-rendered, bookmarkable.
 templ modelsSortControl(currentSort string, currentOrder string) {
 	{{ sortURL := common.CurrentURLString(ctx) }}
-	<div class="flex items-center gap-2">
-		<div class="inline-flex items-center rounded-md border bg-background p-0.5 text-sm">
-			if currentSort == "price" {
-				@sortTab(sortURL, "usage", false)
-				@sortTab(sortURL, "price", true)
-			} else {
-				@sortTab(sortURL, "usage", true)
-				@sortTab(sortURL, "price", false)
-			}
-		</div>
-		@orderToggle(sortURL, currentOrder)
-	</div>
+	@common.SegmentedNav([]common.Segment{
+		// Usage: drops `sort` and `order` so the new criterion lands on
+		// its natural default direction (usage desc).
+		usageSegment(sortURL, currentSort != "price"),
+		// Price ↓: explicit ?sort=price&order=desc.
+		priceSegment(sortURL, "Prix ↓", "desc", currentSort == "price" && currentOrder == "desc"),
+		// Price ↑: explicit ?sort=price&order=asc.
+		priceSegment(sortURL, "Prix ↑", "asc", currentSort == "price" && currentOrder == "asc"),
+	})
 }
 
-// sortTab renders one criterion tab. active controls whether the tab is
-// shown as a styled <span> (current sort) or as an <a> pointing at the
-// current URL with the right `sort` applied. The `order` param is
-// intentionally stripped: switching criterion falls back to that
-// criterion's natural default direction (price=asc, usage=desc) so the
-// user lands on the most useful view of the new criterion. The toggle
-// button is the only way to override the default. The active tab must
-// never carry an href: clicking it would do nothing and could leak a
-// duplicate `sort` param on bookmarked URLs.
-templ sortTab(sortURL string, value string, active bool) {
-	{{ href := sortURL }}
-	if value == "usage" {
-		{{ href = common.MutateURLString(sortURL, common.WithoutValues("sort", "*")) }}
-	} else {
-		{{ href = common.MutateURLString(sortURL, common.WithoutValues("sort", "*"), common.WithValues("sort", "price")) }}
-	}
-	// Always strip `order` from the inactive tab so the new criterion
-	// falls back to its natural direction.
-	if !active {
-		{{ href = common.MutateURLString(href, common.WithoutValues("order", "*")) }}
-	}
+// usageSegment returns the Usage segment of the sort control. The
+// href drops `sort` and `order` so the user lands on the criterion's
+// natural default (usage desc).
+func usageSegment(sortURL string, active bool) common.Segment {
 	if active {
-		if value == "price" {
-			<span class="px-3 py-1 rounded bg-accent text-accent-foreground font-medium">Prix</span>
-		} else {
-			<span class="px-3 py-1 rounded bg-accent text-accent-foreground font-medium">Usage</span>
-		}
-	} else {
-		if value == "price" {
-			<a
-				href={ templ.SafeURL(href) }
-				class="px-3 py-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent/50"
-			>Prix</a>
-		} else {
-			<a
-				href={ templ.SafeURL(href) }
-				class="px-3 py-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent/50"
-			>Usage</a>
-		}
+		return common.Segment{Label: "Usage", Active: true}
 	}
+	href := common.MutateURLString(sortURL, common.WithoutValues("sort", "*"), common.WithoutValues("order", "*"))
+	return common.Segment{Label: "Usage", Href: href, Active: false}
 }
 
-// orderToggle renders the ↑ / ↓ button that flips the current sort
-// direction. The icon reflects what the click WILL do, not the current
-// direction: a "Prix ↓" page shows a ↑ button labelled "Monter", and a
-// "Prix ↑" page shows a ↓ button labelled "Descendre". The href swaps
-// `order` to the opposite value; the `sort` criterion is left untouched.
-templ orderToggle(sortURL string, currentOrder string) {
-	if currentOrder == "desc" {
-		{{ nextOrder := "asc" }}
-		{{ href := common.MutateURLString(sortURL, common.WithoutValues("order", "*"), common.WithValues("order", nextOrder)) }}
-		<a
-			href={ templ.SafeURL(href) }
-			aria-label="Monter"
-			title="Monter"
-			class="inline-flex h-8 w-8 items-center justify-center rounded-md border bg-background text-muted-foreground hover:text-foreground hover:bg-accent/50"
-		>
-			@icon.ArrowUp(icon.Props{Class: "h-4 w-4"})
-		</a>
-	} else {
-		{{ nextOrder := "desc" }}
-		{{ href := common.MutateURLString(sortURL, common.WithoutValues("order", "*"), common.WithValues("order", nextOrder)) }}
-		<a
-			href={ templ.SafeURL(href) }
-			aria-label="Descendre"
-			title="Descendre"
-			class="inline-flex h-8 w-8 items-center justify-center rounded-md border bg-background text-muted-foreground hover:text-foreground hover:bg-accent/50"
-		>
-			@icon.ArrowDown(icon.Props{Class: "h-4 w-4"})
-		</a>
+// priceSegment returns one of the two Price segments (↓ or ↑) of the
+// sort control. The href carries ?sort=price&order=... so each tab
+// stays self-contained and bookmarkable.
+func priceSegment(sortURL string, label string, order string, active bool) common.Segment {
+	if active {
+		return common.Segment{Label: label, Active: true}
 	}
+	href := common.MutateURLString(sortURL,
+		common.WithoutValues("sort", "*"),
+		common.WithoutValues("order", "*"),
+		common.WithValues("sort", "price"),
+		common.WithValues("order", order),
+	)
+	return common.Segment{Label: label, Href: href, Active: false}
 }
 
 templ modelCard(mu ModelUsage) {
