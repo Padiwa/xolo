@@ -23,10 +23,13 @@ type ModelsPageVModel struct {
 	// when the request did not ask for the full list.
 	ShowAll bool
 	// Sort selects how the model list is ordered: "" (default) orders by
-	// aggregate usage descending; "price" orders by total cost (prompt +
-	// completion per 1K tokens) ascending. Unknown values are normalised
-	// to "" by the handler.
+	// aggregate usage; "price" orders by total cost (prompt + completion
+	// per 1K tokens). Unknown values are normalised to "" by the handler.
 	Sort string
+	// Order is the direction of the sort: "asc" or "desc". Each criterion
+	// has its own default (price asc, usage desc) and Order reflects the
+	// effective direction so the URL and the toggle button never disagree.
+	Order string
 }
 
 templ ModelsPage(vmodel ModelsPageVModel) {
@@ -43,11 +46,14 @@ templ ModelsPage(vmodel ModelsPageVModel) {
 					})
 				</div>
 				<div class="flex items-center gap-3">
-					@modelsSortControl(vmodel.Sort)
+					@modelsSortControl(vmodel.Sort, vmodel.Order)
 					<form method="GET" class="flex items-center gap-2">
 						@common.RangeSelect(vmodel.Range)
 						if vmodel.Sort != "" {
 							<input type="hidden" name="sort" value={ vmodel.Sort }/>
+						}
+						if vmodel.Order != "" {
+							<input type="hidden" name="order" value={ vmodel.Order }/>
 						}
 						if vmodel.ShowAll {
 							<input type="hidden" name="show_all" value="true"/>
@@ -70,7 +76,7 @@ templ ModelsPage(vmodel ModelsPageVModel) {
 						}
 					</div>
 					if vmodel.RemainingCount > 0 {
-						{{ href := templ.SafeURL(common.MutateURLString(common.CurrentURLString(ctx), common.WithValues("show_all", "true"))) }}
+						{{ href := templ.SafeURL(common.MutateURLString(common.CurrentURLString(ctx), common.WithoutValues("show_all", "*"), common.WithValues("show_all", "true"))) }}
 						<a
 							href={ href }
 							class="text-sm text-muted-foreground hover:text-foreground underline cursor-pointer"
@@ -150,45 +156,92 @@ templ apiExample(language, title, snippet string) {
 	}
 }
 
-// modelsSortControl renders two links that switch the models page between
-// usage-based ordering (default) and price-based ordering. We use plain
-// anchors pointing at the current URL with a `sort` (or no `sort`) query
-// parameter so the choice is bookmarkable and server-rendered.
-templ modelsSortControl(currentSort string) {
+// modelsSortControl renders two tabs (Usage / Prix) plus a small toggle
+// button that flips the current sort direction. The toggle's href is built
+// from the current URL with `order` swapped to the opposite value; the
+// criterion tabs preserve the current order in their own hrefs. Every link
+// is a plain anchor: no JS, no form, server-rendered, bookmarkable.
+templ modelsSortControl(currentSort string, currentOrder string) {
 	{{ sortURL := common.CurrentURLString(ctx) }}
-	<div class="inline-flex items-center rounded-md border bg-background p-0.5 text-sm">
-		if currentSort == "price" {
-			@sortTab(sortURL, "usage", false)
-			@sortTab(sortURL, "price", true)
-		} else {
-			@sortTab(sortURL, "usage", true)
-			@sortTab(sortURL, "price", false)
-		}
+	<div class="flex items-center gap-2">
+		<div class="inline-flex items-center rounded-md border bg-background p-0.5 text-sm">
+			if currentSort == "price" {
+				@sortTab(sortURL, "usage", false, currentOrder)
+				@sortTab(sortURL, "price", true, currentOrder)
+			} else {
+				@sortTab(sortURL, "usage", true, currentOrder)
+				@sortTab(sortURL, "price", false, currentOrder)
+			}
+		</div>
+		@orderToggle(sortURL, currentOrder)
 	</div>
 }
 
-templ sortTab(sortURL string, value string, active bool) {
+// sortTab renders one criterion tab. active controls whether the tab is
+// shown as a styled <span> (current sort) or as an <a> pointing at the
+// current URL with the right `sort` (and the unchanged `order`) applied.
+// The active tab must never carry an href: clicking it would do nothing
+// and could leak a duplicate `sort` param on bookmarked URLs.
+templ sortTab(sortURL string, value string, active bool, currentOrder string) {
+	{{ href := sortURL }}
 	if value == "usage" {
-		{{ href := common.MutateURLString(sortURL, common.WithoutValues("sort", "*")) }}
-		if active {
+		{{ href = common.MutateURLString(sortURL, common.WithoutValues("sort", "*")) }}
+	} else {
+		{{ href = common.MutateURLString(sortURL, common.WithoutValues("sort", "*"), common.WithValues("sort", "price")) }}
+	}
+	// Preserve the active order on the inactive tab's href so toggling
+	// criterion does not reset direction.
+	if !active && currentOrder != "" {
+		{{ href = common.MutateURLString(href, common.WithoutValues("order", "*"), common.WithValues("order", currentOrder)) }}
+	}
+	if active {
+		if value == "price" {
+			<span class="px-3 py-1 rounded bg-accent text-accent-foreground font-medium">Prix</span>
+		} else {
 			<span class="px-3 py-1 rounded bg-accent text-accent-foreground font-medium">Usage</span>
+		}
+	} else {
+		if value == "price" {
+			<a
+				href={ templ.SafeURL(href) }
+				class="px-3 py-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent/50"
+			>Prix</a>
 		} else {
 			<a
 				href={ templ.SafeURL(href) }
 				class="px-3 py-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent/50"
 			>Usage</a>
 		}
-	} else {
-		{{ href := common.MutateURLString(sortURL, common.WithoutValues("sort", "*"), common.WithValues("sort", "price")) }}
-		if active {
-			<span class="px-3 py-1 rounded bg-accent text-accent-foreground font-medium">Prix</span>
-		} else {
-			<a
-				href={ templ.SafeURL(href) }
-				class="px-3 py-1 rounded text-muted-foreground hover:text-foreground hover:bg-accent/50"
-			>Prix</a>
-		}
 	}
+}
+
+// orderToggle renders the ↑ / ↓ button that flips the current sort
+// direction. The icon reflects what the click WILL do, not the current
+// direction: a "Prix ↓" page shows a ↑ button labelled "Monter", and a
+// "Prix ↑" page shows a ↓ button labelled "Descendre". The href swaps
+// `order` to the opposite value; the `sort` criterion is left untouched.
+templ orderToggle(sortURL string, currentOrder string) {
+	{{ nextOrder := "asc" }}
+	{{ nextIcon := icon.ArrowDown }}
+	{{ nextLabel := "Descendre" }}
+	if currentOrder == "desc" {
+		{{ nextOrder = "asc" }}
+		{{ nextIcon = icon.ArrowUp }}
+		{{ nextLabel = "Monter" }}
+	} else {
+		{{ nextOrder = "desc" }}
+		{{ nextIcon = icon.ArrowDown }}
+		{{ nextLabel = "Descendre" }}
+	}
+	{{ href := common.MutateURLString(sortURL, common.WithoutValues("order", "*"), common.WithValues("order", nextOrder)) }}
+	<a
+		href={ templ.SafeURL(href) }
+		aria-label={ nextLabel }
+		title={ nextLabel }
+		class="inline-flex h-8 w-8 items-center justify-center rounded-md border bg-background text-muted-foreground hover:text-foreground hover:bg-accent/50"
+	>
+		@nextIcon(icon.Props{Class: "h-4 w-4"})
+	</a>
 }
 
 templ modelCard(mu ModelUsage) {
