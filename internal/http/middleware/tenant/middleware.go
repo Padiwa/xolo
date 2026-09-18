@@ -175,7 +175,9 @@ func (r *Resolver) resolveDefault(ctx context.Context) (model.Tenant, error) {
 }
 
 // stripPort removes the ":port" suffix of a host, if any. It tolerates a host
-// with no port, which net.SplitHostPort reports as an error.
+// with no port, which net.SplitHostPort reports as an error. net.SplitHostPort
+// unbrackets IPv6 literals, so callers that need to use the host as a URL
+// authority must re-bracket the result themselves.
 func stripPort(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		return h
@@ -183,10 +185,25 @@ func stripPort(host string) string {
 	return host
 }
 
+// bracketIfIPv6 wraps a bare IPv6 literal (one containing ":") in square
+// brackets. RFC 3986 §3.2.2 reserves colons as authority delimiters, so a
+// value going into a URL host field must keep its brackets whenever the
+// source did. A value already wrapped is returned unchanged.
+func bracketIfIPv6(host string) string {
+	if strings.HasPrefix(host, "[") {
+		return host
+	}
+	if strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
+	return host
+}
+
 // canonicalHostFromBaseURL extracts the lower-cased host (port stripped) of a
 // configured base URL. An empty, relative or malformed URL yields an empty
 // string: the resolver then refuses to forge a canonical host in single-tenant
-// mode rather than echoing the request.
+// mode rather than echoing the request. IPv6 literals are kept in brackets so
+// the returned value is valid as a URL authority.
 func canonicalHostFromBaseURL(baseURL string) string {
 	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
@@ -198,7 +215,16 @@ func canonicalHostFromBaseURL(baseURL string) string {
 		return ""
 	}
 
-	return strings.ToLower(stripPort(parsed.Host))
+	host := stripPort(parsed.Host)
+	if strings.HasPrefix(parsed.Host, "[") && !strings.HasPrefix(host, "[") {
+		// stripPort (via net.SplitHostPort) removed the brackets — re-add them
+		// so the result stays a valid URL authority.
+		host = "[" + host + "]"
+	} else {
+		host = bracketIfIPv6(host)
+	}
+
+	return strings.ToLower(host)
 }
 
 // Middleware injects the resolved tenant in the request context. notFound

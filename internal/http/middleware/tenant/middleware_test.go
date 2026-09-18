@@ -308,6 +308,18 @@ func TestResolverCanonicalHostSingleTenant(t *testing.T) {
 			host:    "xolo.example.com",
 			ok:      false,
 		},
+		"keeps ipv6 brackets when the configured base url has a port": {
+			baseURL: "http://[::1]:8080",
+			host:    "anything",
+			want:    "[::1]",
+			ok:      true,
+		},
+		"keeps ipv6 brackets when the configured base url has no port": {
+			baseURL: "http://[::1]",
+			host:    "anything",
+			want:    "[::1]",
+			ok:      true,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			resolver := tenant.NewResolver(newStore(), single, testCase.baseURL)
