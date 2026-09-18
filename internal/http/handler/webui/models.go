@@ -33,9 +33,10 @@ func (h *Handler) getModelsPage(w http.ResponseWriter, r *http.Request) {
 	// disagree (e.g. ?sort=price_invalid would otherwise render "Usage" as
 	// active while actually falling back to usage ordering). The result is
 	// forwarded to ModelsPageVModel.Sort, which modelsSortControl reads to
-	// decide which tab is rendered as the active <span>; keep the
-	// normalisation here so a future template-only move cannot desync the
-	// tab state from the actual ordering.
+	// decide which segment is rendered as the active <a> (the active
+	// segment carries the next-cycle href); keep the normalisation here so
+	// a future template-only move cannot desync the tab state from the
+	// actual ordering.
 	if sortParam != "" && sortParam != "price" {
 		sortParam = ""
 	}
@@ -152,8 +153,9 @@ func compareModelUsages(a, b component.ModelUsage, sortParam string, ord sortOrd
 			// end of the list regardless of order.
 			return !aVirtual
 		}
-		// Two non-virtual models with different per-1K rates are ordered
-		// in the requested direction; virtual models and equal-rate pairs
+		// Both are non-virtual (the early return on aVirtual != bVirtual
+		// guarantees this). Two non-virtual models with different per-1K
+		// rates are ordered in the requested direction; equal-rate pairs
 		// fall through to the usage comparison below.
 		if !aVirtual {
 			ac := a.Model.PromptCostPer1KTokens() + a.Model.CompletionCostPer1KTokens()

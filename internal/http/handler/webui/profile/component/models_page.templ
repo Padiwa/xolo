@@ -195,7 +195,12 @@ templ modelsSortControl(currentSort string, currentOrder string) {
 func usageSegment(sortURL string, currentSort string, currentOrder string) common.Segment {
 	if currentSort != "price" {
 		// Usage is active: label carries direction, href carries the
-		// opposite direction so the next click toggles.
+		// opposite direction so the next click toggles. We must drop
+		// any existing `order` first because httpURL.WithValues uses
+		// query.Add (append); without the drop the URL would carry
+		// `order=asc&order=desc` on a page that already had ?order=asc,
+		// and Go's url.Values.Get returns the first value, breaking
+		// the toggle on reachable bookmarks.
 		if currentOrder == "asc" {
 			return common.Segment{
 				Label:  "Usage ↑",
@@ -205,7 +210,7 @@ func usageSegment(sortURL string, currentSort string, currentOrder string) commo
 		}
 		return common.Segment{
 			Label:  "Usage ↓",
-			Href:   common.MutateURLString(sortURL, common.WithValues("order", "asc")),
+			Href:   common.MutateURLString(sortURL, common.WithoutValues("order", "*"), common.WithValues("order", "asc")),
 			Active: true,
 		}
 	}
@@ -221,8 +226,8 @@ func usageSegment(sortURL string, currentSort string, currentOrder string) commo
 // again.
 func priceSegment(sortURL string, currentSort string, currentOrder string) common.Segment {
 	if currentSort == "price" {
-		// Prix is active: label carries direction, href carries the
-		// opposite direction so the next click toggles.
+		// Prix is active: same drop-then-add pattern as usageSegment
+		// to avoid duplicate `order` params on reachable bookmarks.
 		if currentOrder == "desc" {
 			return common.Segment{
 				Label:  "Prix ↓",
@@ -232,15 +237,14 @@ func priceSegment(sortURL string, currentSort string, currentOrder string) commo
 		}
 		return common.Segment{
 			Label:  "Prix ↑",
-			Href:   common.MutateURLString(sortURL, common.WithValues("order", "desc")),
+			Href:   common.MutateURLString(sortURL, common.WithoutValues("order", "*"), common.WithValues("order", "desc")),
 			Active: true,
 		}
 	}
 	// Inactive: a single "Prix" tab lands on the criterion's natural
 	// default (Prix ↑ = ?sort=price).
 	href := common.MutateURLString(sortURL,
-		common.WithoutValues("sort", "*"),
-		common.WithoutValues("order", "*"),
+		common.WithoutValues("sort", "*", "order", "*"),
 		common.WithValues("sort", "price"),
 	)
 	return common.Segment{Label: "Prix", Href: href}
