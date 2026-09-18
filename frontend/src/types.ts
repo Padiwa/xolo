@@ -11,6 +11,7 @@ export type PipelineNodeType =
   | 'sample'
   | 'context'
   | 'trace'
+  | 'block'
   | 'note'
   | 'value'
   | 'plugin'
@@ -130,4 +131,5 @@ export const SCHEMA_CONFIGURED_KINDS: ReadonlySet<PipelineNodeType> = new Set<Pi
   'sample',
   'context',
   'trace',
+  'block',
 ])
