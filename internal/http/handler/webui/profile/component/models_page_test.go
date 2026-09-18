@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	common "github.com/xolo-gateway/xolo/internal/http/handler/webui/common/component"
 	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
 )
 
@@ -186,5 +187,64 @@ func TestModelsSortControlRendersActiveTabs(t *testing.T) {
 				t.Errorf("order-toggle href %q must NOT duplicate the order param", decodedToggle)
 			}
 		})
+	}
+}
+
+// TestModelsPageRangeFormHidesOrderWhenNotExplicit pins the rule that the
+// range form only round-trips the `order` hidden input when the request
+// explicitly carried ?order=... . On the default usage view (no order
+// param) the form must stay clean, so the user's bookmark of /models
+// does not pick up a redundant ?order=desc suffix just from changing
+// the period.
+func TestModelsPageRangeFormHidesOrderWhenNotExplicit(t *testing.T) {
+	current, _ := url.Parse("http://xolo.test/models")
+	ctx := httpCtx.SetBaseURL(context.Background(), "http://xolo.test")
+	ctx = httpCtx.SetCurrentURL(ctx, current)
+
+	vmodel := ModelsPageVModel{
+		AppLayoutVModel: common.AppLayoutVModel{
+			Breadcrumbs: []common.BreadcrumbItem{{Label: "X", Href: ""}},
+		},
+		Range:          "7d",
+		Order:          "desc",
+		OrderExplicit:  false, // default view: no ?order=... on the request
+	}
+
+	var out strings.Builder
+	if err := ModelsPage(vmodel).Render(ctx, &out); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := out.String()
+
+	if strings.Contains(html, `name="order"`) {
+		t.Errorf("default view must NOT emit a hidden order input, got:\n%s", html)
+	}
+}
+
+// TestModelsPageRangeFormRoundTripsExplicitOrder confirms the opposite:
+// when the request explicitly carried ?order=desc, the range form must
+// emit the hidden input so the order survives a period change.
+func TestModelsPageRangeFormRoundTripsExplicitOrder(t *testing.T) {
+	current, _ := url.Parse("http://xolo.test/models?order=desc")
+	ctx := httpCtx.SetBaseURL(context.Background(), "http://xolo.test")
+	ctx = httpCtx.SetCurrentURL(ctx, current)
+
+	vmodel := ModelsPageVModel{
+		AppLayoutVModel: common.AppLayoutVModel{
+			Breadcrumbs: []common.BreadcrumbItem{{Label: "X", Href: ""}},
+		},
+		Range:          "7d",
+		Order:          "desc",
+		OrderExplicit:  true,
+	}
+
+	var out strings.Builder
+	if err := ModelsPage(vmodel).Render(ctx, &out); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	html := out.String()
+
+	if !strings.Contains(html, `name="order" value="desc"`) {
+		t.Errorf("explicit ?order=desc view must emit the hidden input, got:\n%s", html)
 	}
 }

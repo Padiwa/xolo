@@ -47,11 +47,14 @@ func (h *Handler) getModelsPage(w http.ResponseWriter, r *http.Request) {
 	if sortParam == "price" {
 		order = orderAsc
 	}
+	orderExplicit := false
 	switch orderParam {
 	case "asc":
 		order = orderAsc
+		orderExplicit = true
 	case "desc":
 		order = orderDesc
+		orderExplicit = true
 	}
 
 	modelUsages := h.loadModelUsages(ctx, user.ID(), memberships, since)
@@ -87,6 +90,7 @@ func (h *Handler) getModelsPage(w http.ResponseWriter, r *http.Request) {
 		ShowAll:        showAll,
 		Sort:           sortParam,
 		Order:          order.String(),
+		OrderExplicit:  orderExplicit,
 	}
 
 	templ.Handler(component.ModelsPage(vmodel)).ServeHTTP(w, r)

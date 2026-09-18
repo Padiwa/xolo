@@ -30,6 +30,11 @@ type ModelsPageVModel struct {
 	// has its own default (price asc, usage desc) and Order reflects the
 	// effective direction so the URL and the toggle button never disagree.
 	Order string
+	// OrderExplicit is true when the request explicitly carried ?order=...
+	// (i.e. the user picked a non-default direction). The range form
+	// round-trips Order only when this is true, so the default view
+	// does not pollute its bookmark with a redundant ?order=... param.
+	OrderExplicit bool
 }
 
 templ ModelsPage(vmodel ModelsPageVModel) {
@@ -52,7 +57,7 @@ templ ModelsPage(vmodel ModelsPageVModel) {
 						if vmodel.Sort != "" {
 							<input type="hidden" name="sort" value={ vmodel.Sort }/>
 						}
-						if vmodel.Order != "" {
+						if vmodel.OrderExplicit {
 							<input type="hidden" name="order" value={ vmodel.Order }/>
 						}
 						if vmodel.ShowAll {

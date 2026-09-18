@@ -51,9 +51,7 @@ func BaseURLString(ctx context.Context, funcs ...httpURL.MutationFunc) string {
 }
 
 func CurrentURL(ctx context.Context, funcs ...httpURL.MutationFunc) templ.SafeURL {
-	currentURL := clone(httpCtx.CurrentURL(ctx))
-	mutated := httpURL.Mutate(currentURL, funcs...)
-	return templ.SafeURL(mutated.String())
+	return templ.SafeURL(httpURL.Mutate(httpCtx.CurrentURL(ctx), funcs...).String())
 }
 
 // CurrentURLString returns the current request URL as a plain string. It is
@@ -61,8 +59,7 @@ func CurrentURL(ctx context.Context, funcs ...httpURL.MutationFunc) templ.SafeUR
 // that need to apply mutations across multiple branches (templ does not
 // allow reassigning a `templ.SafeURL` value from a single declaration).
 func CurrentURLString(ctx context.Context) string {
-	currentURL := clone(httpCtx.CurrentURL(ctx))
-	return currentURL.String()
+	return httpURL.Mutate(httpCtx.CurrentURL(ctx)).String()
 }
 
 // MutateURLString parses rawURL, applies funcs and returns the resulting URL
@@ -80,11 +77,6 @@ func MutateURLString(rawURL string, funcs ...httpURL.MutationFunc) string {
 func MatchPath(ctx context.Context, path string) bool {
 	currentURL := httpCtx.CurrentURL(ctx)
 	return currentURL.Path == path
-}
-
-func clone[T any](v *T) *T {
-	copy := *v
-	return &copy
 }
 
 func AssertUser(ctx context.Context, funcs ...authz.AssertFunc) bool {
