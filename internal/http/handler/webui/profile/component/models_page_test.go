@@ -10,15 +10,15 @@ import (
 	common "github.com/xolo-gateway/xolo/internal/http/handler/webui/common/component"
 )
 
-// TestModelsSortControlRendersActiveTabs pins the three-segment sort
-// control built from modelsSortControl: Usage, Prix ↓, Prix ↑. The
-// segment matching the current (sort, order) pair is rendered as a
-// <button> with the active styling, the other two are rendered as
-// <a> links pointing at the current URL with the right query
-// parameters applied. Every link is a plain anchor except the active
-// segment, which stays a <button> so clicking it does nothing. The
-// control uses common.SegmentedNav so it inherits the same visual
-// style as the period selector (24 h / 7 j / 30 j / 12 m).
+// TestModelsSortControlRendersActiveTabs pins the two-segment cyclic
+// sort control built from modelsSortControl: Usage and Prix. Each
+// segment is a plain <a> link whose href carries the URL of the next
+// cycle step. The active segment's label embeds its current
+// direction (Usage ↓ / Usage ↑ / Prix ↑ / Prix ↓). Clicking the
+// active segment cycles to the opposite direction; clicking the
+// inactive segment lands on the new criterion at its natural default
+// direction. The control uses common.SegmentedNav so it inherits the
+// same visual style as the period selector (24 h / 7 j / 30 j / 12 m).
 func TestModelsSortControlRendersActiveTabs(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -26,56 +26,82 @@ func TestModelsSortControlRendersActiveTabs(t *testing.T) {
 		currentOrder string
 		// activeLabel is the visible text of the active segment.
 		activeLabel string
-		// inactiveLabels are the visible texts of the two inactive
-		// segments, paired with the URL mutations their hrefs must
-		// carry (and must NOT carry).
-		inactiveLabels []inactiveSegment
+		// inactiveLabel is the visible text of the inactive segment.
+		inactiveLabel string
+		// activeMustContain / activeMustNotContain pin the URL of
+		// the active segment, which carries the NEXT cycle step.
+		activeMustContain    []string
+		activeMustNotContain []string
+		// inactiveMustContain / inactiveMustNotContain pin the URL
+		// of the inactive segment, which lands on the criterion's
+		// natural default.
+		inactiveMustContain    []string
+		inactiveMustNotContain []string
 	}{
 		{
-			name:           "default usage view highlights Usage and links to Prix ↓ / Prix ↑",
-			currentSort:    "",
-			currentOrder:   "desc",
-			activeLabel:    "Usage",
-			inactiveLabels: []inactiveSegment{
-				{label: "Prix ↓", mustContain: []string{"sort=price", "order=desc", "range=7d", "show_all=true"}},
-				{label: "Prix ↑", mustContain: []string{"sort=price", "order=asc", "range=7d", "show_all=true"}},
-			},
+			name:             "default usage view: Usage ↓ active (→ Usage ↑), Prix inactive (→ Prix ↑)",
+			currentSort:      "",
+			currentOrder:     "desc",
+			activeLabel:      "Usage ↓",
+			inactiveLabel:    "Prix",
+			activeMustContain: []string{"order=asc", "range=7d", "show_all=true"},
+			activeMustNotContain: []string{"sort=price"},
+			inactiveMustContain:     []string{"sort=price", "range=7d", "show_all=true"},
+			inactiveMustNotContain: []string{"order=", "sort=price&sort=price"},
 		},
 		{
-			name:           "price desc view highlights Prix ↓ and links to Usage / Prix ↑",
-			currentSort:    "price",
-			currentOrder:   "desc",
-			activeLabel:    "Prix ↓",
-			inactiveLabels: []inactiveSegment{
-				{label: "Usage", mustNotContain: []string{"sort=", "order="}, mustContain: []string{"range=7d", "show_all=true"}},
-				{label: "Prix ↑", mustContain: []string{"sort=price", "order=asc", "range=7d", "show_all=true"}},
-			},
+			name:             "usage asc view: Usage ↑ active (→ Usage ↓), Prix inactive (→ Prix ↑)",
+			currentSort:      "",
+			currentOrder:     "asc",
+			activeLabel:      "Usage ↑",
+			inactiveLabel:    "Prix",
+			activeMustContain: []string{"range=7d", "show_all=true"},
+			activeMustNotContain: []string{"order=", "sort=price"},
+			inactiveMustContain:     []string{"sort=price", "range=7d", "show_all=true"},
+			inactiveMustNotContain: []string{"order="},
 		},
 		{
-			name:           "price asc view highlights Prix ↑ and links to Usage / Prix ↓",
-			currentSort:    "price",
-			currentOrder:   "asc",
-			activeLabel:    "Prix ↑",
-			inactiveLabels: []inactiveSegment{
-				{label: "Usage", mustNotContain: []string{"sort=", "order="}, mustContain: []string{"range=7d", "show_all=true"}},
-				{label: "Prix ↓", mustContain: []string{"sort=price", "order=desc", "range=7d", "show_all=true"}},
-			},
+			name:             "price asc view: Prix ↑ active (→ Prix ↓), Usage inactive (→ Usage ↓)",
+			currentSort:      "price",
+			currentOrder:     "asc",
+			activeLabel:      "Prix ↑",
+			inactiveLabel:    "Usage",
+			activeMustContain: []string{"sort=price", "order=desc", "range=7d", "show_all=true"},
+			activeMustNotContain: []string{"sort=price&sort=price"},
+			inactiveMustContain:     []string{"range=7d", "show_all=true"},
+			inactiveMustNotContain: []string{"sort=", "order="},
 		},
 		{
-			name:           "usage asc view highlights Usage and links to Prix ↓ / Prix ↑ (with order=asc stripped)",
-			currentSort:    "",
-			currentOrder:   "asc",
-			activeLabel:    "Usage",
-			inactiveLabels: []inactiveSegment{
-				{label: "Prix ↓", mustContain: []string{"sort=price", "order=desc", "range=7d", "show_all=true"}},
-				{label: "Prix ↑", mustContain: []string{"sort=price", "order=asc", "range=7d", "show_all=true"}},
-			},
+			name:             "price desc view: Prix ↓ active (→ Prix ↑), Usage inactive (→ Usage ↓)",
+			currentSort:      "price",
+			currentOrder:     "desc",
+			activeLabel:      "Prix ↓",
+			inactiveLabel:    "Usage",
+			activeMustContain: []string{"sort=price", "range=7d", "show_all=true"},
+			activeMustNotContain: []string{"sort=price&sort=price", "order=desc"},
+			inactiveMustContain:     []string{"range=7d", "show_all=true"},
+			inactiveMustNotContain: []string{"sort=", "order="},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			current, _ := url.Parse("http://xolo.test/models?range=7d&show_all=true")
+			// The current URL must mirror the view under test, otherwise
+			// the active segment's href (which is built from the current
+			// URL minus the toggled param) would not show the right
+			// payload.
+			var raw string
+			switch {
+			case tc.currentSort == "price" && tc.currentOrder == "desc":
+				raw = "http://xolo.test/models?range=7d&show_all=true&sort=price&order=desc"
+			case tc.currentSort == "price" && tc.currentOrder == "asc":
+				raw = "http://xolo.test/models?range=7d&show_all=true&sort=price&order=asc"
+			case tc.currentSort == "" && tc.currentOrder == "asc":
+				raw = "http://xolo.test/models?range=7d&show_all=true&order=asc"
+			default:
+				raw = "http://xolo.test/models?range=7d&show_all=true"
+			}
+			current, _ := url.Parse(raw)
 			ctx := httpCtx.SetBaseURL(context.Background(), "http://xolo.test")
 			ctx = httpCtx.SetCurrentURL(ctx, current)
 
@@ -85,62 +111,80 @@ func TestModelsSortControlRendersActiveTabs(t *testing.T) {
 			}
 			html := out.String()
 
-			// The active segment must be rendered as a <button> with
-			// the active styling (bg-primary-tint + text-primary, as
-			// defined by common.SegmentedNav).
-			activeButton := extractSegment(html, tc.activeLabel)
-			if activeButton == "" {
-				t.Fatalf("could not find segment %q in:\n%s", tc.activeLabel, html)
+			// Exactly two segments: the active label and the inactive label.
+			activeCount := strings.Count(html, ">"+tc.activeLabel+"<")
+			if activeCount != 1 {
+				t.Errorf("expected exactly one occurrence of active label %q, got %d:\n%s", tc.activeLabel, activeCount, html)
 			}
-			if !strings.HasPrefix(activeButton, "<button") {
-				t.Errorf("active segment %q must be a <button>, got:\n%s", tc.activeLabel, activeButton)
-			}
-			if !strings.Contains(activeButton, "bg-primary-tint") {
-				t.Errorf("active segment %q must use bg-primary-tint (matching the period selector), got:\n%s", tc.activeLabel, activeButton)
-			}
-			if strings.Contains(activeButton, "href=") {
-				t.Errorf("active segment must NOT carry an href, got:\n%s", activeButton)
+			inactiveCount := strings.Count(html, ">"+tc.inactiveLabel+"<")
+			if inactiveCount != 1 {
+				t.Errorf("expected exactly one occurrence of inactive label %q, got %d:\n%s", tc.inactiveLabel, inactiveCount, html)
 			}
 
-			// Each inactive segment must be an <a> whose href carries
-			// the expected mutations.
-			for _, seg := range tc.inactiveLabels {
-				tag := extractSegment(html, seg.label)
+			// Both segments are rendered as <a> links in this cyclic
+			// shape (the active one carries the next-cycle URL).
+			for _, label := range []string{tc.activeLabel, tc.inactiveLabel} {
+				tag := extractSegment(html, label)
 				if tag == "" {
-					t.Fatalf("could not find segment %q in:\n%s", seg.label, html)
+					t.Fatalf("could not find segment %q in:\n%s", label, html)
 				}
 				if !strings.HasPrefix(tag, "<a ") {
-					t.Errorf("inactive segment %q must be an <a>, got:\n%s", seg.label, tag)
+					t.Errorf("segment %q must be an <a>, got:\n%s", label, tag)
 				}
-				href := extractHref(tag)
-				if href == "" {
-					t.Fatalf("could not find href on inactive segment %q", seg.label)
+				if !strings.Contains(tag, "href=") {
+					t.Errorf("segment %q must carry an href, got:\n%s", label, tag)
 				}
-				decoded, err := url.QueryUnescape(href)
-				if err != nil {
-					t.Fatalf("href %q is not valid: %v", href, err)
+			}
+
+			// Active segment carries the active styling (bg-primary-tint).
+			activeTag := extractSegment(html, tc.activeLabel)
+			if !strings.Contains(activeTag, "bg-primary-tint") {
+				t.Errorf("active segment %q must use bg-primary-tint (matching the period selector), got:\n%s", tc.activeLabel, activeTag)
+			}
+
+			// Active segment's href carries the next cycle step.
+			activeHref := extractHref(activeTag)
+			if activeHref == "" {
+				t.Fatalf("could not find href on active segment %q", tc.activeLabel)
+			}
+			activeDecoded, err := url.QueryUnescape(activeHref)
+			if err != nil {
+				t.Fatalf("active href %q is not valid: %v", activeHref, err)
+			}
+			for _, want := range tc.activeMustContain {
+				if !strings.Contains(activeDecoded, want) {
+					t.Errorf("active segment %q href %q should contain %q", tc.activeLabel, activeDecoded, want)
 				}
-				for _, want := range seg.mustContain {
-					if !strings.Contains(decoded, want) {
-						t.Errorf("inactive segment %q href %q should contain %q", seg.label, decoded, want)
-					}
+			}
+			for _, unwanted := range tc.activeMustNotContain {
+				if strings.Contains(activeDecoded, unwanted) {
+					t.Errorf("active segment %q href %q must NOT contain %q", tc.activeLabel, activeDecoded, unwanted)
 				}
-				for _, unwanted := range seg.mustNotContain {
-					if strings.Contains(decoded, unwanted) {
-						t.Errorf("inactive segment %q href %q must NOT contain %q", seg.label, decoded, unwanted)
-					}
+			}
+
+			// Inactive segment's href carries the criterion's natural
+			// default.
+			inactiveTag := extractSegment(html, tc.inactiveLabel)
+			inactiveHref := extractHref(inactiveTag)
+			if inactiveHref == "" {
+				t.Fatalf("could not find href on inactive segment %q", tc.inactiveLabel)
+			}
+			inactiveDecoded, err := url.QueryUnescape(inactiveHref)
+			if err != nil {
+				t.Fatalf("inactive href %q is not valid: %v", inactiveHref, err)
+			}
+			for _, want := range tc.inactiveMustContain {
+				if !strings.Contains(inactiveDecoded, want) {
+					t.Errorf("inactive segment %q href %q should contain %q", tc.inactiveLabel, inactiveDecoded, want)
+				}
+			}
+			for _, unwanted := range tc.inactiveMustNotContain {
+				if strings.Contains(inactiveDecoded, unwanted) {
+					t.Errorf("inactive segment %q href %q must NOT contain %q", tc.inactiveLabel, inactiveDecoded, unwanted)
 				}
 			}
 		})
 	}
-}
-
-// inactiveSegment pins the URL expectations for one inactive segment of
-// the sort SegmentedNav.
-type inactiveSegment struct {
-	label          string
-	mustContain    []string
-	mustNotContain []string
 }
 
 // extractSegment returns the HTML tag (<button ...>...</button> or <a ...>...</a>)

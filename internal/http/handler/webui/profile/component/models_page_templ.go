@@ -579,14 +579,24 @@ func apiExample(language, title, snippet string) templ.Component {
 	})
 }
 
-// modelsSortControl renders a three-segment control (Usage / Prix ↓ /
-// Prix ↑) that mirrors the SegmentedNav used for the period selector
-// (24 h / 7 j / 30 j / 12 m) on the org and personal dashboards. The
-// selected criterion appears with its current direction; clicking any
-// other segment swaps criterion and direction in one click, falling
-// back to the criterion's natural default when the user comes from the
-// other criterion. Every link is a plain anchor: no JS, no form,
-// server-rendered, bookmarkable.
+// modelsSortControl renders a two-segment cyclic control (Usage /
+// Prix) that mirrors the SegmentedNav used for the period selector
+// (24 h / 7 j / 30 j / 12 m) on the org and personal dashboards.
+// Each segment is cyclic: clicking the inactive segment once enters
+// the new criterion at its natural default direction; clicking the
+// active segment again cycles through the available directions.
+//
+// Active and inactive segments are both rendered as <a> links: the
+// active one carries the URL of the next direction in the cycle, the
+// inactive one carries the URL of the criterion's natural default.
+// Server-rendered, bookmarkable, no JS.
+//
+// URL contract:
+//
+//	Usage ↓ (default):  /models
+//	Usage ↑            : /models?order=asc
+//	Prix ↑  (default): /models?sort=price
+//	Prix ↓             : /models?sort=price&order=desc
 func modelsSortControl(currentSort string, currentOrder string) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
@@ -610,13 +620,8 @@ func modelsSortControl(currentSort string, currentOrder string) templ.Component 
 		ctx = templ.ClearChildren(ctx)
 		sortURL := common.CurrentURLString(ctx)
 		templ_7745c5c3_Err = common.SegmentedNav([]common.Segment{
-			// Usage: drops `sort` and `order` so the new criterion lands on
-			// its natural default direction (usage desc).
-			usageSegment(sortURL, currentSort != "price"),
-			// Price ↓: explicit ?sort=price&order=desc.
-			priceSegment(sortURL, "Prix ↓", "desc", currentSort == "price" && currentOrder == "desc"),
-			// Price ↑: explicit ?sort=price&order=asc.
-			priceSegment(sortURL, "Prix ↑", "asc", currentSort == "price" && currentOrder == "asc"),
+			usageSegment(sortURL, currentSort, currentOrder),
+			priceSegment(sortURL, currentSort, currentOrder),
 		}).Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
@@ -626,30 +631,63 @@ func modelsSortControl(currentSort string, currentOrder string) templ.Component 
 }
 
 // usageSegment returns the Usage segment of the sort control. The
-// href drops `sort` and `order` so the user lands on the criterion's
-// natural default (usage desc).
-func usageSegment(sortURL string, active bool) common.Segment {
-	if active {
-		return common.Segment{Label: "Usage", Active: true}
+// active label embeds the current direction (Usage ↓ or Usage ↑);
+// its href carries the OPPOSITE direction so a click cycles the
+// order. The inactive label is plain "Usage" and its href drops
+// `sort` and `order` so the user lands on the criterion's natural
+// default (Usage ↓).
+func usageSegment(sortURL string, currentSort string, currentOrder string) common.Segment {
+	if currentSort != "price" {
+		// Usage is active: label carries direction, href carries the
+		// opposite direction so the next click toggles.
+		if currentOrder == "asc" {
+			return common.Segment{
+				Label:  "Usage ↑",
+				Href:   common.MutateURLString(sortURL, common.WithoutValues("order", "*")),
+				Active: true,
+			}
+		}
+		return common.Segment{
+			Label:  "Usage ↓",
+			Href:   common.MutateURLString(sortURL, common.WithValues("order", "asc")),
+			Active: true,
+		}
 	}
+	// Inactive: a single "Usage" tab lands on the criterion's natural
+	// default (Usage ↓ = no params).
 	href := common.MutateURLString(sortURL, common.WithoutValues("sort", "*"), common.WithoutValues("order", "*"))
-	return common.Segment{Label: "Usage", Href: href, Active: false}
+	return common.Segment{Label: "Usage", Href: href}
 }
 
-// priceSegment returns one of the two Price segments (↓ or ↑) of the
-// sort control. The href carries ?sort=price&order=... so each tab
-// stays self-contained and bookmarkable.
-func priceSegment(sortURL string, label string, order string, active bool) common.Segment {
-	if active {
-		return common.Segment{Label: label, Active: true}
+// priceSegment returns the Prix segment of the sort control. Same
+// cyclic pattern: 1st click from Usage → Prix ↑ (asc, the criterion
+// default), 2nd click on Prix ↑ → Prix ↓ (desc), 3rd click → Prix ↑
+// again.
+func priceSegment(sortURL string, currentSort string, currentOrder string) common.Segment {
+	if currentSort == "price" {
+		// Prix is active: label carries direction, href carries the
+		// opposite direction so the next click toggles.
+		if currentOrder == "desc" {
+			return common.Segment{
+				Label:  "Prix ↓",
+				Href:   common.MutateURLString(sortURL, common.WithoutValues("order", "*")),
+				Active: true,
+			}
+		}
+		return common.Segment{
+			Label:  "Prix ↑",
+			Href:   common.MutateURLString(sortURL, common.WithValues("order", "desc")),
+			Active: true,
+		}
 	}
+	// Inactive: a single "Prix" tab lands on the criterion's natural
+	// default (Prix ↑ = ?sort=price).
 	href := common.MutateURLString(sortURL,
 		common.WithoutValues("sort", "*"),
 		common.WithoutValues("order", "*"),
 		common.WithValues("sort", "price"),
-		common.WithValues("order", order),
 	)
-	return common.Segment{Label: label, Href: href, Active: false}
+	return common.Segment{Label: "Prix", Href: href}
 }
 
 func modelCard(mu ModelUsage) templ.Component {
@@ -720,7 +758,7 @@ func modelCard(mu ModelUsage) templ.Component {
 					var templ_7745c5c3_Var26 string
 					templ_7745c5c3_Var26, templ_7745c5c3_Err = templ.JoinStringErrs(mu.Org.Slug() + "/" + mu.Model.ProxyName())
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 226, Col: 51}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 263, Col: 51}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var26))
 					if templ_7745c5c3_Err != nil {
@@ -730,7 +768,7 @@ func modelCard(mu ModelUsage) templ.Component {
 					var templ_7745c5c3_Var27 string
 					templ_7745c5c3_Var27, templ_7745c5c3_Err = templ.JoinStringErrs(mu.Model.ProxyName())
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 228, Col: 29}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 265, Col: 29}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var27))
 					if templ_7745c5c3_Err != nil {
@@ -776,7 +814,7 @@ func modelCard(mu ModelUsage) templ.Component {
 					var templ_7745c5c3_Var28 string
 					templ_7745c5c3_Var28, templ_7745c5c3_Err = templ.JoinStringErrs(mu.Model.Description())
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 245, Col: 30}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 282, Col: 30}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var28))
 					if templ_7745c5c3_Err != nil {
@@ -813,7 +851,7 @@ func modelCard(mu ModelUsage) templ.Component {
 					var templ_7745c5c3_Var29 string
 					templ_7745c5c3_Var29, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d", mu.Aggregate.TotalRequests))
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 257, Col: 88}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 294, Col: 88}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var29))
 					if templ_7745c5c3_Err != nil {
@@ -826,7 +864,7 @@ func modelCard(mu ModelUsage) templ.Component {
 					var templ_7745c5c3_Var30 string
 					templ_7745c5c3_Var30, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d", mu.Aggregate.TotalTokens))
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 261, Col: 86}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 298, Col: 86}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var30))
 					if templ_7745c5c3_Err != nil {
@@ -839,7 +877,7 @@ func modelCard(mu ModelUsage) templ.Component {
 					var templ_7745c5c3_Var31 string
 					templ_7745c5c3_Var31, templ_7745c5c3_Err = templ.JoinStringErrs(common.FormatCost(mu.Aggregate.TotalCost, mu.Aggregate.Currency))
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 265, Col: 107}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 302, Col: 107}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var31))
 					if templ_7745c5c3_Err != nil {
@@ -857,7 +895,7 @@ func modelCard(mu ModelUsage) templ.Component {
 					var templ_7745c5c3_Var32 string
 					templ_7745c5c3_Var32, templ_7745c5c3_Err = templ.JoinStringErrs(formatCostPerM(mu.Model.PromptCostPer1KTokens(), orgCurrency(mu.Org)))
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 272, Col: 112}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 309, Col: 112}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var32))
 					if templ_7745c5c3_Err != nil {
@@ -870,7 +908,7 @@ func modelCard(mu ModelUsage) templ.Component {
 					var templ_7745c5c3_Var33 string
 					templ_7745c5c3_Var33, templ_7745c5c3_Err = templ.JoinStringErrs(formatCostPerM(mu.Model.CompletionCostPer1KTokens(), orgCurrency(mu.Org)))
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 276, Col: 116}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 313, Col: 116}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var33))
 					if templ_7745c5c3_Err != nil {
@@ -1073,7 +1111,7 @@ func ModelsGrid(modelUsages []ModelUsage) templ.Component {
 							var templ_7745c5c3_Var38 string
 							templ_7745c5c3_Var38, templ_7745c5c3_Err = templ.JoinStringErrs(mu.Org.Slug() + "/" + mu.Model.ProxyName())
 							if templ_7745c5c3_Err != nil {
-								return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 402, Col: 51}
+								return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 439, Col: 51}
 							}
 							_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var38))
 							if templ_7745c5c3_Err != nil {
@@ -1083,7 +1121,7 @@ func ModelsGrid(modelUsages []ModelUsage) templ.Component {
 							var templ_7745c5c3_Var39 string
 							templ_7745c5c3_Var39, templ_7745c5c3_Err = templ.JoinStringErrs(mu.Model.ProxyName())
 							if templ_7745c5c3_Err != nil {
-								return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 404, Col: 29}
+								return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 441, Col: 29}
 							}
 							_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var39))
 							if templ_7745c5c3_Err != nil {
@@ -1108,7 +1146,7 @@ func ModelsGrid(modelUsages []ModelUsage) templ.Component {
 						var templ_7745c5c3_Var40 string
 						templ_7745c5c3_Var40, templ_7745c5c3_Err = templ.JoinStringErrs(mu.Org.Name())
 						if templ_7745c5c3_Err != nil {
-							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 408, Col: 62}
+							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 445, Col: 62}
 						}
 						_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var40))
 						if templ_7745c5c3_Err != nil {
@@ -1153,7 +1191,7 @@ func ModelsGrid(modelUsages []ModelUsage) templ.Component {
 						var templ_7745c5c3_Var42 string
 						templ_7745c5c3_Var42, templ_7745c5c3_Err = templ.JoinStringErrs(mu.Model.Description())
 						if templ_7745c5c3_Err != nil {
-							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 414, Col: 72}
+							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 451, Col: 72}
 						}
 						_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var42))
 						if templ_7745c5c3_Err != nil {
@@ -1171,7 +1209,7 @@ func ModelsGrid(modelUsages []ModelUsage) templ.Component {
 					var templ_7745c5c3_Var43 string
 					templ_7745c5c3_Var43, templ_7745c5c3_Err = templ.JoinStringErrs(formatCostPerM(mu.Model.PromptCostPer1KTokens(), orgCurrency(mu.Org)))
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 419, Col: 102}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 456, Col: 102}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var43))
 					if templ_7745c5c3_Err != nil {
@@ -1184,7 +1222,7 @@ func ModelsGrid(modelUsages []ModelUsage) templ.Component {
 					var templ_7745c5c3_Var44 string
 					templ_7745c5c3_Var44, templ_7745c5c3_Err = templ.JoinStringErrs(formatCostPerM(mu.Model.CompletionCostPer1KTokens(), orgCurrency(mu.Org)))
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 423, Col: 106}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 460, Col: 106}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var44))
 					if templ_7745c5c3_Err != nil {
@@ -1202,7 +1240,7 @@ func ModelsGrid(modelUsages []ModelUsage) templ.Component {
 						var templ_7745c5c3_Var45 string
 						templ_7745c5c3_Var45, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d", mu.Aggregate.TotalRequests))
 						if templ_7745c5c3_Err != nil {
-							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 430, Col: 79}
+							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 467, Col: 79}
 						}
 						_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var45))
 						if templ_7745c5c3_Err != nil {
@@ -1215,7 +1253,7 @@ func ModelsGrid(modelUsages []ModelUsage) templ.Component {
 						var templ_7745c5c3_Var46 string
 						templ_7745c5c3_Var46, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d", mu.Aggregate.TotalTokens))
 						if templ_7745c5c3_Err != nil {
-							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 434, Col: 77}
+							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 471, Col: 77}
 						}
 						_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var46))
 						if templ_7745c5c3_Err != nil {
@@ -1228,7 +1266,7 @@ func ModelsGrid(modelUsages []ModelUsage) templ.Component {
 						var templ_7745c5c3_Var47 string
 						templ_7745c5c3_Var47, templ_7745c5c3_Err = templ.JoinStringErrs(common.FormatCost(mu.Aggregate.TotalCost, mu.Aggregate.Currency))
 						if templ_7745c5c3_Err != nil {
-							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 438, Col: 98}
+							return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 475, Col: 98}
 						}
 						_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var47))
 						if templ_7745c5c3_Err != nil {
