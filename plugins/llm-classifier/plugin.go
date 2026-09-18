@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/bornholm/genai/llm"
 	"github.com/xolo-gateway/xolo/pkg/pluginsdk"
 	proto "github.com/xolo-gateway/xolo/pkg/pluginsdk/proto"
 	"github.com/xolo-gateway/xolo/plugins/internal/requesttext"
@@ -207,38 +209,149 @@ func historyExcerpt(messagesJSON string, maxChars int) string {
 	return strings.Join(parts, "\n")
 }
 
-var reJSONObject = regexp.MustCompile(`(?s)\{.*\}`)
-
-// parseVerdict reads the model's answer. It accepts a JSON object, possibly
-// wrapped in prose or code fences, and falls back to spotting a category name
-// in the raw text, since small models do not always honour the format.
+// parseVerdict reads the model's answer. It tries the JSON object first, then
+// falls back to a word-boundary count of category mentions across the whole
+// text. The count replaces the previous first-match substring loop, which
+// always picked the first category in declaration order whenever the JSON
+// parse failed (so a request that mentioned every category ended up labelled
+// with whichever came first in the list).
 func parseVerdict(content string, categories []Category) (verdict, bool) {
-	var v verdict
-	if m := reJSONObject.FindString(content); m != "" {
-		if err := json.Unmarshal([]byte(m), &v); err == nil && v.Category != "" {
-			if name, ok := matchCategory(v.Category, categories); ok {
-				v.Category = name
-				v.Confidence = clamp01(v.Confidence)
-				if v.Confidence == 0 {
-					v.Confidence = 0.5
-				}
-				return v, true
-			}
+	if v, ok := tryParseJSON(content, categories); ok {
+		v.Confidence = clamp01(v.Confidence)
+		if v.Confidence == 0 {
+			v.Confidence = 0.5
 		}
+		return v, true
 	}
 	lower := strings.ToLower(content)
+	best, bestN := "", 0
 	for _, c := range categories {
-		if strings.Contains(lower, strings.ToLower(c.Name)) {
-			return verdict{Category: c.Name, Confidence: 0.5, Reason: truncate(content, 200)}, true
+		n := countWordMatches(lower, strings.ToLower(c.Name))
+		if n > bestN {
+			best, bestN = c.Name, n
+		}
+	}
+	if bestN > 0 {
+		return verdict{Category: best, Confidence: 0.5, Reason: truncate(content, 200)}, true
+	}
+	return verdict{}, false
+}
+
+// tryParseJSON delegates to genai, which splits the answer into balanced JSON
+// blocks and runs each through json-repair. Hand-rolling this does not pay
+// off: a greedy regexp swallows the surrounding prose, a non-greedy one
+// rejects an object holding a nested one or a brace inside a string value, and
+// neither copes with the trailing commas, single quotes and payloads cut short
+// by max_tokens that small models produce.
+//
+// Document order is a documented guarantee of ParseJSON ("every JSON object
+// found in the message content, in the order they appear"), not a property of
+// the current implementation, so the first-match rule below rests on the
+// dependency's contract rather than on its internals.
+//
+// The first block naming a *configured* category wins. A scratchpad object the
+// model wrote before its verdict is therefore skipped only when the category
+// it names is not configured — one that names a real category wins over the
+// verdict that follows it. That is the deliberate rule: with no way to tell a
+// draft from a final answer, the first recognisable verdict is the least
+// surprising choice, and it is what keeps a stray `{"a":1}` from deciding
+// anything. Same reason, one caveat: ParseJSON returns a payload cut short by
+// max_tokens after the blocks that closed on their own, so a closed draft
+// naming a configured category outranks a truncated real verdict.
+//
+// Testing each block against `categories` is also what ParseJSON asks of its
+// callers: it returns an error only when no block at all decoded, so a stray
+// `{}` decoding to a zero value hides the failure of the block that carried
+// the answer. Checking the field we expect, rather than the error, is the
+// prescribed way to tell "no verdict" from "unreadable verdict" — which is why
+// an err here simply means no blocks, and the prose count decides.
+//
+// There is no preference for a fenced block: the fence is prose around the
+// object, nothing more. Returns ok=false when no block names a configured
+// category, which is the normal path for a prose-only answer.
+func tryParseJSON(content string, categories []Category) (verdict, bool) {
+	verdicts, err := llm.ParseJSON[verdict](llm.NewMessage(llm.RoleAssistant, content))
+	if err != nil {
+		return verdict{}, false
+	}
+	for _, v := range verdicts {
+		if name, ok := matchCategory(v.Category, categories); ok {
+			v.Category = name
+			return v, true
 		}
 	}
 	return verdict{}, false
 }
 
+// countWordMatches returns how many times needle appears in haystack as a
+// whole word. Boundaries are decoded as runes, not bytes: an ASCII-only test
+// takes a UTF-8 continuation byte for a boundary, so "code" would count as a
+// mention inside "décode".
+//
+// The trade-off is that inflected forms no longer count: "coded", "maths" and
+// "docs" are not mentions of "code", "math" and "doc". Loosening this would
+// bring back the "encoder"/"hardcoded" false positives this path exists to
+// remove, and a category the model only names in the plural is rare enough
+// next to a category it names inside an unrelated word. Punctuation is a
+// boundary, so "code-based" and "code's" do count.
+func countWordMatches(haystack, needle string) int {
+	if needle == "" {
+		return 0
+	}
+	n, i := 0, 0
+	for i < len(haystack) {
+		j := strings.Index(haystack[i:], needle)
+		if j < 0 {
+			return n
+		}
+		k := i + j
+		if !endsWithWordRune(haystack[:k]) && !startsWithWordRune(haystack[k+len(needle):]) {
+			n++
+		}
+		i = k + len(needle)
+	}
+	return n
+}
+
+func endsWithWordRune(s string) bool {
+	if s == "" {
+		return false
+	}
+	r, _ := utf8.DecodeLastRuneInString(s)
+	return isWordRune(r)
+}
+
+func startsWithWordRune(s string) bool {
+	if s == "" {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(s)
+	return isWordRune(r)
+}
+
+// A combining mark is part of the word it decorates: without Mn, the decomposed
+// form of "décode" ("de" + U+0301 + "code") puts a non-letter right before
+// "code" and the mention counts, where the precomposed form already did not.
+// An underscore is part of a word for the same reason "hardcoded" is one:
+// "code_review" and "doc_file" are single tokens, not mentions of "code" and
+// "doc".
+func isWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.Is(unicode.Mn, r) || r == '_'
+}
+
 func matchCategory(answer string, categories []Category) (string, bool) {
 	answer = strings.TrimSpace(strings.ToLower(answer))
+	if answer == "" {
+		return "", false
+	}
 	for _, c := range categories {
 		if strings.ToLower(c.Name) == answer {
+			return c.Name, true
+		}
+	}
+	for _, c := range categories {
+		name := strings.ToLower(c.Name)
+		if name+"s" == answer || name == answer+"s" {
 			return c.Name, true
 		}
 	}
