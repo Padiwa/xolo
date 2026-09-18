@@ -157,20 +157,22 @@ templ apiExample(language, title, snippet string) {
 }
 
 // modelsSortControl renders two tabs (Usage / Prix) plus a small toggle
-// button that flips the current sort direction. The toggle's href is built
-// from the current URL with `order` swapped to the opposite value; the
-// criterion tabs preserve the current order in their own hrefs. Every link
-// is a plain anchor: no JS, no form, server-rendered, bookmarkable.
+// button that flips the current sort direction. The toggle's href swaps
+// `order` to the opposite value; the criterion tabs strip both `sort` and
+// `order` so each criterion falls back to its natural default direction
+// when selected (price=asc, usage=desc). The toggle button is the only
+// way to override the default. Every link is a plain anchor: no JS, no
+// form, server-rendered, bookmarkable.
 templ modelsSortControl(currentSort string, currentOrder string) {
 	{{ sortURL := common.CurrentURLString(ctx) }}
 	<div class="flex items-center gap-2">
 		<div class="inline-flex items-center rounded-md border bg-background p-0.5 text-sm">
 			if currentSort == "price" {
-				@sortTab(sortURL, "usage", false, currentOrder)
-				@sortTab(sortURL, "price", true, currentOrder)
+				@sortTab(sortURL, "usage", false)
+				@sortTab(sortURL, "price", true)
 			} else {
-				@sortTab(sortURL, "usage", true, currentOrder)
-				@sortTab(sortURL, "price", false, currentOrder)
+				@sortTab(sortURL, "usage", true)
+				@sortTab(sortURL, "price", false)
 			}
 		</div>
 		@orderToggle(sortURL, currentOrder)
@@ -179,20 +181,24 @@ templ modelsSortControl(currentSort string, currentOrder string) {
 
 // sortTab renders one criterion tab. active controls whether the tab is
 // shown as a styled <span> (current sort) or as an <a> pointing at the
-// current URL with the right `sort` (and the unchanged `order`) applied.
-// The active tab must never carry an href: clicking it would do nothing
-// and could leak a duplicate `sort` param on bookmarked URLs.
-templ sortTab(sortURL string, value string, active bool, currentOrder string) {
+// current URL with the right `sort` applied. The `order` param is
+// intentionally stripped: switching criterion falls back to that
+// criterion's natural default direction (price=asc, usage=desc) so the
+// user lands on the most useful view of the new criterion. The toggle
+// button is the only way to override the default. The active tab must
+// never carry an href: clicking it would do nothing and could leak a
+// duplicate `sort` param on bookmarked URLs.
+templ sortTab(sortURL string, value string, active bool) {
 	{{ href := sortURL }}
 	if value == "usage" {
 		{{ href = common.MutateURLString(sortURL, common.WithoutValues("sort", "*")) }}
 	} else {
 		{{ href = common.MutateURLString(sortURL, common.WithoutValues("sort", "*"), common.WithValues("sort", "price")) }}
 	}
-	// Preserve the active order on the inactive tab's href so toggling
-	// criterion does not reset direction.
-	if !active && currentOrder != "" {
-		{{ href = common.MutateURLString(href, common.WithoutValues("order", "*"), common.WithValues("order", currentOrder)) }}
+	// Always strip `order` from the inactive tab so the new criterion
+	// falls back to its natural direction.
+	if !active {
+		{{ href = common.MutateURLString(href, common.WithoutValues("order", "*")) }}
 	}
 	if active {
 		if value == "price" {
@@ -221,27 +227,29 @@ templ sortTab(sortURL string, value string, active bool, currentOrder string) {
 // "Prix ↑" page shows a ↓ button labelled "Descendre". The href swaps
 // `order` to the opposite value; the `sort` criterion is left untouched.
 templ orderToggle(sortURL string, currentOrder string) {
-	{{ nextOrder := "asc" }}
-	{{ nextIcon := icon.ArrowDown }}
-	{{ nextLabel := "Descendre" }}
 	if currentOrder == "desc" {
-		{{ nextOrder = "asc" }}
-		{{ nextIcon = icon.ArrowUp }}
-		{{ nextLabel = "Monter" }}
+		{{ nextOrder := "asc" }}
+		{{ href := common.MutateURLString(sortURL, common.WithoutValues("order", "*"), common.WithValues("order", nextOrder)) }}
+		<a
+			href={ templ.SafeURL(href) }
+			aria-label="Monter"
+			title="Monter"
+			class="inline-flex h-8 w-8 items-center justify-center rounded-md border bg-background text-muted-foreground hover:text-foreground hover:bg-accent/50"
+		>
+			@icon.ArrowUp(icon.Props{Class: "h-4 w-4"})
+		</a>
 	} else {
-		{{ nextOrder = "desc" }}
-		{{ nextIcon = icon.ArrowDown }}
-		{{ nextLabel = "Descendre" }}
+		{{ nextOrder := "desc" }}
+		{{ href := common.MutateURLString(sortURL, common.WithoutValues("order", "*"), common.WithValues("order", nextOrder)) }}
+		<a
+			href={ templ.SafeURL(href) }
+			aria-label="Descendre"
+			title="Descendre"
+			class="inline-flex h-8 w-8 items-center justify-center rounded-md border bg-background text-muted-foreground hover:text-foreground hover:bg-accent/50"
+		>
+			@icon.ArrowDown(icon.Props{Class: "h-4 w-4"})
+		</a>
 	}
-	{{ href := common.MutateURLString(sortURL, common.WithoutValues("order", "*"), common.WithValues("order", nextOrder)) }}
-	<a
-		href={ templ.SafeURL(href) }
-		aria-label={ nextLabel }
-		title={ nextLabel }
-		class="inline-flex h-8 w-8 items-center justify-center rounded-md border bg-background text-muted-foreground hover:text-foreground hover:bg-accent/50"
-	>
-		@nextIcon(icon.Props{Class: "h-4 w-4"})
-	</a>
 }
 
 templ modelCard(mu ModelUsage) {

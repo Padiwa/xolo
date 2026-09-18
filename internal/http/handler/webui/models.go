@@ -43,11 +43,9 @@ func (h *Handler) getModelsPage(w http.ResponseWriter, r *http.Request) {
 	//   - price is naturally read ascending (cheapest first);
 	//   - usage is naturally read descending (most-used first).
 	// orderParam overrides the default when set to the opposite value.
-	order := orderAsc
+	order := orderDesc
 	if sortParam == "price" {
 		order = orderAsc
-	} else {
-		order = orderDesc
 	}
 	switch orderParam {
 	case "asc":
@@ -134,9 +132,9 @@ func (o sortOrder) String() string {
 // ord flips the direction of the active sort. Under usage sort with
 // orderAsc, models with no usage (Aggregate nil or TotalRequests == 0)
 // are pushed to the end so the user does not see untested models at
-// the top. Under usage sort with orderDesc, models with usage come
-// last and never-used models lead the list — this is the default
-// historical behaviour and is preserved.
+// the top. Under usage sort with orderDesc, higher-usage models lead
+// the list and unused models trail — this is the default historical
+// behaviour and is preserved.
 //
 // Rows that compare equal under every tie-breaker (e.g. two virtual
 // models with nil aggregates) keep the order produced by loadModelUsages;

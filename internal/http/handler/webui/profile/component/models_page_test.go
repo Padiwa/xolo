@@ -18,8 +18,8 @@ import (
 // (which panicked in an earlier revision) would be caught here.
 func TestModelsSortControlRendersActiveTabs(t *testing.T) {
 	cases := []struct {
-		name        string
-		currentSort string
+		name         string
+		currentSort  string
 		currentOrder string
 		// activeLabel is the text of the tab rendered as a <span>.
 		activeLabel string
@@ -34,34 +34,44 @@ func TestModelsSortControlRendersActiveTabs(t *testing.T) {
 		toggleNextOrder string
 	}{
 		{
-			name:             "default sort highlights Usage and links to Price",
-			currentSort:      "",
-			currentOrder:     "desc",
-			activeLabel:      "Usage",
-			inactiveLabel:    "Prix",
-			hrefMustContain:  []string{"sort=price", "order=desc"},
-			hrefMustNotContain: []string{"sort=price&sort=price"},
-			toggleNextOrder:  "asc",
+			name:               "default sort highlights Usage and links to Price (natural price asc)",
+			currentSort:        "",
+			currentOrder:       "desc",
+			activeLabel:        "Usage",
+			inactiveLabel:      "Prix",
+			hrefMustContain:    []string{"sort=price", "range=7d", "show_all=true"},
+			hrefMustNotContain: []string{"sort=price&sort=price", "order="},
+			toggleNextOrder:    "asc",
 		},
 		{
-			name:             "price sort highlights Price and links back to Usage",
-			currentSort:      "price",
-			currentOrder:     "asc",
-			activeLabel:      "Prix",
-			inactiveLabel:    "Usage",
-			hrefMustContain:  []string{"range=7d", "show_all=true", "order=asc"},
-			hrefMustNotContain: []string{"sort="},
-			toggleNextOrder:  "desc",
+			name:               "price sort highlights Price and links back to Usage (natural usage desc)",
+			currentSort:        "price",
+			currentOrder:       "asc",
+			activeLabel:        "Prix",
+			inactiveLabel:      "Usage",
+			hrefMustContain:    []string{"range=7d", "show_all=true"},
+			hrefMustNotContain: []string{"sort=", "order="},
+			toggleNextOrder:    "desc",
 		},
 		{
-			name:             "price sort desc preserves order on the inactive tab",
-			currentSort:      "price",
-			currentOrder:     "desc",
-			activeLabel:      "Prix",
-			inactiveLabel:    "Usage",
-			hrefMustContain:  []string{"order=desc"},
-			hrefMustNotContain: []string{"order=desc&order=desc"},
-			toggleNextOrder:  "asc",
+			name:               "price sort desc links back to Usage without order carry-over",
+			currentSort:        "price",
+			currentOrder:       "desc",
+			activeLabel:        "Prix",
+			inactiveLabel:      "Usage",
+			hrefMustContain:    []string{"range=7d", "show_all=true"},
+			hrefMustNotContain: []string{"sort=", "order="},
+			toggleNextOrder:    "asc",
+		},
+		{
+			name:               "usage sort asc links to Price without order carry-over",
+			currentSort:        "",
+			currentOrder:       "asc",
+			activeLabel:        "Usage",
+			inactiveLabel:      "Prix",
+			hrefMustContain:    []string{"sort=price", "range=7d", "show_all=true"},
+			hrefMustNotContain: []string{"order="},
+			toggleNextOrder:    "desc",
 		},
 	}
 
