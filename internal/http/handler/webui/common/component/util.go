@@ -2,9 +2,11 @@ package component
 
 import (
 	"context"
+	"log/slog"
 	"net/url"
 
 	"github.com/a-h/templ"
+	"github.com/bornholm/go-x/slogx"
 	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/rbac"
@@ -62,13 +64,27 @@ func CurrentURLString(ctx context.Context) string {
 	return httpURL.Mutate(httpCtx.CurrentURL(ctx)).String()
 }
 
+// MutateCurrentURL returns the URL of the current request with funcs
+// applied as a single in-place mutation, avoiding the
+// serialize-parse round-trip of MutateURLString(CurrentURLString(ctx), ...).
+// Prefer this over the stringly-typed composition when both helpers
+// are available: a render of /models invokes the sort helper twice
+// per segment and the show-all link, so the round-trip adds up.
+func MutateCurrentURL(ctx context.Context, funcs ...httpURL.MutationFunc) string {
+	return httpURL.Mutate(httpCtx.CurrentURL(ctx), funcs...).String()
+}
+
 // MutateURLString parses rawURL, applies funcs and returns the resulting URL
 // as a string. It is intended for use from .templ when a SafeURL needs to
 // be reconstructed with extra mutations; templ.SafeURL wrapping happens at
-// the call site.
+// the call site. Parse errors are logged at debug level and the raw URL
+// is returned unchanged as a defensive fallback — the only caller passes
+// CurrentURLString(ctx), which is guaranteed to be well-formed, so the
+// fallback is unreachable in practice.
 func MutateURLString(rawURL string, funcs ...httpURL.MutationFunc) string {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
+		slog.Debug("MutateURLString: failed to parse URL; returning raw value", slog.String("raw_url", rawURL), slogx.Error(err))
 		return rawURL
 	}
 	return httpURL.Mutate(parsed, funcs...).String()

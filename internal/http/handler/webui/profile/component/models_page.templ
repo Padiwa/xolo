@@ -1,6 +1,7 @@
 package component
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/xolo-gateway/xolo/internal/core/model"
@@ -81,7 +82,7 @@ templ ModelsPage(vmodel ModelsPageVModel) {
 						}
 					</div>
 					if vmodel.RemainingCount > 0 {
-						{{ href := templ.SafeURL(common.MutateURLString(common.CurrentURLString(ctx), common.WithoutValues("show_all", "*"), common.WithValues("show_all", "true"))) }}
+						{{ href := templ.SafeURL(common.MutateCurrentURL(ctx, common.WithoutValues("show_all", "*"), common.WithValues("show_all", "true"))) }}
 						<a
 							href={ href }
 							class="text-sm text-muted-foreground hover:text-foreground underline cursor-pointer"
@@ -179,10 +180,9 @@ templ apiExample(language, title, snippet string) {
 //   Prix ↑  (default): /models?sort=price
 //   Prix ↓             : /models?sort=price&order=desc
 templ modelsSortControl(currentSort string, currentOrder string) {
-	{{ sortURL := common.CurrentURLString(ctx) }}
 	@common.SegmentedNav([]common.Segment{
-		usageSegment(sortURL, currentSort, currentOrder),
-		priceSegment(sortURL, currentSort, currentOrder),
+		usageSegment(ctx, currentSort, currentOrder),
+		priceSegment(ctx, currentSort, currentOrder),
 	})
 }
 
@@ -192,7 +192,7 @@ templ modelsSortControl(currentSort string, currentOrder string) {
 // order. The inactive label is plain "Usage" and its href drops
 // `sort` and `order` so the user lands on the criterion's natural
 // default (Usage ↓).
-func usageSegment(sortURL string, currentSort string, currentOrder string) common.Segment {
+func usageSegment(ctx context.Context, currentSort string, currentOrder string) common.Segment {
 	if currentSort != "price" {
 		// Usage is active: label carries direction, href carries the
 		// opposite direction so the next click toggles. We must drop
@@ -204,19 +204,19 @@ func usageSegment(sortURL string, currentSort string, currentOrder string) commo
 		if currentOrder == "asc" {
 			return common.Segment{
 				Label:  "Usage ↑",
-				Href:   common.MutateURLString(sortURL, common.WithoutValues("order", "*")),
+				Href:   common.MutateCurrentURL(ctx, common.WithoutValues("order", "*")),
 				Active: true,
 			}
 		}
 		return common.Segment{
 			Label:  "Usage ↓",
-			Href:   common.MutateURLString(sortURL, common.WithoutValues("order", "*"), common.WithValues("order", "asc")),
+			Href:   common.MutateCurrentURL(ctx, common.WithoutValues("order", "*"), common.WithValues("order", "asc")),
 			Active: true,
 		}
 	}
 	// Inactive: a single "Usage" tab lands on the criterion's natural
 	// default (Usage ↓ = no params).
-	href := common.MutateURLString(sortURL, common.WithoutValues("sort", "*"), common.WithoutValues("order", "*"))
+	href := common.MutateCurrentURL(ctx, common.WithoutValues("sort", "*"), common.WithoutValues("order", "*"))
 	return common.Segment{Label: "Usage", Href: href}
 }
 
@@ -224,26 +224,26 @@ func usageSegment(sortURL string, currentSort string, currentOrder string) commo
 // cyclic pattern: 1st click from Usage → Prix ↑ (asc, the criterion
 // default), 2nd click on Prix ↑ → Prix ↓ (desc), 3rd click → Prix ↑
 // again.
-func priceSegment(sortURL string, currentSort string, currentOrder string) common.Segment {
+func priceSegment(ctx context.Context, currentSort string, currentOrder string) common.Segment {
 	if currentSort == "price" {
 		// Prix is active: same drop-then-add pattern as usageSegment
 		// to avoid duplicate `order` params on reachable bookmarks.
 		if currentOrder == "desc" {
 			return common.Segment{
 				Label:  "Prix ↓",
-				Href:   common.MutateURLString(sortURL, common.WithoutValues("order", "*")),
+				Href:   common.MutateCurrentURL(ctx, common.WithoutValues("order", "*")),
 				Active: true,
 			}
 		}
 		return common.Segment{
 			Label:  "Prix ↑",
-			Href:   common.MutateURLString(sortURL, common.WithoutValues("order", "*"), common.WithValues("order", "desc")),
+			Href:   common.MutateCurrentURL(ctx, common.WithoutValues("order", "*"), common.WithValues("order", "desc")),
 			Active: true,
 		}
 	}
 	// Inactive: a single "Prix" tab lands on the criterion's natural
 	// default (Prix ↑ = ?sort=price).
-	href := common.MutateURLString(sortURL,
+	href := common.MutateCurrentURL(ctx,
 		common.WithoutValues("sort", "*", "order", "*"),
 		common.WithValues("sort", "price"),
 	)

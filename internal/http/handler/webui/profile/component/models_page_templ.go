@@ -9,6 +9,7 @@ import "github.com/a-h/templ"
 import templruntime "github.com/a-h/templ/runtime"
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/xolo-gateway/xolo/internal/core/model"
@@ -116,7 +117,7 @@ func ModelsPage(vmodel ModelsPageVModel) templ.Component {
 				var templ_7745c5c3_Var3 string
 				templ_7745c5c3_Var3, templ_7745c5c3_Err = templ.JoinStringErrs(vmodel.Sort)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 58, Col: 59}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 59, Col: 59}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var3))
 				if templ_7745c5c3_Err != nil {
@@ -135,7 +136,7 @@ func ModelsPage(vmodel ModelsPageVModel) templ.Component {
 				var templ_7745c5c3_Var4 string
 				templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(vmodel.Order)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 61, Col: 61}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 62, Col: 61}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
 				if templ_7745c5c3_Err != nil {
@@ -181,7 +182,7 @@ func ModelsPage(vmodel ModelsPageVModel) templ.Component {
 					return templ_7745c5c3_Err
 				}
 				if vmodel.RemainingCount > 0 {
-					href := templ.SafeURL(common.MutateURLString(common.CurrentURLString(ctx), common.WithoutValues("show_all", "*"), common.WithValues("show_all", "true")))
+					href := templ.SafeURL(common.MutateCurrentURL(ctx, common.WithoutValues("show_all", "*"), common.WithValues("show_all", "true")))
 					templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 13, "<a href=\"")
 					if templ_7745c5c3_Err != nil {
 						return templ_7745c5c3_Err
@@ -189,7 +190,7 @@ func ModelsPage(vmodel ModelsPageVModel) templ.Component {
 					var templ_7745c5c3_Var5 templ.SafeURL
 					templ_7745c5c3_Var5, templ_7745c5c3_Err = templ.JoinURLErrs(href)
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 86, Col: 18}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 87, Col: 18}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var5))
 					if templ_7745c5c3_Err != nil {
@@ -202,7 +203,7 @@ func ModelsPage(vmodel ModelsPageVModel) templ.Component {
 					var templ_7745c5c3_Var6 string
 					templ_7745c5c3_Var6, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d", vmodel.RemainingCount))
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 89, Col: 58}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 90, Col: 58}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var6))
 					if templ_7745c5c3_Err != nil {
@@ -309,7 +310,7 @@ func ModelsPage(vmodel ModelsPageVModel) templ.Component {
 					var templ_7745c5c3_Var11 templ.SafeURL
 					templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinURLErrs(common.BaseURL(ctx, common.WithPath("/profile/tokens")))
 					if templ_7745c5c3_Err != nil {
-						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 114, Col: 141}
+						return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 115, Col: 141}
 					}
 					_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
 					if templ_7745c5c3_Err != nil {
@@ -527,7 +528,7 @@ func apiExample(language, title, snippet string) templ.Component {
 				var templ_7745c5c3_Var20 string
 				templ_7745c5c3_Var20, templ_7745c5c3_Err = templ.JoinStringErrs(title)
 				if templ_7745c5c3_Err != nil {
-					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 156, Col: 40}
+					return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/models_page.templ`, Line: 157, Col: 40}
 				}
 				_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var20))
 				if templ_7745c5c3_Err != nil {
@@ -618,10 +619,9 @@ func modelsSortControl(currentSort string, currentOrder string) templ.Component 
 			templ_7745c5c3_Var22 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		sortURL := common.CurrentURLString(ctx)
 		templ_7745c5c3_Err = common.SegmentedNav([]common.Segment{
-			usageSegment(sortURL, currentSort, currentOrder),
-			priceSegment(sortURL, currentSort, currentOrder),
+			usageSegment(ctx, currentSort, currentOrder),
+			priceSegment(ctx, currentSort, currentOrder),
 		}).Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
@@ -636,7 +636,7 @@ func modelsSortControl(currentSort string, currentOrder string) templ.Component 
 // order. The inactive label is plain "Usage" and its href drops
 // `sort` and `order` so the user lands on the criterion's natural
 // default (Usage ↓).
-func usageSegment(sortURL string, currentSort string, currentOrder string) common.Segment {
+func usageSegment(ctx context.Context, currentSort string, currentOrder string) common.Segment {
 	if currentSort != "price" {
 		// Usage is active: label carries direction, href carries the
 		// opposite direction so the next click toggles. We must drop
@@ -648,19 +648,19 @@ func usageSegment(sortURL string, currentSort string, currentOrder string) commo
 		if currentOrder == "asc" {
 			return common.Segment{
 				Label:  "Usage ↑",
-				Href:   common.MutateURLString(sortURL, common.WithoutValues("order", "*")),
+				Href:   common.MutateCurrentURL(ctx, common.WithoutValues("order", "*")),
 				Active: true,
 			}
 		}
 		return common.Segment{
 			Label:  "Usage ↓",
-			Href:   common.MutateURLString(sortURL, common.WithoutValues("order", "*"), common.WithValues("order", "asc")),
+			Href:   common.MutateCurrentURL(ctx, common.WithoutValues("order", "*"), common.WithValues("order", "asc")),
 			Active: true,
 		}
 	}
 	// Inactive: a single "Usage" tab lands on the criterion's natural
 	// default (Usage ↓ = no params).
-	href := common.MutateURLString(sortURL, common.WithoutValues("sort", "*"), common.WithoutValues("order", "*"))
+	href := common.MutateCurrentURL(ctx, common.WithoutValues("sort", "*"), common.WithoutValues("order", "*"))
 	return common.Segment{Label: "Usage", Href: href}
 }
 
@@ -668,26 +668,26 @@ func usageSegment(sortURL string, currentSort string, currentOrder string) commo
 // cyclic pattern: 1st click from Usage → Prix ↑ (asc, the criterion
 // default), 2nd click on Prix ↑ → Prix ↓ (desc), 3rd click → Prix ↑
 // again.
-func priceSegment(sortURL string, currentSort string, currentOrder string) common.Segment {
+func priceSegment(ctx context.Context, currentSort string, currentOrder string) common.Segment {
 	if currentSort == "price" {
 		// Prix is active: same drop-then-add pattern as usageSegment
 		// to avoid duplicate `order` params on reachable bookmarks.
 		if currentOrder == "desc" {
 			return common.Segment{
 				Label:  "Prix ↓",
-				Href:   common.MutateURLString(sortURL, common.WithoutValues("order", "*")),
+				Href:   common.MutateCurrentURL(ctx, common.WithoutValues("order", "*")),
 				Active: true,
 			}
 		}
 		return common.Segment{
 			Label:  "Prix ↑",
-			Href:   common.MutateURLString(sortURL, common.WithoutValues("order", "*"), common.WithValues("order", "desc")),
+			Href:   common.MutateCurrentURL(ctx, common.WithoutValues("order", "*"), common.WithValues("order", "desc")),
 			Active: true,
 		}
 	}
 	// Inactive: a single "Prix" tab lands on the criterion's natural
 	// default (Prix ↑ = ?sort=price).
-	href := common.MutateURLString(sortURL,
+	href := common.MutateCurrentURL(ctx,
 		common.WithoutValues("sort", "*", "order", "*"),
 		common.WithValues("sort", "price"),
 	)
