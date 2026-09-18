@@ -5,12 +5,12 @@ import (
 	"net/url"
 
 	"github.com/a-h/templ"
+	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/rbac"
 	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
 	"github.com/xolo-gateway/xolo/internal/http/middleware/authz"
 	httpURL "github.com/xolo-gateway/xolo/internal/http/url"
-	"github.com/pkg/errors"
 )
 
 // HasPermission reports whether the current user holds perm within orgID.
@@ -54,6 +54,27 @@ func CurrentURL(ctx context.Context, funcs ...httpURL.MutationFunc) templ.SafeUR
 	currentURL := clone(httpCtx.CurrentURL(ctx))
 	mutated := httpURL.Mutate(currentURL, funcs...)
 	return templ.SafeURL(mutated.String())
+}
+
+// CurrentURLString returns the current request URL as a plain string. It is
+// the stringly-typed counterpart of CurrentURL, useful from .templ files
+// that need to apply mutations across multiple branches (templ does not
+// allow reassigning a `templ.SafeURL` value from a single declaration).
+func CurrentURLString(ctx context.Context) string {
+	currentURL := clone(httpCtx.CurrentURL(ctx))
+	return currentURL.String()
+}
+
+// MutateURLString parses rawURL, applies funcs and returns the resulting URL
+// as a string. It is intended for use from .templ when a SafeURL needs to
+// be reconstructed with extra mutations; templ.SafeURL wrapping happens at
+// the call site.
+func MutateURLString(rawURL string, funcs ...httpURL.MutationFunc) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	return httpURL.Mutate(parsed, funcs...).String()
 }
 
 func MatchPath(ctx context.Context, path string) bool {

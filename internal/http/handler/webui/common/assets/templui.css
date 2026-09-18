@@ -1607,6 +1607,9 @@
   .p-0 {
     padding: calc(var(--spacing) * 0);
   }
+  .p-0\.5 {
+    padding: calc(var(--spacing) * 0.5);
+  }
   .p-1 {
     padding: calc(var(--spacing) * 1);
   }
@@ -2824,6 +2827,16 @@
     &:hover {
       @media (hover: hover) {
         background-color: var(--accent);
+      }
+    }
+  }
+  .hover\:bg-accent\/50 {
+    &:hover {
+      @media (hover: hover) {
+        background-color: var(--accent);
+        @supports (color: color-mix(in lab, red, red)) {
+          background-color: color-mix(in oklab, var(--accent) 50%, transparent);
+        }
       }
     }
   }

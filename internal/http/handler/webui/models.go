@@ -27,22 +27,22 @@ func (h *Handler) getModelsPage(w http.ResponseWriter, r *http.Request) {
 	rangeParam := r.URL.Query().Get("range")
 	since := dashboardRangeToSince(rangeParam)
 	showAll := r.URL.Query().Get("show_all") == "true"
+	sortParam := r.URL.Query().Get("sort")
+	// Normalise unknown sort values so the URL and the active UI tab never
+	// disagree (e.g. ?sort=price_invalid would otherwise render "Usage" as
+	// active while actually falling back to usage ordering). The result is
+	// forwarded to ModelsPageVModel.Sort, which modelsSortControl reads to
+	// decide which tab is rendered as the active <span>; keep the
+	// normalisation here so a future template-only move cannot desync the
+	// tab state from the actual ordering.
+	if sortParam != "" && sortParam != "price" {
+		sortParam = ""
+	}
 
 	modelUsages := h.loadModelUsages(ctx, user.ID(), memberships, since)
 
 	sort.Slice(modelUsages, func(i, j int) bool {
-		a := modelUsages[i].Aggregate
-		b := modelUsages[j].Aggregate
-		if a == nil && b == nil {
-			return false
-		}
-		if a == nil {
-			return false
-		}
-		if b == nil {
-			return true
-		}
-		return a.TotalRequests > b.TotalRequests
+		return compareModelUsages(modelUsages[i], modelUsages[j], sortParam)
 	})
 
 	allModelUsages := modelUsages
@@ -69,9 +69,60 @@ func (h *Handler) getModelsPage(w http.ResponseWriter, r *http.Request) {
 		AllModelUsages: allModelUsages,
 		Range:          rangeParam,
 		RemainingCount: remainingCount,
+		ShowAll:        showAll,
+		Sort:           sortParam,
 	}
 
 	templ.Handler(component.ModelsPage(vmodel)).ServeHTTP(w, r)
+}
+
+// compareModelUsages orders two ModelUsage rows for the /models page.
+//
+// sortParam semantics:
+//   - "price" — order by per-1K rate (PromptCostPer1KTokens +
+//     CompletionCostPer1KTokens) ascending. This is the same rate the
+//     card display builds from, NOT Aggregate.TotalCost over the selected
+//     period. Virtual models have no direct pricing so they are pushed
+//     to the end of the list. Ties (including virtual-vs-virtual) fall
+//     back to the usage comparison below.
+//   - anything else (including "") — fall through to the existing usage
+//     comparison (total requests descending), preserving the previous
+//     behaviour.
+//
+// Rows that compare equal under every tie-breaker (e.g. two virtual
+// models with nil aggregates) keep the order produced by loadModelUsages;
+// sort.Slice is unstable, so two such rows may swap between renders.
+func compareModelUsages(a, b component.ModelUsage, sortParam string) bool {
+	if sortParam == "price" {
+		aVirtual := a.Model.IsVirtual()
+		bVirtual := b.Model.IsVirtual()
+		if aVirtual != bVirtual {
+			return !aVirtual
+		}
+		// Two non-virtual models with different total costs are ordered
+		// ascending; virtual models and equal-cost pairs fall through to
+		// the usage comparison below.
+		if !aVirtual {
+			ac := a.Model.PromptCostPer1KTokens() + a.Model.CompletionCostPer1KTokens()
+			bc := b.Model.PromptCostPer1KTokens() + b.Model.CompletionCostPer1KTokens()
+			if ac != bc {
+				return ac < bc
+			}
+		}
+	}
+
+	aa := a.Aggregate
+	bb := b.Aggregate
+	if aa == nil && bb == nil {
+		return false
+	}
+	if aa == nil {
+		return false
+	}
+	if bb == nil {
+		return true
+	}
+	return aa.TotalRequests > bb.TotalRequests
 }
 
 func (h *Handler) loadModelUsages(ctx context.Context, userID model.UserID, memberships []model.Membership, since time.Time) []component.ModelUsage {
