@@ -50,7 +50,9 @@ Sert à alimenter un port qu'on veut fixer sans le calculer. Dans le pipeline «
 
 Compare `value` à un seuil et émet `result`, un booléen.
 
-Ports : `value` (number, requis), `threshold` (number) en entrée, `result` (boolean) en sortie. Configuration : l'opérateur (`gt`, `gte`, `lt`, `lte`, `eq`, `ne`) et le seuil, utilisé quand le port `threshold` n'est pas connecté.
+Ports : `value` (number), `threshold` (number) et `text` (string) en entrée, `result` (boolean) en sortie. Configuration : l'opérateur (`gt`, `gte`, `lt`, `lte`, `eq`, `ne`), le seuil, utilisé quand le port `threshold` n'est pas connecté, et la chaîne attendue.
+
+Il faut connecter `value` ou `text`, pas les deux. Avec `text`, la chaîne reçue est comparée à la chaîne attendue, sans tenir compte de la casse ni des espaces autour. Seuls `eq` et `ne` s'appliquent, et la chaîne attendue est obligatoire : un opérateur d'ordre ou une chaîne vide font échouer la requête plutôt que de produire un booléen constant. Le bandeau de l'éditeur signale ces trois cas avant l'enregistrement. C'est ainsi qu'une catégorie émise par `llm-classifier` ou `text-classifier` devient un booléen pour un `select` ou un `block`, sans script.
 
 ![Configuration du nœud compare](./screenshots/inspector-cmp.png)
 

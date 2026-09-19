@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"hash/fnv"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -60,18 +61,44 @@ func numberInput(inputs map[string]interface{}, name string) (float64, bool) {
 
 // CompareExecutor handles NodeTypeCompare: value <op> threshold -> boolean.
 // The threshold comes from the port when connected, from the data otherwise.
+// With the text port connected instead of value, the string is compared to
+// the configured Expected string, so a classifier's category can drive a
+// select or a block without a script. Both strings are trimmed and compared
+// without regard to case: a category is a label, not a payload.
 type CompareExecutor struct{ noopBackwardExecutor }
 
 func NewCompareExecutor() *CompareExecutor { return &CompareExecutor{} }
 
 func (e *CompareExecutor) Forward(_ context.Context, node model.PipelineNode, inputs map[string]interface{}, _ ExecutionContext) (*ForwardResult, error) {
-	data := model.CompareNodeData{Op: "gt"}
+	var data model.CompareNodeData
 	if err := decodeNodeData(node, &data); err != nil {
 		return nil, errors.Wrap(err, "compare node: invalid data")
 	}
+	// The mode follows the wiring, not the type of what arrived: a text port
+	// fed by a number is a wiring mistake to report, not a reason to fall back
+	// to the numeric comparison. The editor refuses these cases too, but a
+	// graph that arrives through the API must not silently pick one side.
+	rawText, hasText := inputs["text"]
+	_, hasValue := inputs["value"]
+	if hasText && hasValue {
+		return nil, errors.Errorf("compare node %s: value and text are both connected, keep one", node.ID)
+	}
+	if hasText {
+		text, ok := rawText.(string)
+		if !ok {
+			return nil, errors.Errorf("compare node %s: text port received a %T, connect it to a string output", node.ID, rawText)
+		}
+		return compareText(node, data, text)
+	}
+	if data.Op == "" {
+		data.Op = "gt"
+	}
 	value, ok := numberInput(inputs, "value")
 	if !ok {
-		return nil, errors.Errorf("compare node %s: value port is not connected or not a number", node.ID)
+		if hasValue {
+			return nil, errors.Errorf("compare node %s: value port received a %T, connect it to a number output", node.ID, inputs["value"])
+		}
+		return nil, errors.Errorf("compare node %s: neither value nor text port is connected", node.ID)
 	}
 	threshold := data.Threshold
 	if t, ok := numberInput(inputs, "threshold"); ok {
@@ -94,6 +121,26 @@ func (e *CompareExecutor) Forward(_ context.Context, node model.PipelineNode, in
 		result = value != threshold
 	default:
 		return nil, errors.Errorf("compare node %s: unknown op %q", node.ID, data.Op)
+	}
+	return &ForwardResult{OutputValues: map[string]interface{}{"result": result}}, nil
+}
+
+func compareText(node model.PipelineNode, data model.CompareNodeData, text string) (*ForwardResult, error) {
+	expected := strings.TrimSpace(data.Expected)
+	if expected == "" {
+		// An empty expectation would make the node a constant, and a policy
+		// built on it silently inert. Fail loudly instead.
+		return nil, errors.Errorf("compare node %s: text port is connected but no expected string is configured", node.ID)
+	}
+	equal := strings.EqualFold(strings.TrimSpace(text), expected)
+	var result bool
+	switch data.Op {
+	case "eq", "":
+		result = equal
+	case "ne":
+		result = !equal
+	default:
+		return nil, errors.Errorf("compare node %s: op %q does not apply to text, use eq or ne", node.ID, data.Op)
 	}
 	return &ForwardResult{OutputValues: map[string]interface{}{"result": result}}, nil
 }

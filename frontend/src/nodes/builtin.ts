@@ -22,6 +22,11 @@ export function builtinSummary(kind: PipelineNodeType, data: Record<string, unkn
     case 'compare': {
       const op = (data.op as string) ?? 'gt'
       const sym: Record<string, string> = { gt: '>', gte: '≥', lt: '<', lte: '≤', eq: '=', ne: '≠' }
+      const expected = typeof data.expected === 'string' ? data.expected.trim() : ''
+      // The summary cannot see the wiring, so a residual expected string
+      // with an ordering operator falls back to the numeric reading; the
+      // validation banner is where a wrong text setup gets reported.
+      if (expected && (op === 'eq' || op === 'ne')) return `${sym[op]} "${expected}"`
       return `${sym[op] ?? op} ${data.threshold ?? 0.5}`
     }
     case 'select':

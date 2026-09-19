@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,6 +47,46 @@ func TestCompareExecutor(t *testing.T) {
 	}
 	if _, err := e.Forward(context.Background(), nodeWith(model.NodeTypeCompare, ""), map[string]interface{}{}, ExecutionContext{}); err == nil {
 		t.Error("missing value must fail")
+	}
+	textCases := []struct {
+		data string
+		text string
+		want bool
+	}{
+		{`{"op":"eq","expected":"hors_sujet"}`, "hors_sujet", true},
+		{`{"op":"eq","expected":"hors_sujet"}`, " Hors_Sujet ", true},
+		{`{"op":"eq","expected":"hors_sujet"}`, "support", false},
+		{`{"op":"ne","expected":"hors_sujet"}`, "support", true},
+		// An absent op reads as eq.
+		{`{"expected":"support"}`, "support", true},
+	}
+	for _, c := range textCases {
+		res, err := e.Forward(context.Background(), nodeWith(model.NodeTypeCompare, c.data), map[string]interface{}{"text": c.text}, ExecutionContext{})
+		if err != nil {
+			t.Fatalf("%s %q: %v", c.data, c.text, err)
+		}
+		if res.OutputValues["result"] != c.want {
+			t.Errorf("%s %q: expected %v, got %v", c.data, c.text, c.want, res.OutputValues["result"])
+		}
+	}
+	for _, data := range []string{`{"op":"lt","expected":"x"}`, `{"op":"gt","expected":"x"}`} {
+		if _, err := e.Forward(context.Background(), nodeWith(model.NodeTypeCompare, data), map[string]interface{}{"text": "x"}, ExecutionContext{}); err == nil {
+			t.Errorf("%s: an ordering op on text must fail", data)
+		}
+	}
+	if _, err := e.Forward(context.Background(), nodeWith(model.NodeTypeCompare, `{"op":"eq"}`), map[string]interface{}{"text": "x"}, ExecutionContext{}); err == nil {
+		t.Error("an empty expected string must fail rather than yield a constant")
+	}
+	if _, err := e.Forward(context.Background(), nodeWith(model.NodeTypeCompare, `{"op":"eq","expected":"x"}`), map[string]interface{}{"text": "x", "value": 1.0}, ExecutionContext{}); err == nil {
+		t.Error("value and text both connected must fail rather than silently prefer text")
+	}
+	// The wiring decides the mode: a text port fed by a number is reported as
+	// such, and never falls back to the numeric comparison.
+	if _, err := e.Forward(context.Background(), nodeWith(model.NodeTypeCompare, `{"op":"eq","expected":"x"}`), map[string]interface{}{"text": 0.7, "value": 1.0}, ExecutionContext{}); err == nil || !strings.Contains(err.Error(), "both connected") {
+		t.Errorf("both ports wired with a numeric text must still fail on the wiring, got %v", err)
+	}
+	if _, err := e.Forward(context.Background(), nodeWith(model.NodeTypeCompare, `{"op":"eq","expected":"x"}`), map[string]interface{}{"text": 0.7}, ExecutionContext{}); err == nil || !strings.Contains(err.Error(), "text port received") {
+		t.Errorf("a numeric text must name the text port, got %v", err)
 	}
 	if _, err := e.Forward(context.Background(), nodeWith(model.NodeTypeCompare, `{"op":"between"}`), map[string]interface{}{"value": 1.0}, ExecutionContext{}); err == nil {
 		t.Error("unknown op must fail")
