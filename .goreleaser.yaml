@@ -6,7 +6,8 @@ before:
 
 builds:
   - id: xolo-server
-    targets: [go_first_class]
+    goos: [linux]
+    goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     dir: ./cmd/server
     binary: xolo-server
@@ -16,7 +17,8 @@ builds:
       - -w -s -X 'github.com/xolo-gateway/xolo/internal/build.ShortVersion={{ .Version }}' -X 'github.com/xolo-gateway/xolo/internal/build.LongVersion={{ .Version }}'
 
   - id: xolo-plugin-time-restriction
-    targets: [go_first_class]
+    goos: [linux]
+    goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     dir: ./plugins/time-restriction
     binary: xolo-plugin-time-restriction
@@ -26,7 +28,8 @@ builds:
       - -w -s
 
   - id: xolo-plugin-dummy-model
-    targets: [go_first_class]
+    goos: [linux]
+    goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     dir: ./plugins/dummy-model
     binary: xolo-plugin-dummy-model
@@ -36,7 +39,8 @@ builds:
       - -w -s
 
   - id: xolo-plugin-fuzzy-evaluator
-    targets: [go_first_class]
+    goos: [linux]
+    goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     dir: ./plugins/fuzzy-evaluator
     binary: xolo-plugin-fuzzy-evaluator
@@ -46,7 +50,8 @@ builds:
       - -w -s
 
   - id: xolo-plugin-request-inspector
-    targets: [go_first_class]
+    goos: [linux]
+    goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     dir: ./plugins/request-inspector
     binary: xolo-plugin-request-inspector
@@ -56,7 +61,8 @@ builds:
       - -w -s
 
   - id: xolo-plugin-complexity-scorer
-    targets: [go_first_class]
+    goos: [linux]
+    goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     dir: ./plugins/complexity-scorer
     binary: xolo-plugin-complexity-scorer
@@ -66,7 +72,8 @@ builds:
       - -w -s
 
   - id: xolo-plugin-text-classifier
-    targets: [go_first_class]
+    goos: [linux]
+    goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     dir: ./plugins/text-classifier
     binary: xolo-plugin-text-classifier
@@ -76,7 +83,8 @@ builds:
       - -w -s
 
   - id: xolo-plugin-prompt-guard
-    targets: [go_first_class]
+    goos: [linux]
+    goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     dir: ./plugins/prompt-guard
     binary: xolo-plugin-prompt-guard
@@ -86,7 +94,8 @@ builds:
       - -w -s
 
   - id: xolo-plugin-llm-classifier
-    targets: [go_first_class]
+    goos: [linux]
+    goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     dir: ./plugins/llm-classifier
     binary: xolo-plugin-llm-classifier
@@ -96,7 +105,8 @@ builds:
       - -w -s
 
   - id: xolo-plugin-energy-estimator
-    targets: [go_first_class]
+    goos: [linux]
+    goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     dir: ./plugins/energy-estimator
     binary: xolo-plugin-energy-estimator
@@ -106,7 +116,8 @@ builds:
       - -w -s
 
   - id: xolo-plugin-budget-pressure
-    targets: [go_first_class]
+    goos: [linux]
+    goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     dir: ./plugins/budget-pressure
     binary: xolo-plugin-budget-pressure
@@ -116,7 +127,8 @@ builds:
       - -w -s
 
   - id: xolo-plugin-script-processor
-    targets: [go_first_class]
+    goos: [linux]
+    goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     dir: ./plugins/script-processor
     binary: xolo-plugin-script-processor
@@ -126,7 +138,8 @@ builds:
       - -w -s
 
   - id: xolo-plugin-pseudonymizer
-    targets: [go_first_class]
+    goos: [linux]
+    goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     dir: ./plugins/pseudonymizer
     binary: xolo-plugin-pseudonymizer
@@ -136,7 +149,8 @@ builds:
       - -w -s
 
   - id: xolo-plugin-mcp-bridge
-    targets: [go_first_class]
+    goos: [linux]
+    goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     dir: ./plugins/mcp-bridge
     binary: xolo-plugin-mcp-bridge
@@ -146,7 +160,8 @@ builds:
       - -w -s
 
   - id: xolo-plugin-system-prompt
-    targets: [go_first_class]
+    goos: [linux]
+    goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     dir: ./plugins/system-prompt
     binary: xolo-plugin-system-prompt
