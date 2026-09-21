@@ -153,7 +153,7 @@ func (e *PluginExecutor) forwardPreRequest(
 
 	out, err := client.PreRequest(ctx, &proto.PreRequestInput{
 		Ctx:          reqCtx,
-		Model:        ec.RequestJSON,
+		Model:        ec.BodyJSON,
 		MessagesJson: messagesJSON,
 		InputsJson:   inputsJSON,
 		Quota:        ec.quotaInfo(ctx),

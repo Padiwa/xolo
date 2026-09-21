@@ -128,7 +128,7 @@ func (p *Plugin) PreRequest(ctx context.Context, in *proto.PreRequestInput) (*pr
 | Field          | Type              | Description                                                                  |
 | -------------- | ----------------- | ---------------------------------------------------------------------------- |
 | `Ctx`          | `*RequestContext` | Organisation, user, token, config                                            |
-| `Model`        | `string`          | Full LLM request body JSON (same as `ec.RequestJSON` in the pipeline engine) |
+| `Model`        | `string`          | Full LLM request body JSON (same as `ec.BodyJSON` in the pipeline engine) |
 | `MessagesJson` | `string`          | JSON-encoded messages array extracted from the request body                  |
 | `InputsJson`   | `string`          | JSON object `{portName: value}` for connected input ports                    |
 

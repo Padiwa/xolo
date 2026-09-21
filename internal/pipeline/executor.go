@@ -15,12 +15,13 @@ type ExecutionContext struct {
 	UserID      string
 	TokenID     string
 	DisplayName string
-	// RequestJSON is the raw JSON of the LLM request body.
-	RequestJSON string
-	// MessagesJSON is the JSON array of messages extracted from RequestJSON.
-	MessagesJSON string
-	// BodyJSON is the full request body JSON.
+	// BodyJSON is the raw JSON of the LLM request body. It is the single source
+	// of truth for "the incoming request" inside the pipeline engine: the
+	// generator node's "request" output is seeded from it, and it is exposed
+	// to PreRequest plugins as PreRequestInput.Model.
 	BodyJSON string
+	// MessagesJSON is the JSON array of messages extracted from BodyJSON.
+	MessagesJSON string
 	// ProtoModels is the list of available real models for the org.
 	ProtoModels []*proto.ModelInfo
 	// ProtoVMs is the list of virtual models visible to the org.
