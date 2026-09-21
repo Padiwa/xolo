@@ -43,10 +43,11 @@ func backfillQuotaUsage(tx *gorm.DB) error {
 	// The conditions restate model.FeedsMonetaryBudget, which the store applies
 	// in Go, so the two produce the same totals.
 	//
-	// The user scope skips an empty user_id rather than grouping it. In
-	// production an application authenticates through a shadow user and its
-	// records do carry that user's id, so they get a user counter like any
-	// other; the filter is for records written without any principal at all.
+	// The application scope catches records made by an application principal:
+	// an application token can spend unattended and is the principal an operator
+	// wants to cap (issue #64). The user scope skips application records so a
+	// shadow user — the identity an application auths through — never receives
+	// a budget, matching quotaUsageRows.
 	orgSQL := `
 		INSERT INTO ` + quotaUsageTable + ` (scope, scope_id, org_id, currency, day, cost)
 		SELECT 'org', org_id, org_id, currency, ` + dayExpr + `, SUM(cost)
@@ -57,11 +58,21 @@ func backfillQuotaUsage(tx *gorm.DB) error {
 		return errors.WithStack(err)
 	}
 
+	appSQL := `
+		INSERT INTO ` + quotaUsageTable + ` (scope, scope_id, org_id, currency, day, cost)
+		SELECT 'application', application_id, org_id, currency, ` + dayExpr + `, SUM(cost)
+		  FROM usage_records
+		 WHERE plan_covered = 0 AND org_id <> '' AND cost <> 0 AND application_id <> ''
+		 GROUP BY application_id, org_id, currency, ` + dayExpr
+	if err := tx.Exec(appSQL, append(append([]any{}, args...), args...)...).Error; err != nil {
+		return errors.WithStack(err)
+	}
+
 	userSQL := `
 		INSERT INTO ` + quotaUsageTable + ` (scope, scope_id, org_id, currency, day, cost)
 		SELECT 'user', user_id, org_id, currency, ` + dayExpr + `, SUM(cost)
 		  FROM usage_records
-		 WHERE plan_covered = 0 AND org_id <> '' AND cost <> 0 AND user_id <> ''
+		 WHERE plan_covered = 0 AND org_id <> '' AND cost <> 0 AND user_id <> '' AND application_id = ''
 		 GROUP BY user_id, org_id, currency, ` + dayExpr
 	if err := tx.Exec(userSQL, append(append([]any{}, args...), args...)...).Error; err != nil {
 		return errors.WithStack(err)

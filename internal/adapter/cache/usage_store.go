@@ -175,8 +175,15 @@ func quotaSumCacheKey(scope model.QuotaScope, scopeID string, orgID model.OrgID,
 }
 
 // quotaSumCacheKeysFor lists the cached totals a usage record contributes to:
-// the current day, month and year of both the organization and, when the call
-// was made by a user rather than an application, that user.
+// the current day, month and year of the organization, of the application when
+// the call was made by one, and of the user when the record carries a user id
+// and no application id.
+//
+// Application records authenticate through a shadow user, so a record can
+// carry both a user id and an application id. The two are distinct budgets:
+// an application principal must invalidate its own scope (its id), the shadow
+// user has no budget to check, and the user scope is left untouched so a
+// human user's call on the same token doesn't double-count.
 //
 // Subscription-covered records consume no monetary budget and are left out, as
 // they are by the counters themselves.
@@ -192,10 +199,15 @@ func quotaSumCacheKeysFor(record model.UsageRecord) []string {
 		model.StartOfYear(createdAt),
 	}
 
-	keys := make([]string, 0, len(starts)*2)
+	appID := record.ApplicationID()
+	userID := record.UserID()
+
+	keys := make([]string, 0, len(starts)*3)
 	for _, start := range starts {
 		keys = append(keys, quotaSumCacheKey(model.QuotaScopeOrg, string(record.OrgID()), record.OrgID(), start))
-		if userID := record.UserID(); userID != "" {
+		if appID != "" {
+			keys = append(keys, quotaSumCacheKey(model.QuotaScopeApplication, string(appID), record.OrgID(), start))
+		} else if userID != "" {
 			keys = append(keys, quotaSumCacheKey(model.QuotaScopeUser, string(userID), record.OrgID(), start))
 		}
 	}

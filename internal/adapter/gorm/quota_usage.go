@@ -24,13 +24,17 @@ const quotaUsageTable = "quota_usages"
 // Only PAYG usage is counted: subscription-covered records do not consume a
 // monetary budget and are governed by the subscription enforcer instead.
 type QuotaUsage struct {
-	// Scope is "user" or "org", see model.QuotaScope. Application principals
-	// are accounted for at the org scope only: they have no user budget.
+	// Scope is one of model.QuotaScope: "user", "org" or "application".
+	// Application principals are accounted for under their own scope (and the
+	// org scope), never under the shadow user's user scope.
 	Scope string `gorm:"primaryKey"`
-	// ScopeID is the user id or the org id, matching Scope.
+	// ScopeID is the user id, the application id, or the org id, matching
+	// Scope. An application id is the principal the proxy attributes the call
+	// to when an application token authenticates through a shadow user.
 	ScopeID string `gorm:"primaryKey"`
-	// OrgID is carried for both scopes: a user's budget is per organization, so
-	// the same user in two organizations keeps two separate totals.
+	// OrgID is carried for every scope: a user's budget is per organization, so
+	// the same user in two organizations keeps two separate totals, and an
+	// application's spend likewise stays partitioned by organization.
 	OrgID string `gorm:"primaryKey"`
 	// Currency is the currency the costs were frozen in, as on the usage record.
 	Currency string `gorm:"primaryKey"`
@@ -52,9 +56,17 @@ func quotaUsageDay(t time.Time) string {
 	return t.Format("2006-01-02")
 }
 
-// quotaUsageRows returns the counter rows a usage record contributes to: one
-// for the org, one for the user when the call was made by a user rather than
-// by an application. A record that feeds no monetary budget yields no row, per
+// quotaUsageRows returns the counter rows a usage record contributes to:
+// one for the org (always), one for the application when the call was made by
+// an application, and one for the user when the record carries a user id.
+//
+// An application token authenticates through a shadow user but the two are
+// distinct principals: the shadow user has no budget of its own, while the
+// application does. Counting application spending on the shadow user's
+// counter would silently bypass any budget the operator set on the
+// application (see issue #64); counting user spending on the application
+// counter would inflate a per-application budget with activity unrelated to
+// it. A record that feeds no monetary budget yields no row, per
 // model.FeedsMonetaryBudget, the rule the backfill restates in SQL.
 func quotaUsageRows(r model.UsageRecord) []*QuotaUsage {
 	if !model.FeedsMonetaryBudget(r) {
@@ -62,25 +74,38 @@ func quotaUsageRows(r model.UsageRecord) []*QuotaUsage {
 	}
 
 	day := quotaUsageDay(r.CreatedAt())
+	orgID := r.OrgID()
+	currency := r.Currency()
+	cost := r.Cost()
+
 	rows := []*QuotaUsage{
 		{
 			Scope:    string(model.QuotaScopeOrg),
-			ScopeID:  string(r.OrgID()),
-			OrgID:    string(r.OrgID()),
-			Currency: r.Currency(),
+			ScopeID:  string(orgID),
+			OrgID:    string(orgID),
+			Currency: currency,
 			Day:      day,
-			Cost:     r.Cost(),
+			Cost:     cost,
 		},
 	}
 
-	if userID := r.UserID(); userID != "" {
+	if appID := r.ApplicationID(); appID != "" {
+		rows = append(rows, &QuotaUsage{
+			Scope:    string(model.QuotaScopeApplication),
+			ScopeID:  string(appID),
+			OrgID:    string(orgID),
+			Currency: currency,
+			Day:      day,
+			Cost:     cost,
+		})
+	} else if userID := r.UserID(); userID != "" {
 		rows = append(rows, &QuotaUsage{
 			Scope:    string(model.QuotaScopeUser),
 			ScopeID:  string(userID),
-			OrgID:    string(r.OrgID()),
-			Currency: r.Currency(),
+			OrgID:    string(orgID),
+			Currency: currency,
 			Day:      day,
-			Cost:     r.Cost(),
+			Cost:     cost,
 		})
 	}
 

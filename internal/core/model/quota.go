@@ -15,8 +15,19 @@ func NewQuotaID() QuotaID {
 type QuotaScope string
 
 const (
-	QuotaScopeOrg         QuotaScope = "org"
-	QuotaScopeUser        QuotaScope = "user"
+	QuotaScopeOrg  QuotaScope = "org"
+	QuotaScopeUser QuotaScope = "user"
+	// QuotaScopeApplication caps the spend attributed to a single application
+	// principal (an M2M token). The proxy enforces it in XoloQuotaEnforcer
+	// against a running counter populated per usage record: a row that
+	// references ApplicationID feeds the application counter and the org
+	// counter, never the shadow user's user counter (issue #64).
+	//
+	// Operational note: writing a quota row at this scope does not seed a
+	// counter. Existing usage attributed to the application must be
+	// reconstructed by running RebuildQuotaUsage (or equivalent) so the
+	// enforcer sees the historical spend — otherwise the budget reads zero
+	// and the request slips through until new spend arrives.
 	QuotaScopeApplication QuotaScope = "application"
 )
 

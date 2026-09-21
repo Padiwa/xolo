@@ -148,8 +148,8 @@ func ApplicationIDFromMeta(meta map[string]any) model.ApplicationID {
 	return model.ApplicationID(v)
 }
 
-// populateMetaFromContext reads orgID and authTokenID from the request context
-// and copies them into req.Metadata.
+// populateMetaFromContext reads orgID, authTokenID and applicationID from the
+// request context and copies them into req.Metadata.
 //
 // It tries two sources in order:
 //  1. The explicit context keys set by XoloAuthExtractor (available in ResolveModel hooks,
@@ -157,6 +157,15 @@ func ApplicationIDFromMeta(meta map[string]any) model.ApplicationID {
 //  2. authn.ContextUser (set by the authn middleware before the proxy server), which carries
 //     OrgID/TokenID for API key tokens — useful in PreRequest hooks where the proxy passes
 //     a context captured before XoloAuthExtractor runs.
+//
+// applicationID is derived from each source's own conventions: the explicit
+// context key is set by XoloAuthExtractor when the authenticated principal is
+// an application; for authn.ContextUser the equivalent is "Subject on the
+// 'application' provider" — the same shape the bridge middleware uses to
+// resolve the shadow user. Without this second copy, a PreRequest hook
+// running against a context captured before XoloAuthExtractor would see an
+// empty MetaApplicationID for an application token, and the quota enforcer's
+// application-scope check would silently degrade to a no-op (issue #64).
 func populateMetaFromContext(ctx context.Context, req *genaiProxy.ProxyRequest) {
 	if OrgIDFromMeta(req.Metadata) != "" {
 		return
@@ -166,6 +175,9 @@ func populateMetaFromContext(ctx context.Context, req *genaiProxy.ProxyRequest) 
 		if authTokenID := AuthTokenIDFromContext(ctx); authTokenID != "" {
 			req.Metadata[MetaAuthTokenID] = authTokenID
 		}
+		if appID := ApplicationIDFromContext(ctx); appID != "" {
+			req.Metadata[MetaApplicationID] = appID
+		}
 		return
 	}
 	if authnUser := authn.ContextUser(ctx); authnUser != nil && authnUser.OrgID != "" {
@@ -173,6 +185,11 @@ func populateMetaFromContext(ctx context.Context, req *genaiProxy.ProxyRequest) 
 		if authnUser.TokenID != "" {
 			req.Metadata[MetaAuthTokenID] = authnUser.TokenID
 		}
+		if authnUser.Provider == model.ApplicationProvider && authnUser.Subject != "" {
+			// Store as string: ApplicationIDFromMeta's type assertion expects
+			// a string, and the explicit-context branch (XoloAuthExtractor)
+			// stores strings throughout.
+			req.Metadata[MetaApplicationID] = authnUser.Subject
+		}
 	}
 }
-

@@ -16,6 +16,7 @@ import (
 type fakeQuotaStore struct {
 	userQuota model.Quota
 	orgQuota  model.Quota
+	appQuota  model.Quota
 }
 
 func (f *fakeQuotaStore) SetQuota(_ context.Context, _ model.Quota) error { return nil }
@@ -32,6 +33,11 @@ func (f *fakeQuotaStore) GetQuota(_ context.Context, scope model.QuotaScope, _ s
 			return nil, port.ErrNotFound
 		}
 		return f.orgQuota, nil
+	case model.QuotaScopeApplication:
+		if f.appQuota == nil {
+			return nil, port.ErrNotFound
+		}
+		return f.appQuota, nil
 	}
 	return nil, port.ErrNotFound
 }
@@ -204,5 +210,97 @@ func TestQuotaService_ResolveEffectiveQuota_ListMembersError(t *testing.T) {
 	_, err := svc.ResolveEffectiveQuota(context.Background(), "user1", "org1")
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+}
+
+// TestQuotaService_ResolveEffectiveQuotaForApplication_MinMerge: le quota effectif
+// d'une application est le min du quota application et du quota d'org, sur
+// chaque période. Le partage de l'org par membre ne s'applique pas : un token
+// d'application n'est pas un membre et l'opérateur qui pose un budget sur
+// l'application veut que ce budget s'applique tel quel.
+func TestQuotaService_ResolveEffectiveQuotaForApplication_MinMerge(t *testing.T) {
+	orgQuota := &fakeQuota{daily: ptr[int64](6_000_000), monthly: ptr[int64](60_000_000), currency: "EUR", scope: model.QuotaScopeOrg, scopeID: "org1"}
+	appQuota := &fakeQuota{daily: ptr[int64](60_000), monthly: ptr[int64](1_500_000), yearly: ptr[int64](20_000_000), currency: "EUR", scope: model.QuotaScopeApplication, scopeID: "app-1"}
+
+	svc := service.NewQuotaService(
+		&fakeQuotaStore{orgQuota: orgQuota, appQuota: appQuota},
+		&fakeOrgProvider{org: &fakeOrg{shareQuotaEqually: true}, members: []model.Membership{&fakeMembership{}, &fakeMembership{}, &fakeMembership{}}},
+	)
+
+	got, err := svc.ResolveEffectiveQuotaForApplication(context.Background(), "app-1", "org1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.DailyBudget == nil || *got.DailyBudget != 60_000 {
+		t.Errorf("daily = %v, want 60_000 (the application budget, stricter than the org)", got.DailyBudget)
+	}
+	if got.MonthlyBudget == nil || *got.MonthlyBudget != 1_500_000 {
+		t.Errorf("monthly = %v, want 1_500_000", got.MonthlyBudget)
+	}
+	if got.YearlyBudget == nil || *got.YearlyBudget != 20_000_000 {
+		t.Errorf("yearly = %v, want 20_000_000 (only set on the application)", got.YearlyBudget)
+	}
+}
+
+// TestQuotaService_ResolveEffectiveQuotaForApplication_OrgOnly: sans budget
+// application, le quota effectif retombe sur le quota d'org, comme pour un
+// utilisateur qui n'a pas de quota personnel.
+func TestQuotaService_ResolveEffectiveQuotaForApplication_OrgOnly(t *testing.T) {
+	orgQuota := &fakeQuota{daily: ptr[int64](6_000_000), currency: "EUR", scope: model.QuotaScopeOrg, scopeID: "org1"}
+
+	svc := service.NewQuotaService(
+		&fakeQuotaStore{orgQuota: orgQuota},
+		&fakeOrgProvider{org: &fakeOrg{shareQuotaEqually: true}, members: []model.Membership{&fakeMembership{}, &fakeMembership{}}},
+	)
+
+	got, err := svc.ResolveEffectiveQuotaForApplication(context.Background(), "app-1", "org1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.DailyBudget == nil || *got.DailyBudget != 6_000_000 {
+		t.Errorf("daily = %v, want 6_000_000 (org only)", got.DailyBudget)
+	}
+}
+
+// TestQuotaService_ResolveEffectiveQuotaForApplication_NothingSet: sans budget
+// nulle part, le résultat est un EffectiveQuota vide (tout nil, devise par
+// défaut) — un tel quota ne déclenche aucun plafond.
+func TestQuotaService_ResolveEffectiveQuotaForApplication_NothingSet(t *testing.T) {
+	svc := service.NewQuotaService(
+		&fakeQuotaStore{},
+		&fakeOrgProvider{org: &fakeOrg{}},
+	)
+
+	got, err := svc.ResolveEffectiveQuotaForApplication(context.Background(), "app-1", "org1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.DailyBudget != nil || got.MonthlyBudget != nil || got.YearlyBudget != nil {
+		t.Errorf("expected all-nil budget, got %+v", got)
+	}
+	if got.Currency != model.DefaultCurrency {
+		t.Errorf("currency = %q, want default %q", got.Currency, model.DefaultCurrency)
+	}
+}
+
+// TestQuotaService_ResolveEffectiveQuotaForApplication_OrgTakesPrecedenceOnCurrency:
+// quand un quota d'org existe, sa devise est retenue même si l'application en
+// a une autre : les budgets posés sur l'application sont en devise d'org dans
+// tous les cas, pour éviter de mélanger les unités au moment du min-merge.
+func TestQuotaService_ResolveEffectiveQuotaForApplication_OrgTakesPrecedenceOnCurrency(t *testing.T) {
+	orgQuota := &fakeQuota{daily: ptr[int64](6_000_000), currency: "EUR", scope: model.QuotaScopeOrg, scopeID: "org1"}
+	appQuota := &fakeQuota{daily: ptr[int64](60_000), currency: "USD", scope: model.QuotaScopeApplication, scopeID: "app-1"}
+
+	svc := service.NewQuotaService(
+		&fakeQuotaStore{orgQuota: orgQuota, appQuota: appQuota},
+		&fakeOrgProvider{org: &fakeOrg{}},
+	)
+
+	got, err := svc.ResolveEffectiveQuotaForApplication(context.Background(), "app-1", "org1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Currency != "EUR" {
+		t.Errorf("currency = %q, want EUR (org takes precedence)", got.Currency)
 	}
 }

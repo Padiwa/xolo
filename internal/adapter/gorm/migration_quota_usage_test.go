@@ -31,7 +31,8 @@ func TestBackfillQuotaUsage(t *testing.T) {
 		{ID: "u1", CreatedAt: now, UserID: "user-a", OrgID: "org-1", ProviderID: "p", ModelID: "m", Cost: 1_000, Currency: "USD"},
 		{ID: "u2", CreatedAt: now, UserID: "user-a", OrgID: "org-1", ProviderID: "p", ModelID: "m", Cost: 2_000, Currency: "USD"},
 		{ID: "u3", CreatedAt: yesterday, UserID: "user-b", OrgID: "org-1", ProviderID: "p", ModelID: "m", Cost: 500, Currency: "USD"},
-		// An application principal: it feeds the org counter only.
+		// An application principal: it feeds the org counter and its own
+		// application counter (issue #64), not the shadow user's user counter.
 		{ID: "u4", CreatedAt: now, ApplicationID: "app-1", OrgID: "org-1", ProviderID: "p", ModelID: "m", Cost: 300, Currency: "USD"},
 		// Subscription-covered usage consumes no monetary budget.
 		{ID: "u5", CreatedAt: now, UserID: "user-a", OrgID: "org-1", ProviderID: "p", ModelID: "m", Cost: 9_999, Currency: "USD", PlanCovered: 1},
@@ -75,6 +76,12 @@ func TestBackfillQuotaUsage(t *testing.T) {
 	if got := sum("org", "org-1", "org-1", startOfDayLocal(now)); got != 3_300 {
 		t.Errorf("org-1 today = %d, want 3300", got)
 	}
+	// The application principal feeds its own scope (issue #64). The shadow
+	// user has no budget, so the application record must not leak under
+	// QuotaScopeUser either.
+	if got := sum("application", "app-1", "org-1", startOfDayLocal(now)); got != 300 {
+		t.Errorf("application app-1 today = %d, want 300", got)
+	}
 	if got := sum("user", "app-1", "org-1", startOfDayLocal(now)); got != 0 {
 		t.Errorf("application user-scope total = %d, want 0", got)
 	}
@@ -89,6 +96,9 @@ func TestBackfillQuotaUsage(t *testing.T) {
 	}
 	if got := sum("org", "org-1", "org-1", startOfDayLocal(now)); got != 3_300 {
 		t.Errorf("org-1 after replay = %d, want 3300", got)
+	}
+	if got := sum("application", "app-1", "org-1", startOfDayLocal(now)); got != 300 {
+		t.Errorf("application app-1 after replay = %d, want 300", got)
 	}
 }
 
@@ -223,6 +233,13 @@ func TestUpgradeFromExistingDatabase(t *testing.T) {
 	}
 	if got := sum("org", "org-1"); got != 2_500 {
 		t.Errorf("org-1 counter = %d, want 2500: the application's spending counts too", got)
+	}
+	// The application record (u3) feeds its own counter on the upgrade path
+	// (issue #64): without this assertion the new appSQL clause in
+	// backfillQuotaUsage is unverified for the legacy-table scenario this test
+	// exists to cover.
+	if got := sum("application", "app-1"); got != 500 {
+		t.Errorf("application app-1 counter = %d, want 500", got)
 	}
 
 	// A record written after the upgrade keeps adding to the same counters.

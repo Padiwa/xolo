@@ -158,9 +158,11 @@ func TestUsageStore_IgnoresNonBudgetRecords(t *testing.T) {
 // feeds, for the two shapes a record actually takes.
 //
 // An application authenticates through a shadow user, so in production its
-// records carry that user's id and get a user-scope total like anyone else —
-// the same id the enforcer looks the budget up under. A record with no
-// principal at all feeds the organization only.
+// records carry that user's id. The two are distinct budgets: the application
+// counter is what the enforcer checks once a budget is set on the application
+// (issue #64), and the shadow user's counter is left alone so a human call on
+// the same token does not double-count. A record with no principal at all
+// feeds the organization only.
 func TestUsageStore_KeysFollowThePrincipalOnTheRecord(t *testing.T) {
 	ctx := context.Background()
 	backend := &countingUsageStore{}
@@ -174,25 +176,25 @@ func TestUsageStore_KeysFollowThePrincipalOnTheRecord(t *testing.T) {
 	day := model.StartOfDay(shadow.CreatedAt())
 	keys := quotaSumCacheKeysFor(shadow)
 	if len(keys) != 6 {
-		t.Errorf("keys = %v, want three organization windows and three user windows", keys)
+		t.Errorf("keys = %v, want three organization windows and three application windows, no shadow-user windows", keys)
 	}
-	wantUserKey := quotaSumCacheKey(model.QuotaScopeUser, "usr-shadow-app-1", "org-1", day)
-	if !slices.Contains(keys, wantUserKey) {
-		t.Errorf("keys = %v, want one under the shadow user %q: that is the id the enforcer checks", keys, wantUserKey)
+	wantAppKey := quotaSumCacheKey(model.QuotaScopeApplication, "app-1", "org-1", day)
+	if !slices.Contains(keys, wantAppKey) {
+		t.Errorf("keys = %v, want one under the application %q: the budget the enforcer checks", keys, wantAppKey)
 	}
-	// Nothing is ever attributed to the application id itself: no budget is
-	// resolved under it.
-	if slices.Contains(keys, quotaSumCacheKey(model.QuotaScopeUser, "app-1", "org-1", day)) {
-		t.Errorf("keys = %v, want no total under the application id", keys)
+	// The shadow user has no budget set, so attributing its spending to it
+	// would silently bypass the application-level cap.
+	if slices.Contains(keys, quotaSumCacheKey(model.QuotaScopeUser, "usr-shadow-app-1", "org-1", day)) {
+		t.Errorf("keys = %v, want no total under the shadow user", keys)
 	}
 
 	if err := store.RecordUsage(ctx, shadow); err != nil {
 		t.Fatalf("RecordUsage: %v", err)
 	}
 
-	// A record with no principal at all, which the seeded fixture produces,
-	// feeds the organization windows only.
-	orphan := model.NewUsageRecord("", "app-1", "org-1", "provider", "llm-model",
+	// A record with no principal at all — possible if a caller hands a UsageRecord
+	// directly without an auth context — feeds the organization windows only.
+	orphan := model.NewUsageRecord("", "", "org-1", "provider", "llm-model",
 		"fast", "", 10, 0, 10, 700, "USD", model.CostSourceComputed, "")
 	if keys := quotaSumCacheKeysFor(orphan); len(keys) != 3 {
 		t.Errorf("keys = %v, want the three organization windows only", keys)
