@@ -215,14 +215,7 @@ func canonicalHostFromBaseURL(baseURL string) string {
 		return ""
 	}
 
-	host := stripPort(parsed.Host)
-	if strings.HasPrefix(parsed.Host, "[") && !strings.HasPrefix(host, "[") {
-		// stripPort (via net.SplitHostPort) removed the brackets — re-add them
-		// so the result stays a valid URL authority.
-		host = "[" + host + "]"
-	} else {
-		host = bracketIfIPv6(host)
-	}
+	host := bracketIfIPv6(stripPort(parsed.Host))
 
 	return strings.ToLower(host)
 }

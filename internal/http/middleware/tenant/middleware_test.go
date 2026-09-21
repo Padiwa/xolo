@@ -286,7 +286,7 @@ func TestResolverCanonicalHostSingleTenant(t *testing.T) {
 			want:    "xolo.example.com",
 			ok:      true,
 		},
-		"the request port is ignored": {
+		"the request port is irrelevant when a base url is configured": {
 			baseURL: "https://xolo.example.com",
 			host:    "xolo.example.com:9999",
 			want:    "xolo.example.com",
