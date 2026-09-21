@@ -335,6 +335,49 @@ func scenarioVirtualModelStoreLifecycle(t *testing.T, store *xologorm.Store) {
 	}
 }
 
+// TestVirtualModelStore_RenameCollisionRejected pins the translation of a
+// backend unique violation on idx_org_name into port.ErrAlreadyExists at
+// SaveVirtualModel time. The previous incarnation used
+// errors.Is(err, gorm.ErrDuplicatedKey), which is never produced because
+// db.Config.TranslateError is not set anywhere; the current mapping uses
+// isUniqueViolation (dialect.go) and inspects *sqlite3.Error / *pgconn.PgError
+// directly. The two supported backends spell the offending index
+// differently (SQLite reports "table.org_id, table.name", PostgreSQL the
+// index name "idx_org_name"), so this must hold on both. Run it with
+// XOLO_TEST_POSTGRES_DSN set to cover the PostgreSQL side.
+func TestVirtualModelStore_RenameCollisionRejected(t *testing.T) {
+	eachBackend(t, scenarioVirtualModelStoreRenameCollisionRejected)
+}
+
+func scenarioVirtualModelStoreRenameCollisionRejected(t *testing.T, store *xologorm.Store) {
+	ctx := context.Background()
+
+	org := model.NewOrganization(testTenantID, "acme-rename", "Acme Rename", "")
+	if err := store.CreateOrg(ctx, org); err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+
+	first := model.NewVirtualModel(org.ID(), "router", "Routes to the cheapest model")
+	if err := store.CreateVirtualModel(ctx, first); err != nil {
+		t.Fatalf("CreateVirtualModel (first): %v", err)
+	}
+
+	second := model.NewVirtualModel(org.ID(), "premium", "Premium model")
+	if err := store.CreateVirtualModel(ctx, second); err != nil {
+		t.Fatalf("CreateVirtualModel (second): %v", err)
+	}
+
+	// Rename `second` onto the unique name held by `first`. The
+	// (org_id, name) unique index must reject, and the store must
+	// surface it as port.ErrAlreadyExists so the webui update handler
+	// can redirect to ?error=exists.
+	second.SetName("router")
+	err := store.SaveVirtualModel(ctx, second)
+	if !errors.Is(err, port.ErrAlreadyExists) {
+		t.Fatalf("SaveVirtualModel (rename collision): expected port.ErrAlreadyExists, got %v", err)
+	}
+}
+
 func TestMiddlewareStore_EnabledOrdering(t *testing.T) {
 	eachBackend(t, scenarioMiddlewareStoreEnabledOrdering)
 }
