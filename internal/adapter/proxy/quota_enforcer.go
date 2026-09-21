@@ -7,9 +7,10 @@ import (
 	"time"
 
 	genaiProxy "github.com/bornholm/genai/proxy"
+	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
-	"github.com/pkg/errors"
+	"github.com/xolo-gateway/xolo/internal/pipeline"
 )
 
 // quotaResolver is satisfied by both QuotaService (prod) and gorm.Store (tests).
@@ -47,6 +48,13 @@ func (e *XoloQuotaEnforcer) PreRequest(ctx context.Context, req *genaiProxy.Prox
 
 	if userID == "" || orgID == "" {
 		// No auth context — let the request through (will fail at auth extractor level)
+		return nil, nil
+	}
+
+	// ── Skip quota check when the pipeline answers without any provider ────────
+	// A terminal node that forges its own response (dummy-model) costs nothing:
+	// charging it against a budget would turn a canned refusal into a 429.
+	if pipelineAnsweredWithoutProvider(req) {
 		return nil, nil
 	}
 
@@ -190,6 +198,18 @@ func (e *XoloQuotaEnforcer) sumOrgCost(ctx context.Context, orgID model.OrgID, s
 		return 0, errors.WithStack(err)
 	}
 	return total, nil
+}
+
+// pipelineAnsweredWithoutProvider reports whether a pipeline forward pass has
+// already resolved a client that reaches no provider. Model nodes always set
+// ResolvedModelID, so an execution holding a client without one comes from a
+// node that produced the answer itself.
+func pipelineAnsweredWithoutProvider(req *genaiProxy.ProxyRequest) bool {
+	forwardExec, ok := req.Metadata[metaPipelineExecution].(*pipeline.ForwardExecution)
+	if !ok || forwardExec == nil || forwardExec.ResolvedClient == nil {
+		return false
+	}
+	return forwardExec.ResolvedModelID == ""
 }
 
 func rateLimitResponse(message string) *genaiProxy.ProxyResponse {
