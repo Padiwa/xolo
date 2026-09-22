@@ -9,22 +9,24 @@ import (
 )
 
 // TestPipeline_BodyJSONFlowsToPreRequestInputModel is the end-to-end regression
-// test for issue #34. It exercises the full chain that the original bug broke:
+// test for issue #34. It runs a Generator -> Plugin(PRE_REQUEST) -> Model ->
+// Sink graph through Harness.Run with WithBodyJSON(...) seeding the EC, and
+// asserts that PreRequestInput.Model equals the seeded body.
 //
-//	engine.go:77  seeds the generator node's "request" port with ec.BodyJSON
-//	plugin_executor.go:156  reads it back as PreRequestInput.Model
+// What this test locks down:
+//   - plugin_executor.go:156 reads ec.BodyJSON into PreRequestInput.Model.
+//     A regression that reverted to ec.RequestJSON (no longer compiles) or to
+//     "" would flip this test red.
 //
-// before issue #34, every consumer along this chain saw "" at runtime because
-// ExecutionContext.RequestJSON (the field that engine.go:77 used to read) was
-// declared but never assigned by buildEC / buildMiddlewareEC. The fix
-// collapses RequestJSON into BodyJSON so a single source of truth — the body
-// of the proxied LLM request — flows all the way through.
-//
-// This test runs a Generator -> Plugin(PRE_REQUEST) -> Model -> Sink graph
-// through Harness.Run with WithBodyJSON(...) seeding the EC, and asserts that
-// the captured value of PreRequestInput.Model equals the seeded body. A
-// future regression that re-broke either engine.go:77 (seed) or
-// plugin_executor.go:156 (consume) would flip this test red.
+// What this test does *not* lock down on its own:
+//   - engine.go:77's seed step, which writes ec.BodyJSON into the
+//     ValueContext under (generator-id, "request"), is *redundantly* covered:
+//     GeneratorExecutor.Forward also writes ec.BodyJSON to its "request"
+//     output (engine.go:117-119), and the plugin's ResolveInputs reads from
+//     the ValueContext after that overwrite. A regression in engine.go:77
+//     alone is masked. TestGeneratorExecutor_RequestPortCarriesBodyJSON in
+//     internal/adapter/proxy covers the generator's re-emit; together, the
+//     two tests cover both writer sites.
 func TestPipeline_BodyJSONFlowsToPreRequestInputModel(t *testing.T) {
 	body := `{"model":"m","messages":[{"role":"user","content":"hello"}],"temperature":0.7}`
 
@@ -67,9 +69,6 @@ func TestPipeline_BodyJSONFlowsToPreRequestInputModel(t *testing.T) {
 	}
 
 	if capturedModel != body {
-		t.Fatalf("PreRequestInput.Model = %q, want %q (full LLM request body seeded by buildEC)", capturedModel, body)
-	}
-	if capturedModel == "" {
-		t.Fatal("PreRequestInput.Model must be non-empty; engine.go:77 must seed it from ec.BodyJSON and plugin_executor.go:156 must forward it")
+		t.Fatalf("PreRequestInput.Model = %q, want %q (full LLM request body sourced from ec.BodyJSON at plugin_executor.go:156)", capturedModel, body)
 	}
 }
