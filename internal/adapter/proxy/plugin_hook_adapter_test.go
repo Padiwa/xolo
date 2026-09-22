@@ -237,9 +237,6 @@ func TestBuildEC_PopulatesBodyJSON(t *testing.T) {
 	if ec.BodyJSON != string(body) {
 		t.Fatalf("BodyJSON = %q, want %q", ec.BodyJSON, string(body))
 	}
-	if ec.BodyJSON == "" {
-		t.Fatal("BodyJSON must be non-empty; downstream consumers (generator port, PreRequest.Model, script-processor ctx.request) depend on it")
-	}
 }
 
 // TestBuildEC_PopulatesBodyJSON_PersonalVMPath covers the personal-VM branch of
@@ -267,9 +264,6 @@ func TestBuildEC_PopulatesBodyJSON_PersonalVMPath(t *testing.T) {
 	if ec.BodyJSON != string(body) {
 		t.Fatalf("BodyJSON = %q, want %q", ec.BodyJSON, string(body))
 	}
-	if ec.BodyJSON == "" {
-		t.Fatal("BodyJSON must be non-empty on the personal-VM path")
-	}
 }
 
 func TestBuildMiddlewareEC_PopulatesBodyJSON(t *testing.T) {
@@ -285,9 +279,6 @@ func TestBuildMiddlewareEC_PopulatesBodyJSON(t *testing.T) {
 
 	if ec.BodyJSON != string(body) {
 		t.Fatalf("BodyJSON = %q, want %q", ec.BodyJSON, string(body))
-	}
-	if ec.BodyJSON == "" {
-		t.Fatal("BodyJSON must be non-empty")
 	}
 }
 
