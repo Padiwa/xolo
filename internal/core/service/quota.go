@@ -141,6 +141,14 @@ func (s *QuotaService) ResolveEffectiveQuotaForApplication(
 	}
 
 	effective := &model.EffectiveQuota{}
+	// Currency precedence: org quota first, then app quota, then default.
+	// Both quota writers freeze budget amounts in the org's currency at
+	// SetQuota time (the handler does the conversion), so even if an operator
+	// somehow wrote a QuotaScopeApplication row in a different currency, its
+	// microcent amounts are still in org currency by the time we min-merge
+	// them. Picking the org currency here keeps the merged EffectiveQuota
+	// internally consistent: every *int64 it returns is denominated in the
+	// same currency.
 	switch {
 	case orgQuota != nil:
 		effective.Currency = orgQuota.Currency()

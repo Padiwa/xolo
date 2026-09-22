@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/a-h/templ"
@@ -304,6 +305,13 @@ func (h *Handler) renderEditApplicationPage(w http.ResponseWriter, r *http.Reque
 		assigned[role.ID()] = true
 	}
 
+	// Load the application budget, if any, and precompute a short summary for
+	// the edit form. The dedicated editor lives at /admin/applications/{appID}/quota;
+	// the edit form shows the current value and links to it.
+	quota, _ := h.quotaStore.GetQuota(ctx, model.QuotaScopeApplication, appID)
+	quotaSummary := applicationBudgetSummary(quota)
+	quotaEditURL := common.BaseURLString(ctx, common.WithPath("/orgs/", orgSlug, "/admin/applications/", appID, "/quota"))
+
 	vmodel := component.ApplicationFormVModel{
 		Org:             org,
 		App:             app,
@@ -312,6 +320,8 @@ func (h *Handler) renderEditApplicationPage(w http.ResponseWriter, r *http.Reque
 		OrgRoles:        orgRoles,
 		AssignedRoleIDs: assigned,
 		IsNew:           false,
+		QuotaSummary:    quotaSummary,
+		QuotaEditURL:    quotaEditURL,
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
 			SelectedItem: "org-" + orgSlug + "-applications",
@@ -328,6 +338,33 @@ func (h *Handler) renderEditApplicationPage(w http.ResponseWriter, r *http.Reque
 	}
 
 	templ.Handler(component.ApplicationForm(vmodel)).ServeHTTP(w, r)
+}
+
+// applicationBudgetSummary renders a one-line description of a QuotaScopeApplication
+// row. Empty when no budget has been set, otherwise lists the periods that
+// carry a budget, in calendar order (daily, monthly, yearly).
+func applicationBudgetSummary(quota model.Quota) string {
+	if quota == nil {
+		return "Aucun budget"
+	}
+	currency := quota.Currency()
+	if currency == "" {
+		currency = model.DefaultCurrency
+	}
+	parts := make([]string, 0, 3)
+	if d := quota.DailyBudget(); d != nil {
+		parts = append(parts, fmt.Sprintf("%s / jour", common.FormatCost(*d, currency)))
+	}
+	if m := quota.MonthlyBudget(); m != nil {
+		parts = append(parts, fmt.Sprintf("%s / mois", common.FormatCost(*m, currency)))
+	}
+	if y := quota.YearlyBudget(); y != nil {
+		parts = append(parts, fmt.Sprintf("%s / an", common.FormatCost(*y, currency)))
+	}
+	if len(parts) == 0 {
+		return "Aucun budget"
+	}
+	return strings.Join(parts, "  +  ")
 }
 
 func (h *Handler) updateApplication(w http.ResponseWriter, r *http.Request) {

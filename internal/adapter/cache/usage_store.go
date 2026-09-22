@@ -202,7 +202,11 @@ func quotaSumCacheKeysFor(record model.UsageRecord) []string {
 	appID := record.ApplicationID()
 	userID := record.UserID()
 
-	keys := make([]string, 0, len(starts)*3)
+	// One org key per start, plus at most one of {user, application} per start
+	// (the two branches are mutually exclusive: an application record carries
+	// appID, a user record carries userID, never both). So the upper bound is
+	// len(starts)*2, not *3.
+	keys := make([]string, 0, len(starts)*2)
 	for _, start := range starts {
 		keys = append(keys, quotaSumCacheKey(model.QuotaScopeOrg, string(record.OrgID()), record.OrgID(), start))
 		if appID != "" {

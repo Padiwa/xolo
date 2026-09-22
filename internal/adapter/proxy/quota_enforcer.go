@@ -217,14 +217,17 @@ var quotaPeriods = []periodCheck{
 //   - An empty subjectPrefix produces no leading space ("daily budget exceeded"
 //     rather than " daily budget exceeded"), so a future caller that wants a
 //     period-only message gets a sensible answer.
-//   - An empty periodTitle falls back to "Budget", so adding a new period
+//   - An empty periodTitle drops the period entirely, so adding a new period
 //     that forgets to set the title does not panic at runtime on the first
-//     exceeding request.
+//     exceeding request; the resulting message is just "budget exceeded".
 func quotaMessageSubject(subjectPrefix, periodTitle string) string {
-	period := "Budget"
-	if periodTitle != "" {
-		period = strings.ToLower(periodTitle[:1]) + periodTitle[1:]
+	if periodTitle == "" {
+		if subjectPrefix == "" {
+			return "budget exceeded"
+		}
+		return subjectPrefix + " budget exceeded"
 	}
+	period := strings.ToLower(periodTitle[:1]) + periodTitle[1:]
 
 	if subjectPrefix == "" {
 		return period + " budget exceeded"

@@ -1,6 +1,7 @@
 package org
 
 import (
+	"context"
 	"log/slog"
 	"math"
 	"net/http"
@@ -211,6 +212,126 @@ func (h *Handler) saveMemberQuota(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, "/orgs/"+orgSlug+"/admin/members/"+membershipID+"/quota?success=saved", http.StatusSeeOther)
+}
+
+// getApplicationQuotaPage renders the budget editor for one application. The
+// view model is the same component as the org and member quota pages, just
+// scoped to QuotaScopeApplication (issue #64): an application token can spend
+// unattended, so the operator needs a way to cap its daily/monthly/yearly
+// spend through the product rather than via a direct DB write or the
+// provisioning API.
+func (h *Handler) getApplicationQuotaPage(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	user := httpCtx.User(ctx)
+	orgSlug := r.PathValue("orgSlug")
+	appID := r.PathValue("appID")
+
+	org, app, err := h.resolveOrgAndApplication(ctx, orgSlug, appID)
+	if err != nil {
+		writeApplicationLookupError(ctx, w, err)
+		return
+	}
+
+	existing, _ := h.quotaStore.GetQuota(ctx, model.QuotaScopeApplication, appID)
+
+	orgCurrency := org.Currency()
+	if orgCurrency == "" {
+		orgCurrency = model.DefaultCurrency
+	}
+	now := time.Now()
+	dailyCost := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), orgCurrency, model.StartOfDay(now))
+	monthlyCost := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), orgCurrency, model.StartOfMonth(now))
+	yearlyCost := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), orgCurrency, model.StartOfYear(now))
+
+	vmodel := component.QuotaPageVModel{
+		Org:         org,
+		Application: app,
+		ScopeType:   "application",
+		ScopeID:     string(appID),
+		Quota:       existing,
+		Success:     r.URL.Query().Get("success"),
+		DailyCost:   dailyCost,
+		MonthlyCost: monthlyCost,
+		YearlyCost:  yearlyCost,
+		AppLayoutVModel: common.AppLayoutVModel{
+			User:         user,
+			SelectedItem: "org-" + orgSlug + "-applications",
+			Context:      common.ContextOrg,
+			ContextName:  org.Name(),
+			ContextSlug:  org.Slug(),
+			ContextOrgID: org.ID(),
+			Breadcrumbs: []common.BreadcrumbItem{
+				{Label: org.Name(), Href: "/orgs/" + orgSlug + "/usage"},
+				{Label: "Applications", Href: "/orgs/" + orgSlug + "/admin/applications"},
+				{Label: app.Name(), Href: "/orgs/" + orgSlug + "/admin/applications/" + string(appID) + "/edit"},
+				{Label: "Budget", Href: ""},
+			},
+		},
+	}
+
+	templ.Handler(component.QuotaPage(vmodel)).ServeHTTP(w, r)
+}
+
+// saveApplicationQuota writes a QuotaScopeApplication row for the resolved
+// application. The application is loaded again on POST so an operator cannot
+// edit a budget on an application outside their organization by hand-crafting
+// the form action.
+func (h *Handler) saveApplicationQuota(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	orgSlug := r.PathValue("orgSlug")
+	appID := r.PathValue("appID")
+
+	org, _, err := h.resolveOrgAndApplication(ctx, orgSlug, appID)
+	if err != nil {
+		writeApplicationLookupError(ctx, w, err)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Invalid form", http.StatusBadRequest)
+		return
+	}
+
+	currency := org.Currency()
+	if currency == "" {
+		currency = model.DefaultCurrency
+	}
+	daily := parseBudgetField(r.FormValue("daily_budget"))
+	monthly := parseBudgetField(r.FormValue("monthly_budget"))
+	yearly := parseBudgetField(r.FormValue("yearly_budget"))
+
+	quota := model.NewQuota(model.QuotaScopeApplication, appID, currency, daily, monthly, yearly)
+	if err := h.quotaStore.SetQuota(ctx, quota); err != nil {
+		slog.ErrorContext(ctx, "could not save application quota", slogx.Error(err))
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, "/orgs/"+orgSlug+"/admin/applications/"+appID+"/quota?success=saved", http.StatusSeeOther)
+}
+
+// applicationSpend returns the PAYG spending attributed to one application
+// since the given time, in microcents of the org's base currency. It reuses
+// the same counter the enforcer reads against (QuotaScopeApplication), so the
+// figure shown to the operator matches the budget check exactly: a 429 from
+// the enforcer and a 100% reading on the page both describe the same total.
+//
+// Costs are stored already converted to the org's currency at record time, so
+// the counter is a flat microcent total: no per-currency grouping is needed
+// here. This is the application's slice of org spending; cross-application
+// rolls up at the org-wide scope.
+func applicationSpend(_ context.Context, store port.UsageStore, appID model.ApplicationID, orgID model.OrgID, _ string, since time.Time) int64 {
+	sinceFn, ok := store.(interface {
+		SumQuotaCostSince(ctx context.Context, scope model.QuotaScope, scopeID string, orgID model.OrgID, since time.Time) (int64, error)
+	})
+	if !ok {
+		return 0
+	}
+	total, err := sinceFn.SumQuotaCostSince(context.Background(), model.QuotaScopeApplication, string(appID), orgID, since)
+	if err != nil {
+		return 0
+	}
+	return total
 }
 
 // parseBudgetField parses a currency budget field into microcents. Empty → nil (unlimited).

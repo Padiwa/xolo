@@ -67,6 +67,7 @@ type QuotaPageVModel struct {
 	common.AppLayoutVModel
 	Org         model.Organization
 	Membership  model.Membership
+	Application model.Application
 	ScopeType   string
 	ScopeID     string
 	Quota       model.Quota
