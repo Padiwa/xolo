@@ -110,9 +110,15 @@ func divPtr(v *int64, n int64) *int64 {
 //
 // There is no "sharing" branch on this path: an application has no membership
 // to share an org budget across, and an operator who set a budget on the
-// application means the whole of it, not a slice. The enforcer later min-merges
-// this with the shadow user's effective budget so neither principal can spend
-// past the cap the other sets.
+// application means the whole of it, not a slice.
+//
+// The result is fed to the enforcer's application-scope check, which runs
+// against the QuotaScopeApplication counter. The shadow user's user-scope
+// check is not run at all on the application path: the enforcer skips it
+// (see XoloQuotaEnforcer.PreRequest) because the counter is never fed for an
+// application record (see quotaUsageRows). The application budget is the only
+// budget the enforcer ever checks for a request carrying an ApplicationID
+// (issue #64).
 func (s *QuotaService) ResolveEffectiveQuotaForApplication(
 	ctx context.Context,
 	appID model.ApplicationID,

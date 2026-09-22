@@ -17,19 +17,27 @@ import (
 // quotaResolver is satisfied by both QuotaService (prod) and gorm.Store (tests).
 // ResolveEffectiveQuota merges user and org quotas (taking the minimum at each
 // period); ResolveEffectiveQuotaForApplication merges application and org
-// quotas the same way. The enforcer combines the two results on a request
-// authenticated by an application, so an operator-set application budget can
-// never be bypassed by the shadow user's user budget (issue #64).
+// quotas the same way.
+//
+// When MetaApplicationID is set, XoloQuotaEnforcer calls only
+// ResolveEffectiveQuotaForApplication: the user-scope path is skipped because
+// the shadow user's counter is never fed for an application record (see
+// quotaUsageRows). The application budget is the only one the enforcer checks
+// on the application path (issue #64).
 type quotaResolver interface {
 	ResolveEffectiveQuota(ctx context.Context, userID model.UserID, orgID model.OrgID) (*model.EffectiveQuota, error)
 	ResolveEffectiveQuotaForApplication(ctx context.Context, appID model.ApplicationID, orgID model.OrgID) (*model.EffectiveQuota, error)
 }
 
 // XoloQuotaEnforcer is a PreRequestHook that checks the effective budget quota
-// for the requesting principal, rejecting requests that would exceed it. For
-// an application token, the effective budget is the strictest of the
-// application, the shadow user and the organization budgets at each period;
-// for a regular user, the strictest of the user and the organization budgets.
+// for the requesting principal, rejecting requests that would exceed it.
+//
+// For an application token, the effective budget is the stricter of the
+// application and organization budgets at each period; the shadow user's user
+// counter is never fed and is not checked. For a regular user it is the
+// stricter of the user and organization budgets. The org-wide branch then
+// runs for both, against the organization counter, regardless of which scope
+// drove the request.
 type XoloQuotaEnforcer struct {
 	quotaResolver quotaResolver   // for per-user and per-application effective quotas
 	quotaStore    port.QuotaStore // for org-level GetQuota + SumCost checks
@@ -84,31 +92,21 @@ func (e *XoloQuotaEnforcer) PreRequest(ctx context.Context, req *genaiProxy.Prox
 		}
 	}
 
-	// ── Per-user quota check (effective = min of user quota and org quota) ──────
-	effectiveQuota, err := e.quotaResolver.ResolveEffectiveQuota(ctx, userID, orgID)
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-
 	now := time.Now()
-	if result, err := e.checkScope(ctx, model.QuotaScopeUser, string(userID), orgID, now, effectiveQuota, ""); err != nil {
-		return nil, err
-	} else if result != nil {
-		return result, nil
-	}
 
 	// ── Application quota check (effective = min of app quota and org quota) ────
 	// An application authenticates through a shadow user whose UserID populates
-	// req.UserID. Without this block the only check the request sees is the
+	// req.UserID. Without this branch the only check the request sees is the
 	// shadow user's budget — which is never set — so any application budget the
 	// operator stored under QuotaScopeApplication would be ignored (issue #64).
 	//
-	// Precedence note: the user-scope check runs first. The shadow user has no
-	// budget of its own and the counter it points at is never fed for an
-	// application record, so the user-scope branch is effectively a no-op here.
-	// Should someone ever set a budget on the shadow user's id directly, the
-	// user-scope message fires first; that is a deliberate footgun rather than
-	// a bug, since the shadow user is a routing artifact, not a budget principal.
+	// When appID is set the per-user check is skipped entirely rather than run
+	// as a no-op. The shadow user's counter is never fed for application
+	// records (quotaUsageRows), so the user-scope check could not fire anyway;
+	// running it would still cost a GetOrgByID + ListOrgMembers when
+	// ShareQuotaEqually is on, since the resolver would fall into the
+	// share-by-members branch for a user with no personal quota. Skipping the
+	// whole call is exact and cheaper.
 	appID := ApplicationIDFromMeta(req.Metadata)
 	if appID != "" {
 		appQuota, err := e.quotaResolver.ResolveEffectiveQuotaForApplication(ctx, appID, orgID)
@@ -116,7 +114,19 @@ func (e *XoloQuotaEnforcer) PreRequest(ctx context.Context, req *genaiProxy.Prox
 			return nil, errors.WithStack(err)
 		}
 
-		if result, err := e.checkScope(ctx, model.QuotaScopeApplication, string(appID), orgID, now, appQuota, "Application "); err != nil {
+		if result, err := e.checkScope(ctx, model.QuotaScopeApplication, string(appID), orgID, now, appQuota, "Application"); err != nil {
+			return nil, err
+		} else if result != nil {
+			return result, nil
+		}
+	} else {
+		// ── Per-user quota check (effective = min of user quota and org quota) ──────
+		effectiveQuota, err := e.quotaResolver.ResolveEffectiveQuota(ctx, userID, orgID)
+		if err != nil {
+			return nil, errors.WithStack(err)
+		}
+
+		if result, err := e.checkScope(ctx, model.QuotaScopeUser, string(userID), orgID, now, effectiveQuota, "User"); err != nil {
 			return nil, err
 		} else if result != nil {
 			return result, nil
@@ -180,10 +190,43 @@ func (e *XoloQuotaEnforcer) PreRequest(ctx context.Context, req *genaiProxy.Prox
 	return nil, nil
 }
 
+// periodCheck pairs the title-case label that goes into the rejection
+// message with the calendar window start. Hoisting the titles out of the loop
+// keeps strings.Title (deprecated since Go 1.18) out of the hot path.
+type periodCheck struct {
+	title   string
+	sinceFn func(time.Time) time.Time
+}
+
+// quotaPeriods is the fixed order in which the three budgets are checked.
+// Stable across versions: messages and wire format depend on it.
+var quotaPeriods = []periodCheck{
+	{"Daily", model.StartOfDay},
+	{"Monthly", model.StartOfMonth},
+	{"Yearly", model.StartOfYear},
+}
+
+// quotaMessageSubject builds the rejection message subject. subjectPrefix is
+// "User" or "Application" depending on which scope tripped; the helper joins
+// it with the period ("Daily", "Monthly", "Yearly"), lower-cased after the
+// prefix. Centralising the join means callers cannot produce "Userdaily
+// budget exceeded" by forgetting a trailing space: passing "User" yields
+// "User daily budget exceeded", "Application" yields "Application daily
+// budget exceeded". The org-wide branch does not go through this helper: it
+// hardcodes "Organization" in its own messages above.
+func quotaMessageSubject(subjectPrefix string, periodTitle string) string {
+	subjectPrefix = strings.TrimRight(subjectPrefix, " ") + " "
+	return subjectPrefix + strings.ToLower(periodTitle[:1]) + periodTitle[1:] + " budget exceeded"
+}
+
 // checkScope runs the three daily/monthly/yearly checks against the counter
-// for one principal (user or application). A non-empty scopeLabel prefixes the
-// rejection message, so the user-scope call passes "" and the application
-// call passes "Application ". Returning a non-nil HookResult means a budget
+// for one principal (user or application). subjectPrefix goes into the
+// rejection message ("User", "Application" or empty for org-wide, which has
+// its own hard-coded messages above); the helper joins it with the period
+// label so callers cannot drop a space by accident.
+//
+// The quota argument is never nil in practice: both resolvers always allocate
+// a non-nil EffectiveQuota. Returning a non-nil HookResult means a budget
 // was exceeded and the caller must short-circuit.
 func (e *XoloQuotaEnforcer) checkScope(
 	ctx context.Context,
@@ -192,46 +235,27 @@ func (e *XoloQuotaEnforcer) checkScope(
 	orgID model.OrgID,
 	now time.Time,
 	quota *model.EffectiveQuota,
-	scopeLabel string,
+	subjectPrefix string,
 ) (*genaiProxy.HookResult, error) {
-	if quota == nil {
-		return nil, nil
-	}
-
 	currency := quota.Currency
 
-	checks := []struct {
-		label   string
-		budget  *int64
-		sinceFn func(time.Time) time.Time
-	}{
-		{"daily", quota.DailyBudget, model.StartOfDay},
-		{"monthly", quota.MonthlyBudget, model.StartOfMonth},
-		{"yearly", quota.YearlyBudget, model.StartOfYear},
-	}
+	budgets := []*int64{quota.DailyBudget, quota.MonthlyBudget, quota.YearlyBudget}
 
-	for _, check := range checks {
-		if check.budget == nil {
+	for i, check := range quotaPeriods {
+		budget := budgets[i]
+		if budget == nil {
 			continue
 		}
 		spent, err := e.usageStore.SumQuotaCostSince(ctx, scope, scopeID, orgID, check.sinceFn(now))
 		if err != nil {
 			return nil, errors.WithStack(err)
 		}
-		if spent >= *check.budget {
-			// Build the message: "Daily budget exceeded", or with the
-			// scopeLabel prefix: "Application daily budget exceeded".
-			// Title case for the period keeps the existing wire format.
-			period := strings.Title(check.label) //nolint:staticcheck // intentional capitalization
-			subject := period + " budget exceeded"
-			if scopeLabel != "" {
-				subject = scopeLabel + strings.ToLower(period[:1]) + period[1:] + " budget exceeded"
-			}
+		if spent >= *budget {
 			return &genaiProxy.HookResult{
 				Response: rateLimitResponse(fmt.Sprintf(
 					"%s: %s / %s",
-					subject,
-					formatMicrocents(spent, currency), formatMicrocents(*check.budget, currency),
+					quotaMessageSubject(subjectPrefix, check.title),
+					formatMicrocents(spent, currency), formatMicrocents(*budget, currency),
 				)),
 			}, nil
 		}

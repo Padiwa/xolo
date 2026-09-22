@@ -23,11 +23,11 @@ const (
 	// references ApplicationID feeds the application counter and the org
 	// counter, never the shadow user's user counter (issue #64).
 	//
-	// Operational note: writing a quota row at this scope does not seed a
-	// counter. Existing usage attributed to the application must be
-	// reconstructed by running RebuildQuotaUsage (or equivalent) so the
-	// enforcer sees the historical spend — otherwise the budget reads zero
-	// and the request slips through until new spend arrives.
+	// The application counter is filled from existing usage_records by
+	// migration 202609170002 on every instance start, so a quota set at this
+	// scope is enforced against historical spend from the moment the
+	// application starts running on the upgraded database. The seeder also
+	// calls RebuildQuotaUsage explicitly after bulk-loading fixtures.
 	QuotaScopeApplication QuotaScope = "application"
 )
 
