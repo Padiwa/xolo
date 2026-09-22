@@ -278,6 +278,55 @@ func TestUsageStore_DropsTotalReadBeforeAConcurrentRecord(t *testing.T) {
 	}
 }
 
+// TestUsageStore_DropsApplicationTotalReadBeforeAConcurrentRecord is the
+// application-scope mirror of the test above. QuotaScopeApplication uses the
+// same locking protocol as QuotaScopeOrg, but a regression that mishandles
+// the new scope would slip past the org-only test, and a bug here would let
+// an application request slip past the application budget on the hot path.
+func TestUsageStore_DropsApplicationTotalReadBeforeAConcurrentRecord(t *testing.T) {
+	ctx := context.Background()
+	backend := &blockingUsageStore{
+		total:    1_000,
+		entered:  make(chan struct{}),
+		release:  make(chan struct{}),
+		blockOne: true,
+	}
+	store := NewUsageStore(backend, NewMemoryCache(64), time.Minute)
+	since := model.StartOfDay(time.Now())
+
+	read := make(chan int64)
+	go func() {
+		total, err := store.SumQuotaCostSince(ctx, model.QuotaScopeApplication, "app-1", "org-1", since)
+		if err != nil {
+			t.Errorf("SumQuotaCostSince: %v", err)
+		}
+		read <- total
+	}()
+
+	<-backend.entered
+	// Record an application call (the only kind that should affect the
+	// application counter): application scope id, no user id.
+	record := model.NewUsageRecord("", "app-1", "org-1", "provider", "llm-model",
+		"fast", "", 10, 0, 10, 250, "USD", model.CostSourceComputed, "")
+	if err := store.RecordUsage(ctx, record); err != nil {
+		t.Fatalf("RecordUsage: %v", err)
+	}
+	backend.release <- struct{}{}
+
+	if got := <-read; got != 1_000 {
+		t.Errorf("the in-flight application read returned %d, want the 1000 it was answered with", got)
+	}
+
+	// The stale application total must not have been cached.
+	total, err := store.SumQuotaCostSince(ctx, model.QuotaScopeApplication, "app-1", "org-1", since)
+	if err != nil {
+		t.Fatalf("SumQuotaCostSince: %v", err)
+	}
+	if total != 1_250 {
+		t.Errorf("total = %d, want 1250: the application total read before the record was cached anyway", total)
+	}
+}
+
 // TestUsageStore_KeepsTotalReadWithoutConcurrentRecord is the other half: a
 // read nothing interfered with must still be cached, or the cache would never
 // serve anything under load.

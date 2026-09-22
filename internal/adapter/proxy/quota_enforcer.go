@@ -191,8 +191,9 @@ func (e *XoloQuotaEnforcer) PreRequest(ctx context.Context, req *genaiProxy.Prox
 }
 
 // periodCheck pairs the title-case label that goes into the rejection
-// message with the calendar window start. Hoisting the titles out of the loop
-// keeps strings.Title (deprecated since Go 1.18) out of the hot path.
+// message with the calendar window start. Hoisting the titles out of the
+// hot path keeps the loop allocation-free: a single runes-only lower-casing
+// per call would otherwise run for every check.
 type periodCheck struct {
 	title   string
 	sinceFn func(time.Time) time.Time
@@ -206,17 +207,29 @@ var quotaPeriods = []periodCheck{
 	{"Yearly", model.StartOfYear},
 }
 
-// quotaMessageSubject builds the rejection message subject. subjectPrefix is
-// "User" or "Application" depending on which scope tripped; the helper joins
-// it with the period ("Daily", "Monthly", "Yearly"), lower-cased after the
-// prefix. Centralising the join means callers cannot produce "Userdaily
-// budget exceeded" by forgetting a trailing space: passing "User" yields
-// "User daily budget exceeded", "Application" yields "Application daily
-// budget exceeded". The org-wide branch does not go through this helper: it
-// hardcodes "Organization" in its own messages above.
-func quotaMessageSubject(subjectPrefix string, periodTitle string) string {
-	subjectPrefix = strings.TrimRight(subjectPrefix, " ") + " "
-	return subjectPrefix + strings.ToLower(periodTitle[:1]) + periodTitle[1:] + " budget exceeded"
+// quotaMessageSubject joins a scope label with a period label to build the
+// rejection message subject. Callers pass "User" or "Application" as the
+// scope label and "Daily", "Monthly", "Yearly" as the period. The result is
+// "User daily budget exceeded", "Application daily budget exceeded" — with
+// the period lower-cased after the scope.
+//
+// The helper is defensive about its inputs:
+//   - An empty subjectPrefix produces no leading space ("daily budget exceeded"
+//     rather than " daily budget exceeded"), so a future caller that wants a
+//     period-only message gets a sensible answer.
+//   - An empty periodTitle falls back to "Budget", so adding a new period
+//     that forgets to set the title does not panic at runtime on the first
+//     exceeding request.
+func quotaMessageSubject(subjectPrefix, periodTitle string) string {
+	period := "Budget"
+	if periodTitle != "" {
+		period = strings.ToLower(periodTitle[:1]) + periodTitle[1:]
+	}
+
+	if subjectPrefix == "" {
+		return period + " budget exceeded"
+	}
+	return subjectPrefix + " " + period + " budget exceeded"
 }
 
 // checkScope runs the three daily/monthly/yearly checks against the counter

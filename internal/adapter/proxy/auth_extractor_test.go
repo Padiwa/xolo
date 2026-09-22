@@ -100,3 +100,27 @@ func TestPopulateMetaFromContext_DoesNotOverwriteMetadata(t *testing.T) {
 		t.Errorf("application id = %q, want empty when the early-return fires", got)
 	}
 }
+
+// Symmetric to TestPopulateMetaFromContext_DoesNotOverwriteMetadata, but for
+// the XoloAuthExtractor explicit-keys branch: when req.Metadata already
+// carries MetaOrgID, an application id carried by the explicit context keys
+// must not be copied. The contract is "any prior MetaOrgID short-circuits the
+// whole function", regardless of which context-source the application id
+// would otherwise come from.
+func TestPopulateMetaFromContext_XoloAuthExtractorBranchRespectsEarlyReturn(t *testing.T) {
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, contextKeyOrgID, "org-from-context")
+	ctx = context.WithValue(ctx, contextKeyApplicationID, "app-from-context")
+
+	req := &genaiProxy.ProxyRequest{Metadata: map[string]any{
+		MetaOrgID: "org-already-set",
+	}}
+	populateMetaFromContext(ctx, req)
+
+	if got := OrgIDFromMeta(req.Metadata); got != model.OrgID("org-already-set") {
+		t.Errorf("org id = %q, want the value already in metadata (org-already-set)", got)
+	}
+	if got := ApplicationIDFromMeta(req.Metadata); got != "" {
+		t.Errorf("application id = %q, want empty when the early-return fires on the explicit-keys branch", got)
+	}
+}
