@@ -55,7 +55,6 @@ func TestHandleModels_ScopeResolution(t *testing.T) {
 		name string
 
 		// Principal shape
-		provider    string
 		subject     string
 		authnOrgID  string // empty for OIDC sessions
 		xoloUser    model.User
@@ -156,12 +155,11 @@ func TestHandleModels_ScopeResolution(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
 			ctx := req.Context()
 
-			// Authn middleware stamps authn.User.OrgID from the token; OIDC
-			// sessions leave it empty. /api/v1/models is not a proxy request,
-			// so XoloAuthExtractor never runs and the proxy-side context key
-			// stays unset for every case here.
+			// Authn middleware stamps authn.User from the token / OIDC session.
+			// The Provider mirrors what the xoloUser was created with — a real
+			// authenticator would do the same.
 			ctx = authn.SetContextUser(ctx, &authn.User{
-				Provider: tc.provider,
+				Provider: tc.xoloUser.Provider(),
 				Subject:  tc.subject,
 				OrgID:    tc.authnOrgID,
 				TokenID:  "tok",

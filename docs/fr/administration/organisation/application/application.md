@@ -123,6 +123,27 @@ curl -X POST https://xolo.example.com/v1/chat/completions \
   }'
 ```
 
+### Portée d'un token et endpoint `GET /api/v1/models`
+
+Un token (application ou utilisateur) est rattaché à **une seule organisation** :
+celle dans laquelle il a été émis. Cette portée s'applique de la même
+manière à toutes les requêtes authentifiées par ce token, y compris
+`GET /api/v1/models`, qui renvoie uniquement les modèles activés de cette
+organisation.
+
+Concrètement :
+
+- **Jeton d'application** : `GET /api/v1/models` renvoie les modèles activés de l'organisation de l'application.
+- **Jeton d'utilisateur multi-organisations** : `GET /api/v1/models` ne renvoie que les modèles activés de l'organisation du jeton (les autres appartenances de l'utilisateur sont ignorées, comme pour le proxy).
+- **Session OIDC (utilisateur humain)** : `GET /api/v1/models` renvoie l'union des modèles activés de toutes les organisations dont l'utilisateur est membre.
+
+> **Note** : Avant la correction du bug [#48](https://github.com/xolo-gateway/xolo/issues/48),
+> un jeton d'application renvoyait une liste vide sur `GET /api/v1/models`
+> parce que l'utilisateur « fantôme » associé à l'application n'a
+> aucune appartenance organisationnelle. Ce comportement est désormais
+> corrigé : l'application voit les modèles de son organisation, comme
+> le proxy le faisait déjà.
+
 ## Intégration avec OpenWebUI
 
 OpenWebUI peut être configuré pour utiliser Xolo comme backend LLM.

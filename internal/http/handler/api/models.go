@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/bornholm/go-x/slogx"
-	proxyAdapter "github.com/xolo-gateway/xolo/internal/adapter/proxy"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
 	"github.com/xolo-gateway/xolo/internal/core/rbac"
@@ -171,18 +170,12 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	//      via XoloAuthExtractor, and is the only one populated for an
 	//      application's shadow user — which has no membership. Reading it
 	//      directly here mirrors the proxy's answer to "which org is this
-	//      token in" for callers like GET /api/v1/models that do not flow
-	//      through XoloAuthExtractor.
-	//   2. OrgID previously copied into the proxy context (defensive: covers
-	//      any future caller that does run through the extractor).
-	//   3. The full set of org memberships (e.g. a user authenticated via an
-	//      OIDC session, whose authn.User.OrgID is empty by design).
+	//      token in" for callers like GET /api/v1/models.
+	//   2. The full set of org memberships (e.g. a user authenticated via
+	//      an OIDC session, whose authn.User.OrgID is empty by design).
 	orgID := model.OrgID("")
 	if authnUser := authn.OptionalContextUser(ctx); authnUser != nil {
 		orgID = model.OrgID(authnUser.OrgID)
-	}
-	if orgID == "" {
-		orgID = model.OrgID(proxyAdapter.OrgIDFromContext(ctx))
 	}
 	if orgID != "" {
 		orgIDs = []model.OrgID{orgID}
