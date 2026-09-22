@@ -40,6 +40,10 @@ func TestHandleModels_ScopeResolution(t *testing.T) {
 	orgA := model.NewOrganization(testTenantID, "acme", "ACME", "")
 	orgB := model.NewOrganization(testTenantID, "umbrella", "Umbrella", "")
 
+	// proxyName is what clients send in the API request (e.g. "<org>/gpt-4o").
+	// It must NOT contain a slash: the proxy splits qualified model names at
+	// the first "/" into <orgSlug>/<proxyName> (see
+	// internal/adapter/proxy/org_model_router.go). realModel is just metadata.
 	modelA := model.NewLLMModel(model.NewProviderID(), orgA.ID(), "gpt-4o", "openai/gpt-4o", "", 100, 200)
 	modelB := model.NewLLMModel(model.NewProviderID(), orgB.ID(), "claude", "anthropic/claude", "", 100, 200)
 
@@ -69,6 +73,14 @@ func TestHandleModels_ScopeResolution(t *testing.T) {
 		// Expected orgs the permission resolver was asked about. Empty means
 		// the resolver is not expected to fire at all (no org to scope to).
 		wantResolverOrgs []model.OrgID
+		// wantResolverProvider is the provider that the resolver is expected
+		// to see on the user in the request context. The memberships
+		// middleware in production dispatches to either
+		// roleStore.ResolveApplicationPermissions or
+		// roleStore.ResolveEffectivePermissions based on this; the test's
+		// resolver records the provider it observed at call time so a
+		// regression in how the handler looks up the principal is caught.
+		wantResolverProvider string
 	}{
 		{
 			// Branch 1: application token. Regression case for #48.
@@ -88,7 +100,8 @@ func TestHandleModels_ScopeResolution(t *testing.T) {
 			// In production this is the roleStore.ResolveApplicationPermissions
 			// branch of memberships/middleware.go; the resolver installed by
 			// the test stands in for it.
-			wantResolverOrgs: []model.OrgID{orgA.ID()},
+			wantResolverOrgs:     []model.OrgID{orgA.ID()},
+			wantResolverProvider: model.ApplicationProvider,
 		},
 		{
 			// Branch 2: OIDC session (no OrgID). Memberships drive the scope.
@@ -110,7 +123,8 @@ func TestHandleModels_ScopeResolution(t *testing.T) {
 				orgA.Slug() + "/" + modelA.ProxyName(),
 				orgB.Slug() + "/" + modelB.ProxyName(),
 			},
-			wantResolverOrgs: []model.OrgID{orgA.ID(), orgB.ID()},
+			wantResolverOrgs:     []model.OrgID{orgA.ID(), orgB.ID()},
+			wantResolverProvider: "oidc",
 		},
 		{
 			// Branch 3: user token with memberships in additional orgs.
@@ -129,8 +143,9 @@ func TestHandleModels_ScopeResolution(t *testing.T) {
 				{orgID: orgA.ID()},
 				{orgID: orgB.ID()}, // would leak if the membership fallback ran
 			},
-			wantModelIDs:     []string{orgA.Slug() + "/" + modelA.ProxyName()},
-			wantResolverOrgs: []model.OrgID{orgA.ID()},
+			wantModelIDs:         []string{orgA.Slug() + "/" + modelA.ProxyName()},
+			wantResolverOrgs:     []model.OrgID{orgA.ID()},
+			wantResolverProvider: "oidc",
 		},
 	}
 
@@ -186,10 +201,16 @@ func TestHandleModels_ScopeResolution(t *testing.T) {
 			// not leak observations into each other. In production the resolver
 			// is installed by the memberships middleware and dispatches to
 			// roleStore.ResolveApplicationPermissions when the principal is an
-			// application (see memberships/middleware.go).
+			// application (see memberships/middleware.go); resolverProviderSeen
+			// captures the provider seen in the request context to prove that
+			// dispatch key was read.
 			resolverCalls := map[model.OrgID]int{}
+			resolverProviderSeen := ""
 			permissionResolver := func(ctx context.Context, orgID model.OrgID) (rbac.PermissionSet, error) {
 				resolverCalls[orgID]++
+				if u := httpCtx.User(ctx); u != nil {
+					resolverProviderSeen = u.Provider()
+				}
 				return rbac.NewPermissionSet([]string{string(rbac.PermModelUseOrg)}, nil), nil
 			}
 			ctx = httpCtx.SetPermissionResolver(ctx, permissionResolver)
@@ -240,7 +261,46 @@ func TestHandleModels_ScopeResolution(t *testing.T) {
 			if !slices.Equal(gotOrgs, wantOrgs) {
 				t.Fatalf("unexpected resolver orgs\nwant: %v\ngot:  %v", wantOrgs, gotOrgs)
 			}
+
+			// Assert the resolver saw the xoloUser whose provider matches
+			// the case. The memberships middleware dispatches to
+			// ResolveApplicationPermissions vs ResolveEffectivePermissions
+			// based on this provider; capturing it here proves the handler
+			// looks up the right principal, not a stale one.
+			if tc.wantResolverProvider != "" {
+				if resolverProviderSeen != tc.wantResolverProvider {
+					t.Fatalf("resolver saw wrong provider\nwant: %q\ngot:  %q", tc.wantResolverProvider, resolverProviderSeen)
+				}
+			}
 		})
+	}
+}
+
+// TestHandleModels_UnauthenticatedReturns401 pins the defensive nil-user
+// branch of handleModels. The apiAuthn middleware would normally 401 a
+// request before it reaches the handler, but handleModels has its own
+// `user == nil -> 401` check in the membership-fallback path. This test
+// exercises that path so a future refactor that removes the nil check
+// fails CI rather than panicking.
+func TestHandleModels_UnauthenticatedReturns401(t *testing.T) {
+	h := api.NewHandler(
+		&fakeProviderStoreForModels{enabledModels: map[string][]model.LLMModel{}},
+		&fakeOrgStoreForModels{
+			orgsByID:    map[string]model.Organization{},
+			memberships: map[string][]model.Membership{},
+		},
+		&fakeVirtualModelStoreForModels{models: map[string][]model.VirtualModel{}},
+		nil, nil, nil, nil, nil,
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
+	// No authn.SetContextUser, no httpCtx.SetUser: the principal is
+	// genuinely unauthenticated.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

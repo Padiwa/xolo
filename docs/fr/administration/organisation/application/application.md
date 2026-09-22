@@ -136,6 +136,7 @@ Concrètement :
 - **Jeton d'application** : `GET /api/v1/models` renvoie les modèles activés de l'organisation de l'application.
 - **Jeton d'utilisateur multi-organisations** : `GET /api/v1/models` ne renvoie que les modèles activés de l'organisation du jeton (les autres appartenances de l'utilisateur sont ignorées, comme pour le proxy).
 - **Session OIDC (utilisateur humain)** : `GET /api/v1/models` renvoie l'union des modèles activés de toutes les organisations dont l'utilisateur est membre.
+- **Session issue de `POST /auth/token/login`** : la session est créée à partir d'un jeton d'utilisateur, donc `authn.User.OrgID` est rempli avec l'organisation du jeton. `GET /api/v1/models` ne renvoie que les modèles activés de cette organisation, comme pour le cas « Jeton d'utilisateur » ci-dessus (les autres appartenances de l'utilisateur sont ignorées). Ce cas se distingue du précédent uniquement par le canal d'authentification (cookie de session au lieu de header `Authorization`).
 
 > **Note** : Avant la correction du bug [#48](https://github.com/xolo-gateway/xolo/issues/48),
 > un jeton d'application renvoyait une liste vide sur `GET /api/v1/models`
