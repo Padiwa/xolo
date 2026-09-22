@@ -22,7 +22,7 @@ import (
 //   - engine.go:77's seed step, which writes ec.BodyJSON into the
 //     ValueContext under (generator-id, "request"), is *redundantly* covered:
 //     GeneratorExecutor.Forward also writes ec.BodyJSON to its "request"
-//     output (engine.go:117-119), and the plugin's ResolveInputs reads from
+//     output (engine.go:113-115), and the plugin's ResolveInputs reads from
 //     the ValueContext after that overwrite. A regression in engine.go:77
 //     alone is masked. TestGeneratorExecutor_RequestPortCarriesBodyJSON in
 //     internal/adapter/proxy covers the generator's re-emit; together, the
