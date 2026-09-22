@@ -173,7 +173,7 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	//      token in" for callers like GET /api/v1/models.
 	//   2. The full set of org memberships (e.g. a user authenticated via
 	//      an OIDC session, whose authn.User.OrgID is empty by design).
-	orgID := model.OrgID("")
+	var orgID model.OrgID
 	if authnUser := authn.OptionalContextUser(ctx); authnUser != nil {
 		orgID = model.OrgID(authnUser.OrgID)
 	}
