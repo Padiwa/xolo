@@ -43,9 +43,13 @@ func TestHandleModels_ScopeResolution(t *testing.T) {
 	modelA := model.NewLLMModel(model.NewProviderID(), orgA.ID(), "gpt-4o", "openai/gpt-4o", "", 100, 200)
 	modelB := model.NewLLMModel(model.NewProviderID(), orgB.ID(), "claude", "anthropic/claude", "", 100, 200)
 
-	permissionResolver := func(ctx context.Context, orgID model.OrgID) (rbac.PermissionSet, error) {
-		return rbac.NewPermissionSet([]string{string(rbac.PermModelUseOrg)}, nil), nil
-	}
+	// permissionResolver is installed by each sub-test with its own calls
+	// map so sub-tests do not leak observations into each other. In
+	// production the resolver is installed by the memberships middleware
+	// and dispatches to roleStore.ResolveApplicationPermissions when the
+	// principal is an application (see memberships/middleware.go), so
+	// seeing the application's org here is what tells us the production
+	// path was taken end-to-end.
 
 	type membershipRef struct {
 		orgID model.OrgID
@@ -62,6 +66,9 @@ func TestHandleModels_ScopeResolution(t *testing.T) {
 
 		// Expected model IDs in the response
 		wantModelIDs []string
+		// Expected orgs the permission resolver was asked about. Empty means
+		// the resolver is not expected to fire at all (no org to scope to).
+		wantResolverOrgs []model.OrgID
 	}{
 		{
 			// Branch 1: application token. Regression case for #48.
@@ -77,6 +84,11 @@ func TestHandleModels_ScopeResolution(t *testing.T) {
 			),
 			memberships:  nil, // shadow user has no membership
 			wantModelIDs: []string{orgA.Slug() + "/" + modelA.ProxyName()},
+			// The application's resolver must be asked about its own org.
+			// In production this is the roleStore.ResolveApplicationPermissions
+			// branch of memberships/middleware.go; the resolver installed by
+			// the test stands in for it.
+			wantResolverOrgs: []model.OrgID{orgA.ID()},
 		},
 		{
 			// Branch 2: OIDC session (no OrgID). Memberships drive the scope.
@@ -98,6 +110,7 @@ func TestHandleModels_ScopeResolution(t *testing.T) {
 				orgA.Slug() + "/" + modelA.ProxyName(),
 				orgB.Slug() + "/" + modelB.ProxyName(),
 			},
+			wantResolverOrgs: []model.OrgID{orgA.ID(), orgB.ID()},
 		},
 		{
 			// Branch 3: user token with memberships in additional orgs.
@@ -116,7 +129,8 @@ func TestHandleModels_ScopeResolution(t *testing.T) {
 				{orgID: orgA.ID()},
 				{orgID: orgB.ID()}, // would leak if the membership fallback ran
 			},
-			wantModelIDs: []string{orgA.Slug() + "/" + modelA.ProxyName()},
+			wantModelIDs:     []string{orgA.Slug() + "/" + modelA.ProxyName()},
+			wantResolverOrgs: []model.OrgID{orgA.ID()},
 		},
 	}
 
@@ -166,6 +180,18 @@ func TestHandleModels_ScopeResolution(t *testing.T) {
 				TenantID: string(testTenantID),
 			})
 			ctx = httpCtx.SetUser(ctx, tc.xoloUser)
+			// The resolver records every org it is asked about so the test can
+			// assert which orgs the handler actually consulted. Each sub-test
+			// gets its own calls map (local to this closure) so sub-tests do
+			// not leak observations into each other. In production the resolver
+			// is installed by the memberships middleware and dispatches to
+			// roleStore.ResolveApplicationPermissions when the principal is an
+			// application (see memberships/middleware.go).
+			resolverCalls := map[model.OrgID]int{}
+			permissionResolver := func(ctx context.Context, orgID model.OrgID) (rbac.PermissionSet, error) {
+				resolverCalls[orgID]++
+				return rbac.NewPermissionSet([]string{string(rbac.PermModelUseOrg)}, nil), nil
+			}
 			ctx = httpCtx.SetPermissionResolver(ctx, permissionResolver)
 			req = req.WithContext(ctx)
 
@@ -195,6 +221,24 @@ func TestHandleModels_ScopeResolution(t *testing.T) {
 
 			if !slices.Equal(got, want) {
 				t.Fatalf("unexpected model set\nwant: %v\ngot:  %v", want, got)
+			}
+
+			// Assert the permission resolver was consulted exactly for the
+			// orgs the scope resolution landed on. This catches a regression
+			// where the handler skips ResolvePermissions entirely (e.g. if a
+			// future refactor stops calling httpCtx.ResolvePermissions in the
+			// per-org loop), and pins that the application's resolver path is
+			// exercised for application tokens.
+			gotOrgs := make([]model.OrgID, 0, len(resolverCalls))
+			for orgID := range resolverCalls {
+				gotOrgs = append(gotOrgs, orgID)
+			}
+			slices.Sort(gotOrgs)
+			wantOrgs := slices.Clone(tc.wantResolverOrgs)
+			slices.Sort(wantOrgs)
+
+			if !slices.Equal(gotOrgs, wantOrgs) {
+				t.Fatalf("unexpected resolver orgs\nwant: %v\ngot:  %v", wantOrgs, gotOrgs)
 			}
 		})
 	}
