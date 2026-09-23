@@ -92,6 +92,22 @@ jobs:
       - name: End-to-end tests
         run: make test-e2e
 
+  # Builds docs/ exactly as the xolo-gateway/docs publication does (Zensical,
+  # --strict, fr/en/es). Without it, a broken link or anchor only surfaces
+  # once the docs repository fails to publish the merged commit or the tag.
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Build documentation in strict mode
+        run: make docs-check
+
   # Generated files are committed (see .gitattributes for why). Nothing else in
   # the pipeline regenerates them, so without this job a `.templ` edit shipped
   # without its `_templ.go` would build and pass tests against the stale output.

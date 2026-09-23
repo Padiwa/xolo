@@ -29,7 +29,7 @@ Xolo authentifie les utilisateurs via un ou plusieurs fournisseurs OAuth2/OIDC. 
 | `XOLO_HTTP_AUTHN_ACTIVE_BY_DEFAULT` | Si `true`, les nouveaux comptes sont actifs sans validation manuelle. |
 | `XOLO_HTTP_AUTHN_PROVIDERS_GOOGLE_KEY` / `_SECRET` | Fournisseur Google OAuth2. |
 | `XOLO_HTTP_AUTHN_PROVIDERS_GITHUB_KEY` / `_SECRET` | Fournisseur GitHub OAuth2. |
-| `XOLO_HTTP_AUTHN_PROVIDERS_GITEA_KEY` / `_SECRET` / `_AUTH_URL` / `_TOKEN_URL` / `_PROFILE_URL` / `_DISCOVERY_URL` | Fournisseur Gitea auto-hébergé. `DISCOVERY_URL` est optionnel : sans lui, le fournisseur démarre avec un avertissement et le login interactif retombe sur `AUTH_URL` / `TOKEN_URL` ; avec lui, sa politique de validation est celle des [fournisseurs OIDC nommés](#fournisseurs-oidc-nommés). `DISCOVERY_URL` seul, ou `AUTH_URL` + `TOKEN_URL` (avec éventuellement `PROFILE_URL`), doivent être renseignés : un fournisseur configuré avec uniquement `KEY` et `SECRET` est refusé au démarrage. |
+| `XOLO_HTTP_AUTHN_PROVIDERS_GITEA_KEY` / `_SECRET` / `_AUTH_URL` / `_TOKEN_URL` / `_PROFILE_URL` / `_DISCOVERY_URL` | Fournisseur Gitea auto-hébergé. `DISCOVERY_URL` est optionnel : sans lui, le fournisseur démarre avec un avertissement et le login interactif retombe sur `AUTH_URL` / `TOKEN_URL` ; avec lui, sa politique de validation est celle des [fournisseurs OIDC nommés](#fournisseurs-oidc-nommes). `DISCOVERY_URL` seul, ou `AUTH_URL` + `TOKEN_URL` (avec éventuellement `PROFILE_URL`), doivent être renseignés : un fournisseur configuré avec uniquement `KEY` et `SECRET` est refusé au démarrage. |
 
 ### Fournisseurs OIDC nommés
 

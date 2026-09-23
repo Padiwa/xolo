@@ -84,6 +84,28 @@ SEED_DAYS ?= 90
 seed:
 	go run ./cmd/seed -dsn $(SEED_DSN) -days $(SEED_DAYS) -force
 
+# Builds docs/ with the documentation site's own toolchain (Zensical, strict
+# mode, all languages), so a broken link or anchor fails here instead of in the
+# xolo-gateway/docs publication triggered after a merge or a release. The docs
+# repository is cloned under tools/ and refreshed on each run; point DOCS_DIR
+# at an existing clone to test local changes to it. Needs Python 3.10+.
+DOCS_REPOSITORY ?= https://github.com/xolo-gateway/docs.git
+DOCS_REF ?= main
+DOCS_DIR ?= $(CURDIR)/tools/docs
+.PHONY: docs-check
+docs-check:
+	@if [ "$(DOCS_DIR)" = "$(CURDIR)/tools/docs" ]; then \
+		if [ ! -d "$(DOCS_DIR)/.git" ]; then \
+			git clone --depth 1 --branch "$(DOCS_REF)" "$(DOCS_REPOSITORY)" "$(DOCS_DIR)"; \
+		else \
+			git -C "$(DOCS_DIR)" fetch --depth 1 origin "$(DOCS_REF)" && \
+			git -C "$(DOCS_DIR)" checkout --quiet --detach FETCH_HEAD; \
+		fi; \
+	fi
+	$(MAKE) -C "$(DOCS_DIR)" prepare-source check-all \
+		XOLO_SOURCE="$(CURDIR)" \
+		XOLO_REF="$(shell git rev-parse HEAD)"
+
 build-frontend:
 	cd frontend && npm ci && npm run build
 
