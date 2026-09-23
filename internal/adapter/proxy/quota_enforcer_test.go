@@ -90,3 +90,82 @@ func TestQuotaEnforcerEnforcesPipelineAnswerFromProvider(t *testing.T) {
 		t.Fatalf("expected a 429 quota response, got %+v", result)
 	}
 }
+
+// Issue #82: the enforcer must use the org quota carried on EffectiveQuota
+// instead of issuing a second quotaStore.GetQuota(QuotaScopeOrg, ...) on the
+// hot path. We assert that by setting OrgQuota to a record that *would*
+// reject the request if read, and by wiring a resolver that does not load
+// anything — if the enforcer still re-reads, the request would slip through.
+func TestQuotaEnforcerReusesOrgQuotaFromResolver(t *testing.T) {
+	orgID := model.OrgID("org-1")
+	providerID := model.NewProviderID()
+	llmModel := model.NewLLMModel(providerID, orgID, "acme/qwen-strong", "qwen", "desc", 1000, 2000)
+	provider := model.NewProvider(orgID, "ollama", "openai", "http://localhost:11434/v1", "key", "EUR")
+	providerStore := &fakeProviderStore{provider: provider, llmModel: llmModel}
+
+	// The resolver returns a merged user budget above the spent amount (so
+	// the per-user check passes) and an OrgQuota whose daily budget is below
+	// the spent amount (so the org-wide block must trip). The org-wide block
+	// is fed by EffectiveQuota.OrgQuota, not by a fresh GetQuota call.
+	spent := int64(2_000)
+	usage := &fakeUsage{spent: map[time.Time]int64{
+		model.StartOfDay(time.Now()): spent,
+	}}
+	orgQuota := model.NewQuota(model.QuotaScopeOrg, string(orgID), "EUR",
+		i64(1_000),  // tighter than the per-user daily budget — will trip
+		nil, nil,
+	)
+	resolver := fakeQuotaResolver{quota: &model.EffectiveQuota{
+		DailyBudget: i64(10_000), // well above the spent amount
+		Currency:    "EUR",
+		OrgQuota:    orgQuota,
+	}}
+	enforcer := NewXoloQuotaEnforcer(resolver, nil, usage, providerStore)
+
+	req := &genaiProxy.ProxyRequest{
+		UserID:   "user-1",
+		Model:    "acme/qwen-strong",
+		Metadata: map[string]any{MetaOrgID: string(orgID), MetaModelID: string(llmModel.ID())},
+	}
+
+	result, err := enforcer.PreRequest(context.Background(), req)
+	if err != nil {
+		t.Fatalf("PreRequest() error = %v", err)
+	}
+	if result == nil || result.Response == nil || result.Response.StatusCode != 429 {
+		t.Fatalf("expected a 429 quota response from the org-wide block, got %+v", result)
+	}
+}
+
+// Issue #82: when the resolver reports no org quota (OrgQuota == nil), the
+// org-wide block must be skipped — equivalent to a GetQuota that returned
+// port.ErrNotFound. The enforcer must not crash on the nil OrgQuota either.
+func TestQuotaEnforcerSkipsOrgBlockWhenOrgQuotaNil(t *testing.T) {
+	orgID := model.OrgID("org-1")
+	providerID := model.NewProviderID()
+	llmModel := model.NewLLMModel(providerID, orgID, "acme/qwen-strong", "qwen", "desc", 1000, 2000)
+	provider := model.NewProvider(orgID, "ollama", "openai", "http://localhost:11434/v1", "key", "EUR")
+	providerStore := &fakeProviderStore{provider: provider, llmModel: llmModel}
+
+	usage := &fakeUsage{spent: map[time.Time]int64{}}
+	resolver := fakeQuotaResolver{quota: &model.EffectiveQuota{
+		DailyBudget: nil, // no per-user daily limit either
+		Currency:    "EUR",
+		OrgQuota:    nil, // no org quota on file
+	}}
+	enforcer := NewXoloQuotaEnforcer(resolver, nil, usage, providerStore)
+
+	req := &genaiProxy.ProxyRequest{
+		UserID:   "user-1",
+		Model:    "acme/qwen-strong",
+		Metadata: map[string]any{MetaOrgID: string(orgID), MetaModelID: string(llmModel.ID())},
+	}
+
+	result, err := enforcer.PreRequest(context.Background(), req)
+	if err != nil {
+		t.Fatalf("PreRequest() error = %v", err)
+	}
+	if result != nil {
+		t.Fatalf("expected the request to pass when OrgQuota is nil, got %+v", result)
+	}
+}

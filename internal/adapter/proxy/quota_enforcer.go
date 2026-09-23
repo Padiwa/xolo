@@ -22,15 +22,20 @@ type quotaResolver interface {
 // for the requesting user and org, rejecting requests that would exceed it.
 type XoloQuotaEnforcer struct {
 	quotaResolver quotaResolver   // for per-user effective quota
-	quotaStore    port.QuotaStore // for org-level GetQuota + SumCost checks
 	usageStore    port.UsageStore
 	providerStore port.ProviderStore
 }
 
 func NewXoloQuotaEnforcer(quotaResolver quotaResolver, quotaStore port.QuotaStore, usageStore port.UsageStore, providerStore port.ProviderStore) *XoloQuotaEnforcer {
+	// quotaStore used to back the org-wide block with a second GetQuota
+	// round-trip on the hot path. The org quota is now piggy-backed on the
+	// EffectiveQuota returned by quotaResolver.ResolveEffectiveQuota (see
+	// model.EffectiveQuota.OrgQuota), so the second read is dropped — issue #82.
+	// The argument is kept on the constructor to avoid breaking callers that
+	// already wire the store in, but the dependency is no longer held.
+	_ = quotaStore
 	return &XoloQuotaEnforcer{
 		quotaResolver: quotaResolver,
-		quotaStore:    quotaStore,
 		usageStore:    usageStore,
 		providerStore: providerStore,
 	}
@@ -129,10 +134,12 @@ func (e *XoloQuotaEnforcer) PreRequest(ctx context.Context, req *genaiProxy.Prox
 	}
 
 	// ── Org-wide quota check (total spending by all users in the org) ──────────
-	orgQuota, err := e.quotaStore.GetQuota(ctx, model.QuotaScopeOrg, string(orgID))
-	if err != nil && !errors.Is(err, port.ErrNotFound) {
-		return nil, errors.WithStack(err)
-	}
+	// The org quota was already loaded by ResolveEffectiveQuota to feed the merge
+	// above; we reuse it here instead of issuing a second GetQuota round-trip on
+	// the hot path. OrgQuota is nil when no org quota is on file — equivalent
+	// to GetQuota returning port.ErrNotFound, which we previously short-circuited
+	// on (issue #82).
+	orgQuota := effectiveQuota.OrgQuota
 	if orgQuota != nil {
 		orgCurrency := orgQuota.Currency()
 

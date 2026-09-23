@@ -72,6 +72,11 @@ func (s *Store) ResolveEffectiveQuota(ctx context.Context, userID model.UserID, 
 	effective.MonthlyBudget = minPtr(quotaMonthly(userQuota), quotaMonthly(orgQuota))
 	effective.YearlyBudget = minPtr(quotaYearly(userQuota), quotaYearly(orgQuota))
 
+	// Carry the raw org quota so callers (the budget enforcer, mostly) can
+	// reuse the lookup we just did instead of hitting the store again on the
+	// same request. nil means "no org quota on file".
+	effective.OrgQuota = orgQuota
+
 	return effective, nil
 }
 
@@ -102,6 +107,10 @@ func (s *Store) ResolveEffectiveQuotaForApplication(ctx context.Context, appID m
 	effective.DailyBudget = minPtr(quotaDaily(appQuota), quotaDaily(orgQuota))
 	effective.MonthlyBudget = minPtr(quotaMonthly(appQuota), quotaMonthly(orgQuota))
 	effective.YearlyBudget = minPtr(quotaYearly(appQuota), quotaYearly(orgQuota))
+
+	// Same dedup contract as ResolveEffectiveQuota: hand the raw org quota to
+	// the caller so the enforcer does not re-read it for the org-wide block.
+	effective.OrgQuota = orgQuota
 
 	return effective, nil
 }

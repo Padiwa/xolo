@@ -66,6 +66,13 @@ func (s *QuotaService) ResolveEffectiveQuota(
 		effective.Currency = model.DefaultCurrency
 	}
 
+	// Carry the raw org quota so the budget enforcer can reuse the lookup we
+	// just did instead of hitting the store again on the same request. nil
+	// means "no org quota on file" — same semantics as a not-found GetQuota.
+	// Set up here so every return below (sharing branch, default merge) keeps
+	// it consistent — issue #82.
+	effective.OrgQuota = orgQuota
+
 	// Sharing: distribute org quota equally only when user has no personal quota.
 	if !userHasPersonalQuota && org.ShareQuotaEqually() && orgQuota != nil {
 		members, _, err := s.orgStore.ListOrgMembers(ctx, orgID, port.ListOrgMembersOptions{})

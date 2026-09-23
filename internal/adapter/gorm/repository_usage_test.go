@@ -77,6 +77,32 @@ func scenarioQuotaStoreSetGetAndResolve(t *testing.T, store *xologorm.Store) {
 	if effective.YearlyBudget != nil {
 		t.Errorf("expected an unlimited yearly budget, got %v", *effective.YearlyBudget)
 	}
+
+	// Issue #82: the resolver must hand back the raw org quota so callers
+	// (the budget enforcer) can reuse it instead of issuing a second GetQuota
+	// round-trip on the same request. The org quota above was just set with
+	// a daily budget of 500 — the resolver must surface exactly that record.
+	if effective.OrgQuota == nil {
+		t.Fatalf("expected the resolved EffectiveQuota to carry OrgQuota, got nil")
+	}
+	if effective.OrgQuota.Currency() != "EUR" {
+		t.Errorf("expected OrgQuota currency EUR, got %q", effective.OrgQuota.Currency())
+	}
+	if effective.OrgQuota.DailyBudget() == nil || *effective.OrgQuota.DailyBudget() != 500 {
+		t.Errorf("expected OrgQuota daily budget 500, got %v", effective.OrgQuota.DailyBudget())
+	}
+
+	// Conversely, when no org quota is on file the resolver must report
+	// OrgQuota == nil so callers can short-circuit the org-wide check without
+	// a follow-up GetQuota call.
+	orphanOrgID := model.NewOrgID()
+	effective, err = store.ResolveEffectiveQuota(ctx, userID, orphanOrgID)
+	if err != nil {
+		t.Fatalf("ResolveEffectiveQuota (no org quota): %v", err)
+	}
+	if effective.OrgQuota != nil {
+		t.Errorf("expected OrgQuota == nil when no org quota is on file, got %+v", effective.OrgQuota)
+	}
 }
 
 // usageFixture is a set of records covering both billing modes, spread over

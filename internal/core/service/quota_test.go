@@ -125,6 +125,14 @@ func TestQuotaService_ResolveEffectiveQuota_NoSharing(t *testing.T) {
 	if got.DailyBudget == nil || *got.DailyBudget != 2_000_000 {
 		t.Errorf("expected min daily budget 2_000_000, got %v", got.DailyBudget)
 	}
+	// Issue #82: the resolver must hand back the raw org quota so the
+	// enforcer can reuse it instead of issuing a second GetQuota round-trip.
+	if got.OrgQuota == nil {
+		t.Fatalf("expected OrgQuota to be carried on the resolved EffectiveQuota, got nil")
+	}
+	if got.OrgQuota.DailyBudget() == nil || *got.OrgQuota.DailyBudget() != 6_000_000 {
+		t.Errorf("expected OrgQuota.DailyBudget 6_000_000, got %v", got.OrgQuota.DailyBudget())
+	}
 }
 
 // TestQuotaService_ResolveEffectiveQuota_SharingEnabled_NoUserQuota: quota distribué = orgBudget/N.
@@ -149,6 +157,16 @@ func TestQuotaService_ResolveEffectiveQuota_SharingEnabled_NoUserQuota(t *testin
 	}
 	if got.YearlyBudget != nil {
 		t.Errorf("expected nil yearly budget, got %v", got.YearlyBudget)
+	}
+	// Issue #82: even on the ShareQuotaEqually path the raw org quota must
+	// still ride on the response so the org-wide block can keep enforcing the
+	// organization's global cap (the synthesized per-user budget is only the
+	// user's share).
+	if got.OrgQuota == nil {
+		t.Fatalf("expected OrgQuota to be carried on the resolved EffectiveQuota (sharing path), got nil")
+	}
+	if got.OrgQuota.DailyBudget() == nil || *got.OrgQuota.DailyBudget() != 6_000_000 {
+		t.Errorf("expected OrgQuota.DailyBudget 6_000_000 (sharing path), got %v", got.OrgQuota.DailyBudget())
 	}
 }
 
@@ -204,5 +222,24 @@ func TestQuotaService_ResolveEffectiveQuota_ListMembersError(t *testing.T) {
 	_, err := svc.ResolveEffectiveQuota(context.Background(), "user1", "org1")
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+}
+
+// TestQuotaService_ResolveEffectiveQuota_NoOrgQuota: OrgQuota == nil on file
+// must round-trip as nil on EffectiveQuota.OrgQuota — equivalent to a GetQuota
+// that returned port.ErrNotFound, so the enforcer's org-wide block can skip
+// the check without a follow-up store call (issue #82).
+func TestQuotaService_ResolveEffectiveQuota_NoOrgQuota(t *testing.T) {
+	svc := service.NewQuotaService(
+		&fakeQuotaStore{orgQuota: nil},
+		&fakeOrgProvider{org: &fakeOrg{shareQuotaEqually: false}},
+	)
+
+	got, err := svc.ResolveEffectiveQuota(context.Background(), "user1", "org1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.OrgQuota != nil {
+		t.Errorf("expected OrgQuota == nil when no org quota is on file, got %+v", got.OrgQuota)
 	}
 }

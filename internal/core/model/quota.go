@@ -98,9 +98,18 @@ func NewQuota(scope QuotaScope, scopeID string, currency string, daily, monthly,
 // EffectiveQuota holds the resolved budget constraints after merging all levels.
 // nil at each period means unlimited at that granularity.
 // Currency specifies which currency the budgets are expressed in.
+//
+// OrgQuota carries the raw organization-level quota that fed the merge, when
+// the resolver was able to load it. It lets callers that already triggered an
+// org-quota lookup (the budget enforcer, mostly) avoid a second round-trip
+// through the quota store on the same request. nil means "no org quota on
+// file" — equivalent to GetQuota returning port.ErrNotFound. Callers MUST
+// treat a nil OrgQuota as "skip the org-wide check", exactly as they would
+// after a not-found GetQuota.
 type EffectiveQuota struct {
 	Currency      string
 	DailyBudget   *int64
 	MonthlyBudget *int64
 	YearlyBudget  *int64
+	OrgQuota      Quota
 }
