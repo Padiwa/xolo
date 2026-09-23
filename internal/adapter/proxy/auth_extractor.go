@@ -159,7 +159,7 @@ func ApplicationIDFromMeta(meta map[string]any) model.ApplicationID {
 //     event_emitter, metrics_hook). XoloQuotaEnforcer itself reaches this
 //     branch only on misconfigured routes where XoloAuthExtractor produced no
 //     context keys, which today would also fail the early-return on
-//     userID==”; the branch exists primarily as defensive coding for the
+//     userID == ""; the branch exists primarily as defensive coding for the
 //     downstream hooks that share this helper.
 //
 // applicationID is derived from each source's own conventions: the explicit

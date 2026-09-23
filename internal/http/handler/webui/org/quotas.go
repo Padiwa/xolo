@@ -239,9 +239,9 @@ func (h *Handler) getApplicationQuotaPage(w http.ResponseWriter, r *http.Request
 		orgCurrency = model.DefaultCurrency
 	}
 	now := time.Now()
-	dailyCost := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), orgCurrency, model.StartOfDay(now))
-	monthlyCost := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), orgCurrency, model.StartOfMonth(now))
-	yearlyCost := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), orgCurrency, model.StartOfYear(now))
+	dailyCost := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), model.StartOfDay(now))
+	monthlyCost := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), model.StartOfMonth(now))
+	yearlyCost := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), model.StartOfYear(now))
 
 	vmodel := component.QuotaPageVModel{
 		Org:         org,
@@ -320,14 +320,12 @@ func (h *Handler) saveApplicationQuota(w http.ResponseWriter, r *http.Request) {
 // the counter is a flat microcent total: no per-currency grouping is needed
 // here. This is the application's slice of org spending; cross-application
 // rolls up at the org-wide scope.
-func applicationSpend(_ context.Context, store port.UsageStore, appID model.ApplicationID, orgID model.OrgID, _ string, since time.Time) int64 {
-	sinceFn, ok := store.(interface {
-		SumQuotaCostSince(ctx context.Context, scope model.QuotaScope, scopeID string, orgID model.OrgID, since time.Time) (int64, error)
-	})
-	if !ok {
-		return 0
-	}
-	total, err := sinceFn.SumQuotaCostSince(context.Background(), model.QuotaScopeApplication, string(appID), orgID, since)
+//
+// The request context is threaded through so a cancellation propagates to the
+// store call; dropping it (context.Background) would let a cancelled client
+// still pay the cost of the counter read.
+func applicationSpend(ctx context.Context, store port.UsageStore, appID model.ApplicationID, orgID model.OrgID, since time.Time) int64 {
+	total, err := store.SumQuotaCostSince(ctx, model.QuotaScopeApplication, string(appID), orgID, since)
 	if err != nil {
 		return 0
 	}

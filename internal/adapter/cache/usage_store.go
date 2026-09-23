@@ -203,9 +203,11 @@ func quotaSumCacheKeysFor(record model.UsageRecord) []string {
 	userID := record.UserID()
 
 	// One org key per start, plus at most one of {user, application} per start
-	// (the two branches are mutually exclusive: an application record carries
-	// appID, a user record carries userID, never both). So the upper bound is
-	// len(starts)*2, not *3.
+	// (the if/else if below short-circuits, so the actual maximum is
+	// len(starts)*2, not *3). An application token can carry both a user id
+	// (the shadow user) and an application id on the same record; the user
+	// branch is skipped on purpose so the shadow user's user counter is not
+	// fed by application traffic.
 	keys := make([]string, 0, len(starts)*2)
 	for _, start := range starts {
 		keys = append(keys, quotaSumCacheKey(model.QuotaScopeOrg, string(record.OrgID()), record.OrgID(), start))
