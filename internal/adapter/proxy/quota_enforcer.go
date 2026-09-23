@@ -21,7 +21,7 @@ type quotaResolver interface {
 // XoloQuotaEnforcer is a PreRequestHook that checks the effective budget quota
 // for the requesting user and org, rejecting requests that would exceed it.
 type XoloQuotaEnforcer struct {
-	quotaResolver quotaResolver   // for per-user effective quota
+	quotaResolver quotaResolver // for per-user effective quota
 	usageStore    port.UsageStore
 	providerStore port.ProviderStore
 }

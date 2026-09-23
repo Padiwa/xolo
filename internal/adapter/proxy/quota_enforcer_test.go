@@ -112,7 +112,7 @@ func TestQuotaEnforcerReusesOrgQuotaFromResolver(t *testing.T) {
 		model.StartOfDay(time.Now()): spent,
 	}}
 	orgQuota := model.NewQuota(model.QuotaScopeOrg, string(orgID), "EUR",
-		i64(1_000),  // tighter than the per-user daily budget — will trip
+		i64(1_000), // tighter than the per-user daily budget — will trip
 		nil, nil,
 	)
 	resolver := fakeQuotaResolver{quota: &model.EffectiveQuota{
