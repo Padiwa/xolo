@@ -363,7 +363,10 @@ func (h *Handler) renderEditApplicationPage(w http.ResponseWriter, r *http.Reque
 // a useful summary or an explicit "Budget indisponible" line.
 func applicationBudgetSummary(quota model.Quota, err error) (string, string) {
 	if err != nil && !errors.Is(err, port.ErrNotFound) {
-		return "Budget indisponible", "Budget indisponible : le store a renvoyé une erreur."
+		// Return an empty summary so the operator does not see "Budget
+		// indisponible" twice (once as the summary, once as the banner).
+		// The banner alone carries the diagnostic.
+		return "", "Budget indisponible : le store a renvoyé une erreur."
 	}
 	if quota == nil {
 		return "Aucun budget", ""

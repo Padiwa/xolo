@@ -129,7 +129,7 @@ func TestPopulateMetaFromContext_XoloAuthExtractorBranchRespectsEarlyReturn(t *t
 // authn.ContextUser fallback: the previous code called authn.ContextUser
 // which panics when no user is attached. The fallback is reachable on a
 // route that bypasses authn (a misconfigured upstream, a pre-auth hook on
-// a non-application route). With LookupContextUser the function returns
+// a non-application route). With OptionalContextUser the function returns
 // silently instead, leaving the metadata empty for the caller to handle.
 func TestPopulateMetaFromContext_EmptyContextDoesNotPanic(t *testing.T) {
 	req := &genaiProxy.ProxyRequest{Metadata: map[string]any{}}

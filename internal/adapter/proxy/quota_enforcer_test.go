@@ -383,6 +383,13 @@ func TestQuotaEnforcerEnforcesOrgBudgetWhenAppUnderLimit(t *testing.T) {
 	if counting.appCalls != 1 {
 		t.Errorf("ResolveEffectiveQuotaForApplication was called %d time(s), want 1", counting.appCalls)
 	}
+	// The org-wide branch tripped, but the application branch was first: the
+	// user-scope resolver must still be skipped. A regression that flips
+	// the order — or silently consults the user-scope resolver on the
+	// application path — would slip past without this assertion.
+	if counting.userCalls != 0 {
+		t.Errorf("ResolveEffectiveQuota was called %d time(s) on the application path, want 0", counting.userCalls)
+	}
 }
 
 // Both the application and the organisation budgets are exhausted at once.
@@ -441,6 +448,12 @@ func TestQuotaEnforcerPrefersApplicationErrorWhenBothExhausted(t *testing.T) {
 	// The application branch tripped, so the org branch should not have run.
 	if counting.appCalls != 1 {
 		t.Errorf("ResolveEffectiveQuotaForApplication was called %d time(s), want 1", counting.appCalls)
+	}
+	// The user-scope resolver must also be skipped on the application path
+	// even when the org branch never runs: a fall-through to ResolveEffectiveQuota
+	// would silently spend the share-by-members branch on a shadow user.
+	if counting.userCalls != 0 {
+		t.Errorf("ResolveEffectiveQuota was called %d time(s) on the application path, want 0", counting.userCalls)
 	}
 }
 
