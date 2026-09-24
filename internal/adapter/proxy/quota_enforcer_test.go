@@ -170,6 +170,17 @@ func TestQuotaEnforcerEnforcesApplicationQuota(t *testing.T) {
 	if msg, _ := errBody["message"].(string); msg == "" || !strings.Contains(msg, "Application daily budget exceeded") {
 		t.Errorf("expected application daily budget error, got %q", msg)
 	}
+	// The 429 path took the same branch as the passing call: the user-scope
+	// resolver must still be skipped and the application resolver consulted.
+	// Re-asserting the counters after the rejection pinpoints a regression
+	// that flips the branch only on the rejection path (e.g. a fall-through
+	// to user-scope on error).
+	if counting.userCalls != 0 {
+		t.Errorf("ResolveEffectiveQuota was called %d time(s) on the 429 path, want 0", counting.userCalls)
+	}
+	if counting.appCalls != 2 {
+		t.Errorf("ResolveEffectiveQuotaForApplication was called %d time(s) after the 429, want 2", counting.appCalls)
+	}
 }
 
 // countingQuotaResolver wraps appQuotaResolver to count how many times each

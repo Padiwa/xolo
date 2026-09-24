@@ -308,8 +308,18 @@ func (h *Handler) renderEditApplicationPage(w http.ResponseWriter, r *http.Reque
 	// Load the application budget, if any, and precompute a short summary for
 	// the edit form. The dedicated editor lives at /admin/applications/{appID}/quota;
 	// the edit form shows the current value and links to it.
-	quota, _ := h.quotaStore.GetQuota(ctx, model.QuotaScopeApplication, appID)
+	//
+	// A quota row missing (port.ErrNotFound) is the normal "no budget yet"
+	// case and renders as such. Any other error means the store is failing:
+	// we surface it on the form rather than silently rendering "no budget",
+	// which would diverge from what the enforcer actually enforces.
+	quota, err := h.quotaStore.GetQuota(ctx, model.QuotaScopeApplication, appID)
 	quotaSummary := applicationBudgetSummary(quota)
+	quotaLoadError := ""
+	if err != nil && !errors.Is(err, port.ErrNotFound) {
+		slog.ErrorContext(ctx, "could not load application budget for summary", slogx.Error(err))
+		quotaLoadError = "Budget indisponible : le store a renvoyé une erreur. La page affiche les informations connues mais le total dépensé peut être inexact."
+	}
 	quotaEditURL := common.BaseURLString(ctx, common.WithPath("/orgs/", orgSlug, "/admin/applications/", appID, "/quota"))
 
 	vmodel := component.ApplicationFormVModel{
@@ -322,6 +332,7 @@ func (h *Handler) renderEditApplicationPage(w http.ResponseWriter, r *http.Reque
 		IsNew:           false,
 		QuotaSummary:    quotaSummary,
 		QuotaEditURL:    quotaEditURL,
+		QuotaLoadError:  quotaLoadError,
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
 			SelectedItem: "org-" + orgSlug + "-applications",

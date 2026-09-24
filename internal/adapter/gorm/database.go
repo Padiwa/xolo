@@ -336,6 +336,35 @@ func createGetDatabase(db *gorm.DB) func(ctx context.Context) (*gorm.DB, error) 
 						return errors.WithStack(tx.Migrator().DropTable("quota_usages"))
 					},
 				},
+				{
+					// Replays the per-day PAYG counter backfill so the application
+					// scope (introduced with the QuotaScopeApplication enforcement
+					// PR) gets its own rows. Migration 202609170002 above runs
+					// once per instance and gormigrate marks it applied; that id
+					// shipped before application counters existed, so on upgrade
+					// from any pre-application-enforcement build the table only
+					// has org+user rows. This migration backfills application rows
+					// from the existing usage_records on the application id.
+					//
+					// On a fresh install quota_usages does not yet exist, so we
+					// also call AutoMigrate (the same shape 202609170002 used);
+					// on an upgrade it is a no-op and the DELETE at the top of
+					// backfillQuotaUsage keeps the replay safe.
+					ID: "202609240001",
+					Migrate: func(tx *gorm.DB) error {
+						if err := tx.AutoMigrate(&QuotaUsage{}); err != nil {
+							return errors.WithStack(err)
+						}
+						return backfillQuotaUsage(tx)
+					},
+					Rollback: func(tx *gorm.DB) error {
+						// Truncate the application counter rows so a downgrade
+						// returns to the pre-fix state (no application counter at
+						// all). Org and user rows stay — they were the pre-fix
+						// shape and any downgrade expects them intact.
+						return errors.WithStack(tx.Exec("DELETE FROM " + quotaUsageTable + " WHERE scope = 'application'").Error)
+					},
+				},
 			})
 
 			m.InitSchema(func(tx *gorm.DB) error {

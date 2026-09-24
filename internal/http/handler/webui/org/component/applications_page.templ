@@ -53,6 +53,11 @@ type ApplicationFormVModel struct {
 	// configured via its own page so the edit form does not have to mix
 	// principal metadata and spending caps in the same submit.
 	QuotaEditURL string
+	// QuotaLoadError is set when the budget store returned an error other
+	// than ErrNotFound. The summary still renders the cached value (which
+	// may be stale), but a banner warns the operator so the UI does not
+	// silently disagree with what the enforcer actually applies.
+	QuotaLoadError string
 }
 
 // HasAssignedRole reports whether at least one role is assigned. An application
@@ -344,6 +349,9 @@ templ ApplicationForm(vmodel ApplicationFormVModel) {
 								une fois atteint. Les plafonds ne s'appliquent qu'aux fournisseurs
 								en mode pay-as-you-go.
 							</p>
+							if vmodel.QuotaLoadError != "" {
+								@common.InfoBanner(common.ToneNegative, vmodel.QuotaLoadError)
+							}
 							<p class="text-sm font-medium">
 								{ vmodel.QuotaSummary }
 							</p>

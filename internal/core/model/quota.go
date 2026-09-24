@@ -23,11 +23,15 @@ const (
 	// references ApplicationID feeds the application counter and the org
 	// counter, never the shadow user's user counter (issue #64).
 	//
-	// The application counter is filled from existing usage_records by
-	// migration 202609170002 on every instance start, so a quota set at this
-	// scope is enforced against historical spend from the moment the
-	// application starts running on the upgraded database. The seeder also
-	// calls RebuildQuotaUsage explicitly after bulk-loading fixtures.
+	// The application counter is backfilled from existing usage_records on
+	// upgrade by migration 202609240001 (a replay of the original backfill
+	// introduced with 202609170002; the latter shipped before application
+	// counters existed, so any upgrade from a pre-application-enforcement
+	// build needs the replay to seed the application rows). gormigrate runs
+	// each migration id at most once and records it applied, so this is a
+	// one-shot replay per instance, not a per-startup refill. The seeder
+	// (cmd/seed) calls RebuildQuotaUsage explicitly after bulk-loading
+	// fixtures.
 	QuotaScopeApplication QuotaScope = "application"
 )
 

@@ -57,17 +57,23 @@ func quotaUsageDay(t time.Time) string {
 }
 
 // quotaUsageRows returns the counter rows a usage record contributes to:
-// one for the org (always), one for the application when the call was made by
-// an application, and one for the user when the record carries a user id.
-//
-// An application token authenticates through a shadow user but the two are
-// distinct principals: the shadow user has no budget of its own, while the
-// application does. Counting application spending on the shadow user's
-// counter would silently bypass any budget the operator set on the
-// application (see issue #64); counting user spending on the application
-// counter would inflate a per-application budget with activity unrelated to
-// it. A record that feeds no monetary budget yields no row, per
+// the org row (always), exactly one of an application row or a user row, or
+// neither when the record carries neither an application id nor a user id.
+// A record that feeds no monetary budget yields no row, per
 // model.FeedsMonetaryBudget, the rule the backfill restates in SQL.
+//
+// The application and user branches are mutually exclusive: the if/else if
+// below short-circuits, so a record that carries both an application id and
+// a user id (an application token authenticated through a shadow user) only
+// emits the application row.
+//
+// Why the split matters: an application token authenticates through a
+// shadow user, but the two are distinct principals. The shadow user has
+// no budget of its own, while the application does. Counting application
+// spending on the shadow user's counter would silently bypass any budget
+// the operator set on the application (issue #64); counting user spending
+// on the application counter would inflate a per-application budget with
+// activity unrelated to it.
 func quotaUsageRows(r model.UsageRecord) []*QuotaUsage {
 	if !model.FeedsMonetaryBudget(r) {
 		return nil

@@ -232,7 +232,12 @@ func (h *Handler) getApplicationQuotaPage(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	existing, _ := h.quotaStore.GetQuota(ctx, model.QuotaScopeApplication, appID)
+	existing, err := h.quotaStore.GetQuota(ctx, model.QuotaScopeApplication, appID)
+	loadError := ""
+	if err != nil && !errors.Is(err, port.ErrNotFound) {
+		slog.ErrorContext(ctx, "could not load application budget", slogx.Error(err))
+		loadError = "Budget indisponible : le store a renvoyé une erreur. Le formulaire ci-dessous reste éditable mais le total dépensé peut être inexact."
+	}
 
 	orgCurrency := org.Currency()
 	if orgCurrency == "" {
@@ -253,6 +258,7 @@ func (h *Handler) getApplicationQuotaPage(w http.ResponseWriter, r *http.Request
 		DailyCost:   dailyCost,
 		MonthlyCost: monthlyCost,
 		YearlyCost:  yearlyCost,
+		LoadError:   loadError,
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
 			SelectedItem: "org-" + orgSlug + "-applications",
