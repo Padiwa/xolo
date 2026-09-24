@@ -257,3 +257,55 @@ func scenarioUserStoreAuthTokens(t *testing.T, store *xologorm.Store) {
 		t.Errorf("expected the user's tokens to be cascaded away, got %d", len(tokens))
 	}
 }
+
+func TestUserStore_DeleteUserWithMemberships(t *testing.T) {
+	eachBackend(t, scenarioUserStoreDeleteUserWithMemberships)
+}
+
+// scenarioUserStoreDeleteUserWithMemberships guards against the foreign key
+// failure seen when deleting a user still member of an organization: neither
+// memberships nor membership_roles cascade at the database level.
+func scenarioUserStoreDeleteUserWithMemberships(t *testing.T, store *xologorm.Store) {
+	ctx := context.Background()
+
+	org := model.NewOrganization(testTenantID, "acme", "Acme", "")
+	if err := store.CreateOrg(ctx, org); err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+
+	user := newUser("s-member", "member@example.com", "Member", true)
+	if err := store.SaveUser(ctx, user); err != nil {
+		t.Fatalf("SaveUser: %v", err)
+	}
+
+	membership := model.NewMembership(user.ID(), org.ID())
+	if err := store.AddMember(ctx, membership); err != nil {
+		t.Fatalf("AddMember: %v", err)
+	}
+
+	role := model.NewRole(org.ID(), "Lecteur", "")
+	if err := store.CreateRole(ctx, role); err != nil {
+		t.Fatalf("CreateRole: %v", err)
+	}
+	if err := store.SetMembershipRoles(ctx, membership.ID(), []model.RoleID{role.ID()}); err != nil {
+		t.Fatalf("SetMembershipRoles: %v", err)
+	}
+
+	if err := store.DeleteUser(ctx, user.ID()); err != nil {
+		t.Fatalf("DeleteUser: %v", err)
+	}
+	if _, err := store.GetUserByID(ctx, user.ID()); !errors.Is(err, port.ErrNotFound) {
+		t.Fatalf("GetUserByID (deleted): expected port.ErrNotFound, got %v", err)
+	}
+	if _, err := store.GetMembership(ctx, membership.ID()); !errors.Is(err, port.ErrNotFound) {
+		t.Fatalf("GetMembership (deleted user): expected port.ErrNotFound, got %v", err)
+	}
+
+	// The organization and its role are untouched.
+	if _, err := store.GetOrgByID(ctx, org.ID()); err != nil {
+		t.Fatalf("GetOrgByID: %v", err)
+	}
+	if _, err := store.GetRoleByID(ctx, role.ID()); err != nil {
+		t.Fatalf("GetRoleByID: %v", err)
+	}
+}

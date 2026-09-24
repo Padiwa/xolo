@@ -133,27 +133,8 @@ func (s *Store) DeleteTenant(ctx context.Context, id model.TenantID) error {
 			return errors.WithStack(err)
 		}
 
-		if len(userIDs) > 0 {
-			userScoped := []any{
-				&UserRole{},
-				&UserPreferences{},
-				&PersonalVirtualModel{},
-			}
-			for _, m := range userScoped {
-				if err := db.Where("user_id IN ?", userIDs).Delete(m).Error; err != nil {
-					return errors.WithStack(err)
-				}
-			}
-
-			if err := db.Where("owner_id IN ?", userIDs).Delete(&AuthToken{}).Error; err != nil {
-				return errors.WithStack(err)
-			}
-			if err := db.Where("scope = ? AND scope_id IN ?", string(model.QuotaScopeUser), userIDs).Delete(&Quota{}).Error; err != nil {
-				return errors.WithStack(err)
-			}
-			if err := db.Where("id IN ?", userIDs).Delete(&User{}).Error; err != nil {
-				return errors.WithStack(err)
-			}
+		if _, err := deleteUsersWithin(db, userIDs); err != nil {
+			return err
 		}
 
 		return errors.WithStack(db.Delete(&Tenant{}, "id = ?", string(id)).Error)
