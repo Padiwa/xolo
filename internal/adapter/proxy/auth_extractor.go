@@ -184,7 +184,11 @@ func populateMetaFromContext(ctx context.Context, req *genaiProxy.ProxyRequest) 
 		}
 		return
 	}
-	if authnUser := authn.ContextUser(ctx); authnUser != nil && authnUser.OrgID != "" {
+	authnUser, ok := authn.LookupContextUser(ctx)
+	if !ok {
+		return
+	}
+	if authnUser.OrgID != "" {
 		req.Metadata[MetaOrgID] = authnUser.OrgID
 		if authnUser.TokenID != "" {
 			req.Metadata[MetaAuthTokenID] = authnUser.TokenID

@@ -33,6 +33,11 @@ templ QuotaPage(vmodel QuotaPageVModel) {
 					@common.InfoBanner(common.TonePositive, "Budget enregistré.")
 				</div>
 			}
+			if vmodel.LoadError != "" {
+				<div class="mb-3.5">
+					@common.InfoBanner(common.ToneNegative, vmodel.LoadError)
+				</div>
+			}
 			<form method="POST" action={ templ.SafeURL(action) } class="space-y-3.5">
 				@common.Section() {
 					@common.SectionHeader() {

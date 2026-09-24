@@ -244,9 +244,29 @@ func (h *Handler) getApplicationQuotaPage(w http.ResponseWriter, r *http.Request
 		orgCurrency = model.DefaultCurrency
 	}
 	now := time.Now()
-	dailyCost := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), model.StartOfDay(now))
-	monthlyCost := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), model.StartOfMonth(now))
-	yearlyCost := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), model.StartOfYear(now))
+	dailyCost, dailyErr := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), model.StartOfDay(now))
+	monthlyCost, monthlyErr := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), model.StartOfMonth(now))
+	yearlyCost, yearlyErr := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), model.StartOfYear(now))
+
+	// A failing spend lookup collapses the consumed figure to zero. Surface it
+	// on the page so the operator does not read a misleading 0% that happens
+	// to be coincidentally close to the budget. Combine with the quota-load
+	// error if both are present, so the operator sees one banner that covers
+	// the whole page rather than two stacked ones.
+	spendLoadError := ""
+	for _, e := range []error{dailyErr, monthlyErr, yearlyErr} {
+		if e != nil {
+			slog.ErrorContext(ctx, "could not load application spend", slogx.Error(e))
+			spendLoadError = "Consommation indisponible : le store a renvoyé une erreur. Les barres peuvent afficher 0 %."
+			break
+		}
+	}
+	switch {
+	case loadError != "" && spendLoadError != "":
+		loadError = loadError + " " + spendLoadError
+	case spendLoadError != "":
+		loadError = spendLoadError
+	}
 
 	vmodel := component.QuotaPageVModel{
 		Org:         org,
@@ -329,13 +349,16 @@ func (h *Handler) saveApplicationQuota(w http.ResponseWriter, r *http.Request) {
 //
 // The request context is threaded through so a cancellation propagates to the
 // store call; dropping it (context.Background) would let a cancelled client
-// still pay the cost of the counter read.
-func applicationSpend(ctx context.Context, store port.UsageStore, appID model.ApplicationID, orgID model.OrgID, since time.Time) int64 {
+// still pay the cost of the counter read. A non-nil error is logged and
+// returned to the caller so it can surface a "Budget indisponible" banner
+// alongside the zero figure — a silent 0% would otherwise hide a real store
+// failure.
+func applicationSpend(ctx context.Context, store port.UsageStore, appID model.ApplicationID, orgID model.OrgID, since time.Time) (int64, error) {
 	total, err := store.SumQuotaCostSince(ctx, model.QuotaScopeApplication, string(appID), orgID, since)
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return total
+	return total, nil
 }
 
 // parseBudgetField parses a currency budget field into microcents. Empty → nil (unlimited).

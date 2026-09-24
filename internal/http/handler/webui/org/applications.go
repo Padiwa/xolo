@@ -314,11 +314,11 @@ func (h *Handler) renderEditApplicationPage(w http.ResponseWriter, r *http.Reque
 	// we surface it on the form rather than silently rendering "no budget",
 	// which would diverge from what the enforcer actually enforces.
 	quota, err := h.quotaStore.GetQuota(ctx, model.QuotaScopeApplication, appID)
-	quotaSummary := applicationBudgetSummary(quota)
-	quotaLoadError := ""
-	if err != nil && !errors.Is(err, port.ErrNotFound) {
+	quotaSummary, quotaLoadError := applicationBudgetSummary(quota, err)
+	quotaLoadErrorFull := ""
+	if quotaLoadError != "" {
 		slog.ErrorContext(ctx, "could not load application budget for summary", slogx.Error(err))
-		quotaLoadError = "Budget indisponible : le store a renvoyé une erreur. La page affiche les informations connues mais le total dépensé peut être inexact."
+		quotaLoadErrorFull = "Budget indisponible : le store a renvoyé une erreur. La page affiche les informations connues mais le total dépensé peut être inexact."
 	}
 	quotaEditURL := common.BaseURLString(ctx, common.WithPath("/orgs/", orgSlug, "/admin/applications/", appID, "/quota"))
 
@@ -332,7 +332,7 @@ func (h *Handler) renderEditApplicationPage(w http.ResponseWriter, r *http.Reque
 		IsNew:           false,
 		QuotaSummary:    quotaSummary,
 		QuotaEditURL:    quotaEditURL,
-		QuotaLoadError:  quotaLoadError,
+		QuotaLoadError:  quotaLoadErrorFull,
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
 			SelectedItem: "org-" + orgSlug + "-applications",
@@ -352,11 +352,21 @@ func (h *Handler) renderEditApplicationPage(w http.ResponseWriter, r *http.Reque
 }
 
 // applicationBudgetSummary renders a one-line description of a QuotaScopeApplication
-// row. Empty when no budget has been set, otherwise lists the periods that
-// carry a budget, in calendar order (daily, monthly, yearly).
-func applicationBudgetSummary(quota model.Quota) string {
+// row plus a short error indicator. The (summary, loadError) pair is
+// computed in one place so the call site cannot accidentally render a stale
+// "Aucun budget" on top of a "Budget indisponible" banner.
+//
+// loadError is non-empty exactly when the caller should show the
+// "Budget indisponible" banner — i.e. when the store returned an error other
+// than port.ErrNotFound. The summary is still computed from whatever quota
+// row was returned (typically nil on error) so the caller can render either
+// a useful summary or an explicit "Budget indisponible" line.
+func applicationBudgetSummary(quota model.Quota, err error) (string, string) {
+	if err != nil && !errors.Is(err, port.ErrNotFound) {
+		return "Budget indisponible", "Budget indisponible : le store a renvoyé une erreur."
+	}
 	if quota == nil {
-		return "Aucun budget"
+		return "Aucun budget", ""
 	}
 	currency := quota.Currency()
 	if currency == "" {
@@ -373,9 +383,9 @@ func applicationBudgetSummary(quota model.Quota) string {
 		parts = append(parts, fmt.Sprintf("%s / an", common.FormatCost(*y, currency)))
 	}
 	if len(parts) == 0 {
-		return "Aucun budget"
+		return "Aucun budget", ""
 	}
-	return strings.Join(parts, "  +  ")
+	return strings.Join(parts, "  +  "), ""
 }
 
 func (h *Handler) updateApplication(w http.ResponseWriter, r *http.Request) {

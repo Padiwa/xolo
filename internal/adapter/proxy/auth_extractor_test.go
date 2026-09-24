@@ -124,3 +124,28 @@ func TestPopulateMetaFromContext_XoloAuthExtractorBranchRespectsEarlyReturn(t *t
 		t.Errorf("application id = %q, want empty when the early-return fires on the explicit-keys branch", got)
 	}
 }
+
+// TestPopulateMetaFromContext_EmptyContextDoesNotPanic pins the
+// authn.ContextUser fallback: the previous code called authn.ContextUser
+// which panics when no user is attached. The fallback is reachable on a
+// route that bypasses authn (a misconfigured upstream, a pre-auth hook on
+// a non-application route). With LookupContextUser the function returns
+// silently instead, leaving the metadata empty for the caller to handle.
+func TestPopulateMetaFromContext_EmptyContextDoesNotPanic(t *testing.T) {
+	req := &genaiProxy.ProxyRequest{Metadata: map[string]any{}}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("populateMetaFromContext panicked on an empty context: %v", r)
+		}
+	}()
+
+	populateMetaFromContext(context.Background(), req)
+
+	if got := OrgIDFromMeta(req.Metadata); got != "" {
+		t.Errorf("org id = %q, want empty on an empty context", got)
+	}
+	if got := ApplicationIDFromMeta(req.Metadata); got != "" {
+		t.Errorf("application id = %q, want empty on an empty context", got)
+	}
+}
