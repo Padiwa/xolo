@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkg/errors"
 	xologorm "github.com/xolo-gateway/xolo/internal/adapter/gorm"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
-	"github.com/pkg/errors"
 )
 
 // disabledLLMModel wraps a model to flip its Enabled flag, the way the web UI
@@ -380,6 +380,62 @@ func scenarioVirtualModelStoreRenameCollisionRejected(t *testing.T, store *xolog
 
 func TestMiddlewareStore_EnabledOrdering(t *testing.T) {
 	eachBackend(t, scenarioMiddlewareStoreEnabledOrdering)
+}
+
+// TestMiddlewareStore_DuplicateNameRejected pins the translation of a
+// backend unique violation on idx_mw_org_name into port.ErrAlreadyExists
+// at CreateMiddleware time. The previous incarnation used
+// errors.Is(err, gorm.ErrDuplicatedKey), which is never produced because
+// db.Config.TranslateError is not set anywhere; the current mapping uses
+// isUniqueViolation (dialect.go) and inspects *sqlite3.Error / *pgconn.PgError
+// directly. The two supported backends spell the offending index differently
+// (SQLite reports "middlewares.org_id, middlewares.name", PostgreSQL the
+// index name "idx_mw_org_name"), so this must hold on both. Run it with
+// XOLO_TEST_POSTGRES_DSN set to cover the PostgreSQL side. This is the
+// Create* counterpart to TestVirtualModelStore_RenameCollisionRejected
+// (which covers the Save* side); both are required to fully cover
+// xolo-gateway/xolo#75.
+func TestMiddlewareStore_DuplicateNameRejected(t *testing.T) {
+	eachBackend(t, scenarioMiddlewareStoreDuplicateNameRejected)
+}
+
+func scenarioMiddlewareStoreDuplicateNameRejected(t *testing.T, store *xologorm.Store) {
+	ctx := context.Background()
+
+	org := model.NewOrganization(testTenantID, "acme-mw-dup", "Acme MW Dup", "")
+	if err := store.CreateOrg(ctx, org); err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+
+	first := model.NewMiddleware(org.ID(), "guardrails", "Prompt guardrails")
+	if err := store.CreateMiddleware(ctx, first); err != nil {
+		t.Fatalf("CreateMiddleware (first): %v", err)
+	}
+
+	// A second create with the same (org_id, name) collides on the
+	// idx_mw_org_name unique index and must surface as
+	// port.ErrAlreadyExists — the webui form handler relies on this
+	// to redirect to ?error=exists instead of leaking a 500.
+	duplicate := model.NewMiddleware(org.ID(), "guardrails", "Same name, different description")
+	err := store.CreateMiddleware(ctx, duplicate)
+	if !errors.Is(err, port.ErrAlreadyExists) {
+		t.Fatalf("CreateMiddleware (duplicate name): expected port.ErrAlreadyExists, got %v", err)
+	}
+
+	// A different name in the same org must still succeed.
+	if err := store.CreateMiddleware(ctx, model.NewMiddleware(org.ID(), "pii-redaction", "PII redaction")); err != nil {
+		t.Fatalf("CreateMiddleware (different name): %v", err)
+	}
+
+	// The same name in a *different* org must also succeed: the unique
+	// index is per org_id, not global.
+	otherOrg := model.NewOrganization(testTenantID, "other-mw-dup", "Other MW Dup", "")
+	if err := store.CreateOrg(ctx, otherOrg); err != nil {
+		t.Fatalf("CreateOrg (other): %v", err)
+	}
+	if err := store.CreateMiddleware(ctx, model.NewMiddleware(otherOrg.ID(), "guardrails", "Same name, other org")); err != nil {
+		t.Fatalf("CreateMiddleware (other org): %v", err)
+	}
 }
 
 func scenarioMiddlewareStoreEnabledOrdering(t *testing.T, store *xologorm.Store) {

@@ -3,9 +3,9 @@ package gorm
 import (
 	"context"
 
+	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
-	"github.com/pkg/errors"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -13,7 +13,12 @@ import (
 func (s *Store) CreateMiddleware(ctx context.Context, mw model.Middleware) error {
 	return s.withRetry(ctx, true, func(ctx context.Context, db *gorm.DB) error {
 		if err := db.Create(fromMiddleware(mw)).Error; err != nil {
-			if errors.Is(err, gorm.ErrDuplicatedKey) {
+			// gorm.ErrDuplicatedKey is only produced when
+			// db.Config.TranslateError is true, which we do not set;
+			// inspect the driver error directly via the local
+			// isUniqueViolation helper to translate a collision on
+			// idx_mw_org_name into port.ErrAlreadyExists.
+			if isUniqueViolation(err, "org_id", "name") {
 				return errors.WithStack(port.ErrAlreadyExists)
 			}
 			return errors.WithStack(err)
