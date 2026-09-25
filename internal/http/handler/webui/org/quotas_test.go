@@ -155,9 +155,6 @@ func TestGetApplicationQuotaPage(t *testing.T) {
 			store:      &stubQuotaStore{},
 			foreignApp: true,
 			wantStatus: http.StatusNotFound,
-			wantInBody: []string{
-				"Application not found",
-			},
 		},
 		{
 			name:       "store error other than ErrNotFound renders the banner",

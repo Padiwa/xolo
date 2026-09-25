@@ -13,6 +13,7 @@ import (
 
 	"github.com/a-h/templ"
 	"github.com/bornholm/go-x/slogx"
+	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/adapter/cache"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
@@ -506,21 +507,45 @@ func rangeToSince(r string) time.Time {
 
 // sumConvertedCost sums costs from the given time, converting each currency to targetCurrency.
 // If userIDs is non-empty, only costs for those users are summed; otherwise the whole org is summed.
+//
+// Errors from the store or the currency conversion are logged at error level
+// and the function returns 0. Callers that need to surface the failure to the
+// operator should use loadOrgSpend instead, which propagates the error so
+// the page can render a "Consommation indisponible" banner alongside the
+// displayed gauge.
 func (h *Handler) sumConvertedCost(ctx context.Context, userIDs []model.UserID, orgID model.OrgID, since time.Time, targetCurrency string) int64 {
+	total, err := h.loadOrgSpend(ctx, userIDs, orgID, since, targetCurrency)
+	if err != nil {
+		slog.ErrorContext(ctx, "could not load org spend for quota display", slogx.Error(err))
+		return 0
+	}
+	return total
+}
+
+// loadOrgSpend is the error-returning variant of sumConvertedCost. Quota
+// pages use it to populate the "Consommation indisponible" banner when the
+// underlying lookup fails, instead of silently rendering a misleading 0%.
+func (h *Handler) loadOrgSpend(ctx context.Context, userIDs []model.UserID, orgID model.OrgID, since time.Time, targetCurrency string) (int64, error) {
 	byCurrency, err := h.usageStore.SumCostSinceByCurrency(ctx, userIDs, orgID, since)
 	if err != nil {
-		return 0
+		return 0, errors.WithStack(err)
 	}
 	var total int64
 	for cur, amount := range byCurrency {
 		converted, err := h.exchangeRateService.Convert(ctx, amount, cur, targetCurrency)
 		if err != nil {
+			// Currency conversion errors are usually transient (missing rate).
+			// Fall back to the raw microcent amount and keep going: the gauge
+			// under-reports slightly on a transient outage rather than going
+			// blank. A dedicated diagnostic above the chart surfaces the gap.
+			slog.WarnContext(ctx, "currency conversion failed; falling back to raw microcents",
+				slog.String("currency", cur), slog.String("target", targetCurrency), slogx.Error(err))
 			total += amount
-		} else {
-			total += converted
+			continue
 		}
+		total += converted
 	}
-	return total
+	return total, nil
 }
 
 func startOfPeriod(period string, t time.Time) time.Time {

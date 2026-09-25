@@ -32,10 +32,6 @@ func ContextUser(ctx context.Context) *User {
 // none is attached. It never panics, so it is safe for hooks whose position
 // in the chain is not guaranteed — pre-authn routes, defensive callers, and
 // any helper that shares context plumbing with the auth extractor.
-//
-// The signature matches PR #78 (issue #48): a plain *User with nil for the
-// absent case. Callers that need to distinguish "no user" from "user with
-// empty fields" can compare to nil.
 func OptionalContextUser(ctx context.Context) *User {
 	user, _ := ctx.Value(keyUser).(*User)
 	return user

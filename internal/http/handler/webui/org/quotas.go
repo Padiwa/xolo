@@ -29,18 +29,35 @@ func (h *Handler) getOrgQuotaPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	quotaStore := h.quotaStore
-
-	existing, _ := quotaStore.GetQuota(ctx, model.QuotaScopeOrg, string(org.ID()))
+	existing, err := h.quotaStore.GetQuota(ctx, model.QuotaScopeOrg, string(org.ID()))
+	loadError := ""
+	if err != nil && !errors.Is(err, port.ErrNotFound) {
+		slog.ErrorContext(ctx, "could not load org budget", slogx.Error(err))
+		loadError = "Budget indisponible : le store a renvoyé une erreur. Le formulaire ci-dessous reste éditable mais le total dépensé peut être inexact."
+	}
 
 	orgCurrency := org.Currency()
 	if orgCurrency == "" {
 		orgCurrency = model.DefaultCurrency
 	}
 	now := time.Now()
-	dailyCost := h.sumConvertedCost(ctx, nil, org.ID(), startOfPeriod("day", now), orgCurrency)
-	monthlyCost := h.sumConvertedCost(ctx, nil, org.ID(), startOfPeriod("month", now), orgCurrency)
-	yearlyCost := h.sumConvertedCost(ctx, nil, org.ID(), startOfPeriod("year", now), orgCurrency)
+	dailyCost, dailyErr := h.loadOrgSpend(ctx, nil, org.ID(), startOfPeriod("day", now), orgCurrency)
+	monthlyCost, monthlyErr := h.loadOrgSpend(ctx, nil, org.ID(), startOfPeriod("month", now), orgCurrency)
+	yearlyCost, yearlyErr := h.loadOrgSpend(ctx, nil, org.ID(), startOfPeriod("year", now), orgCurrency)
+	spendLoadError := ""
+	for _, e := range []error{dailyErr, monthlyErr, yearlyErr} {
+		if e != nil {
+			slog.ErrorContext(ctx, "could not load org spend", slogx.Error(e))
+			spendLoadError = "Consommation indisponible : le store a renvoyé une erreur. Les barres peuvent afficher 0 %."
+			break
+		}
+	}
+	switch {
+	case loadError != "" && spendLoadError != "":
+		loadError = loadError + " " + spendLoadError
+	case spendLoadError != "":
+		loadError = spendLoadError
+	}
 
 	vmodel := component.QuotaPageVModel{
 		Org:         org,
@@ -51,6 +68,7 @@ func (h *Handler) getOrgQuotaPage(w http.ResponseWriter, r *http.Request) {
 		DailyCost:   dailyCost,
 		MonthlyCost: monthlyCost,
 		YearlyCost:  yearlyCost,
+		LoadError:   loadError,
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
 			SelectedItem: "org-" + orgSlug + "-quota",
@@ -125,9 +143,12 @@ func (h *Handler) getMemberQuotaPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	quotaStore := h.quotaStore
-
-	existing, _ := quotaStore.GetQuota(ctx, model.QuotaScopeUser, string(membership.UserID()))
+	existing, err := h.quotaStore.GetQuota(ctx, model.QuotaScopeUser, string(membership.UserID()))
+	loadError := ""
+	if err != nil && !errors.Is(err, port.ErrNotFound) {
+		slog.ErrorContext(ctx, "could not load member budget", slogx.Error(err))
+		loadError = "Budget indisponible : le store a renvoyé une erreur. Le formulaire ci-dessous reste éditable mais le total dépensé peut être inexact."
+	}
 
 	orgCurrency := org.Currency()
 	if orgCurrency == "" {
@@ -135,9 +156,23 @@ func (h *Handler) getMemberQuotaPage(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	userIDs := []model.UserID{membership.UserID()}
-	dailyCost := h.sumConvertedCost(ctx, userIDs, org.ID(), startOfPeriod("day", now), orgCurrency)
-	monthlyCost := h.sumConvertedCost(ctx, userIDs, org.ID(), startOfPeriod("month", now), orgCurrency)
-	yearlyCost := h.sumConvertedCost(ctx, userIDs, org.ID(), startOfPeriod("year", now), orgCurrency)
+	dailyCost, dailyErr := h.loadOrgSpend(ctx, userIDs, org.ID(), startOfPeriod("day", now), orgCurrency)
+	monthlyCost, monthlyErr := h.loadOrgSpend(ctx, userIDs, org.ID(), startOfPeriod("month", now), orgCurrency)
+	yearlyCost, yearlyErr := h.loadOrgSpend(ctx, userIDs, org.ID(), startOfPeriod("year", now), orgCurrency)
+	spendLoadError := ""
+	for _, e := range []error{dailyErr, monthlyErr, yearlyErr} {
+		if e != nil {
+			slog.ErrorContext(ctx, "could not load member spend", slogx.Error(e))
+			spendLoadError = "Consommation indisponible : le store a renvoyé une erreur. Les barres peuvent afficher 0 %."
+			break
+		}
+	}
+	switch {
+	case loadError != "" && spendLoadError != "":
+		loadError = loadError + " " + spendLoadError
+	case spendLoadError != "":
+		loadError = spendLoadError
+	}
 
 	vmodel := component.QuotaPageVModel{
 		Org:         org,
@@ -149,6 +184,7 @@ func (h *Handler) getMemberQuotaPage(w http.ResponseWriter, r *http.Request) {
 		DailyCost:   dailyCost,
 		MonthlyCost: monthlyCost,
 		YearlyCost:  yearlyCost,
+		LoadError:   loadError,
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
 			SelectedItem: "org-" + orgSlug + "-members",

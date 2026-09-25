@@ -152,6 +152,18 @@ func (s *Store) DeleteApplication(ctx context.Context, appID model.ApplicationID
 			return errors.WithStack(err)
 		}
 
+		// Same reasoning for the application's own budget: QuotaScopeApplication
+		// rows are not covered by a FK constraint on applications, so an
+		// explicit DELETE here matches the cascade deleteOrgWithin runs on
+		// org deletion. Without it, an operator who creates a per-application
+		// budget from the admin UI and then deletes the application leaves a
+		// row that the enforcer can no longer reach through the proxy, but
+		// that still consumes storage and could be inherited by a recycled
+		// application id.
+		if err := db.Where("scope = ? AND scope_id = ?", string(model.QuotaScopeApplication), string(appID)).Delete(&Quota{}).Error; err != nil {
+			return errors.WithStack(err)
+		}
+
 		return nil
 	})
 	if err != nil {

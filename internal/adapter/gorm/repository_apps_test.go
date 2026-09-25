@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkg/errors"
 	xologorm "github.com/xolo-gateway/xolo/internal/adapter/gorm"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
-	"github.com/pkg/errors"
 )
 
 func TestApplicationStore_Lifecycle(t *testing.T) {
@@ -71,6 +71,70 @@ func scenarioApplicationStoreLifecycle(t *testing.T, store *xologorm.Store) {
 	}
 	if _, err := store.GetApplication(ctx, app.ID()); !errors.Is(err, port.ErrNotFound) {
 		t.Fatalf("GetApplication (deleted): expected port.ErrNotFound, got %v", err)
+	}
+}
+
+// TestApplicationStore_DeleteApplicationCleansQuota pins the cleanup of the
+// QuotaScopeApplication row that the admin UI lets operators create via
+// /admin/applications/{appID}/quota. Without the cleanup, deleting the
+// application leaves a dangling row that consumes storage and could be
+// inherited by a recycled application id (xid collisions are rare but not
+// zero). The fix matches the cascade deleteOrgWithin already runs on org
+// deletion.
+func TestApplicationStore_DeleteApplicationCleansQuota(t *testing.T) {
+	eachBackend(t, scenarioApplicationStoreDeleteApplicationCleansQuota)
+}
+
+func scenarioApplicationStoreDeleteApplicationCleansQuota(t *testing.T, store *xologorm.Store) {
+	ctx := context.Background()
+
+	org := model.NewOrganization(testTenantID, "acme", "Acme", "")
+	if err := store.CreateOrg(ctx, org); err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+
+	app := model.NewApplication(org.ID(), "CI pipeline", "Runs nightly", true)
+	if err := store.CreateApplication(ctx, app); err != nil {
+		t.Fatalf("CreateApplication: %v", err)
+	}
+
+	// A second app in the same org keeps its own quota row to confirm the
+	// DELETE targets only the deleted app's quota.
+	other := model.NewApplication(org.ID(), "Other", "", true)
+	if err := store.CreateApplication(ctx, other); err != nil {
+		t.Fatalf("CreateApplication (other): %v", err)
+	}
+
+	daily := int64(60_000)
+	monthly := int64(1_500_000)
+	quota := model.NewQuota(model.QuotaScopeApplication, string(app.ID()), "EUR", &daily, &monthly, nil)
+	if err := store.SetQuota(ctx, quota); err != nil {
+		t.Fatalf("SetQuota: %v", err)
+	}
+	otherQuota := model.NewQuota(model.QuotaScopeApplication, string(other.ID()), "EUR", &daily, nil, nil)
+	if err := store.SetQuota(ctx, otherQuota); err != nil {
+		t.Fatalf("SetQuota (other): %v", err)
+	}
+
+	// Sanity: both quotas are present before the delete.
+	if _, err := store.GetQuota(ctx, model.QuotaScopeApplication, string(app.ID())); err != nil {
+		t.Fatalf("GetQuota before delete (target): %v", err)
+	}
+	if _, err := store.GetQuota(ctx, model.QuotaScopeApplication, string(other.ID())); err != nil {
+		t.Fatalf("GetQuota before delete (other): %v", err)
+	}
+
+	if err := store.DeleteApplication(ctx, app.ID()); err != nil {
+		t.Fatalf("DeleteApplication: %v", err)
+	}
+
+	// The deleted app's quota row must be gone; the sibling app's quota must
+	// stay.
+	if _, err := store.GetQuota(ctx, model.QuotaScopeApplication, string(app.ID())); !errors.Is(err, port.ErrNotFound) {
+		t.Errorf("quota for deleted application is still present, got err = %v", err)
+	}
+	if _, err := store.GetQuota(ctx, model.QuotaScopeApplication, string(other.ID())); err != nil {
+		t.Errorf("quota for sibling application was removed alongside the deleted app: %v", err)
 	}
 }
 
