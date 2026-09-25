@@ -1,4 +1,18 @@
-@import "tailwindcss";
+/* `source(none)` désactive la détection automatique de Tailwind v4, qui
+   scannerait sinon les .go et .md du dépôt et transformerait chaque mot
+   courant ("isolate", "container", "top-2"…) en règle CSS — voir #65. */
+@import "tailwindcss" source(none);
+
+/* Les classes ne vivent que sous internal/ :
+   - .templ : composants UI (webui/, middleware/authn/…)
+   - .go (non templ) sous http/handler/webui/ : utilitaires assemblés
+     dynamiquement via tailwind-merge-go.
+   Le scope des sources est volontairement élargi à tout internal/ : un
+   fichier .templ non scanné se manifeste par une classe manquante au rendu
+   (ex: internal/http/middleware/authn/token/component/login_page.templ), pas
+   par une règle parasite — c'est le sens d'échec que l'on veut. */
+@source "../../internal/**/*.templ";
+@source "../../internal/http/handler/webui/**/*.go";
 
 /* Le produit est en thème clair uniquement : le bloc `.dark` a été supprimé.
    Cette variante est conservée — et volontairement inatteignable, puisque
