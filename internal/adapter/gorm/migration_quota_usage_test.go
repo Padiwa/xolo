@@ -273,6 +273,13 @@ func TestUpgradeReplaysApplicationBackfill(t *testing.T) {
 	if err := db.Table("usage_records").AutoMigrate(&legacyUsageRecord{}); err != nil {
 		t.Fatalf("migrate legacy usage_records: %v", err)
 	}
+	// quota_usages must already exist: on a real production instance it was
+	// created by migration 202609170002 (which is marked applied here, so it
+	// never runs). The replay in 202609240001 assumes the table is there;
+	// the test mirrors that production state by creating it explicitly.
+	if err := db.AutoMigrate(&QuotaUsage{}); err != nil {
+		t.Fatalf("migrate quota_usages: %v", err)
+	}
 	if err := db.Exec("CREATE TABLE migrations (id VARCHAR(255) PRIMARY KEY)").Error; err != nil {
 		t.Fatalf("create migrations table: %v", err)
 	}

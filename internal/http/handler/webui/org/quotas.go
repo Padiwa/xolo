@@ -361,15 +361,23 @@ func applicationSpend(ctx context.Context, store port.UsageStore, appID model.Ap
 	return total, nil
 }
 
-// parseBudgetField parses a currency budget field into microcents. Empty → nil (unlimited).
+// parseBudgetField parses a currency budget field into microcents.
+//
+//   - Empty → nil (unlimited, the historical default).
+//   - "0" → pointer to 0 (strict zero cap: any spend exceeds the budget and
+//     the enforcer rejects every request — distinct from "unlimited").
+//   - NaN, ±Inf, parse error → nil (caller cannot trust the input; treating
+//     it as "unlimited" preserves the previous behaviour for now, but a future
+//     iteration should return a validation error to surface the bad input).
+//
+// Tracking: issue #88 is the proper fix (return 400 + form re-render on
+// invalid input). This function still swallows NaN/Inf for now.
 func parseBudgetField(v string) *int64 {
 	if v == "" {
 		return nil
 	}
 	f, err := strconv.ParseFloat(v, 64)
-	// NaN and ±Inf parse fine and slip past "f <= 0"; int64(NaN * 1e6) is then
-	// an arbitrary amount, not an error.
-	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f <= 0 {
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 0 {
 		return nil
 	}
 	mc := int64(f * 1_000_000)

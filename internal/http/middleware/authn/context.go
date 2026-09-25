@@ -17,8 +17,8 @@ const keyUser contextKey = "user"
 // permission set.
 //
 // Hooks that may run before the authn middleware (or on a route that
-// bypasses it) must use OptionalContextUser instead, which returns a
-// (*User, ok) pair that mirrors context.Value's contract.
+// bypasses it) must use OptionalContextUser instead, which returns nil
+// instead of panicking.
 func ContextUser(ctx context.Context) *User {
 	user, ok := ctx.Value(keyUser).(*User)
 	if !ok {
@@ -28,23 +28,17 @@ func ContextUser(ctx context.Context) *User {
 	return user
 }
 
-// OptionalContextUser returns the authenticated identity on ctx and whether
-// one is attached. It never panics, so it is safe for hooks whose position
+// OptionalContextUser returns the authenticated identity on ctx, or nil if
+// none is attached. It never panics, so it is safe for hooks whose position
 // in the chain is not guaranteed — pre-authn routes, defensive callers, and
 // any helper that shares context plumbing with the auth extractor.
 //
-// The signature mirrors context.Value's (value, ok) pair so callers can
-// branch on presence without inspecting a possibly-nil user pointer.
-//
-// NOTE: PR #78 (issue #48) defines a helper with the same name. That PR
-// takes a `*User` return and treats absence as nil; this PR uses the
-// (value, ok) form which is more defensive. Once both PRs are ready to
-// merge, only one helper should survive — preferably the (value, ok) form
-// because it leaves the absence signal to the caller, which is the
-// documented contract of context.Value.
-func OptionalContextUser(ctx context.Context) (*User, bool) {
-	user, ok := ctx.Value(keyUser).(*User)
-	return user, ok
+// The signature matches PR #78 (issue #48): a plain *User with nil for the
+// absent case. Callers that need to distinguish "no user" from "user with
+// empty fields" can compare to nil.
+func OptionalContextUser(ctx context.Context) *User {
+	user, _ := ctx.Value(keyUser).(*User)
+	return user
 }
 
 // SetContextUser attaches an authenticated identity to the context. The

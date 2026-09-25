@@ -346,15 +346,18 @@ func createGetDatabase(db *gorm.DB) func(ctx context.Context) (*gorm.DB, error) 
 					// has org+user rows. This migration backfills application rows
 					// from the existing usage_records on the application id.
 					//
-					// On a fresh install quota_usages does not yet exist, so we
-					// also call AutoMigrate (the same shape 202609170002 used);
-					// on an upgrade it is a no-op and the DELETE at the top of
-					// backfillQuotaUsage keeps the replay safe.
+					// The table is guaranteed to exist when this runs: gormigrate
+					// records each id as applied after its first execution, so
+					// this id is only reached on upgrade from a build that
+					// already created quota_usages through 202609170002. On a
+					// fresh install, InitSchema creates the table and marks every
+					// migration applied, so this id never executes there and no
+					// extra AutoMigrate is needed.
+					//
+					// The backfill's first statement is DELETE FROM quota_usages,
+					// so the replay is idempotent and safe to re-run if needed.
 					ID: "202609240001",
 					Migrate: func(tx *gorm.DB) error {
-						if err := tx.AutoMigrate(&QuotaUsage{}); err != nil {
-							return errors.WithStack(err)
-						}
 						return backfillQuotaUsage(tx)
 					},
 					Rollback: func(tx *gorm.DB) error {

@@ -184,8 +184,8 @@ func populateMetaFromContext(ctx context.Context, req *genaiProxy.ProxyRequest) 
 		}
 		return
 	}
-	authnUser, ok := authn.OptionalContextUser(ctx)
-	if !ok {
+	authnUser := authn.OptionalContextUser(ctx)
+	if authnUser == nil {
 		return
 	}
 	if authnUser.OrgID != "" {
