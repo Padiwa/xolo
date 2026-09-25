@@ -199,6 +199,96 @@ func TestCacheControl_SurvivesARewritingNode(t *testing.T) {
 	}
 }
 
+// A conversation that brings a new entity on each turn must keep the prefix it
+// sent upstream on the previous turn, or the prompt cache never reaches past
+// the client's system prompt and every turn is billed at full price (#85).
+func TestCacheControl_PseudonymizedPrefixIsStableAcrossTurns(t *testing.T) {
+	const system = "Tu es un assistant e2e discret."
+	// A client resends the history as it received it: the assistant turns
+	// carry the restored values, which the plugin pseudonymizes again.
+	turns := [][]map[string]any{
+		{
+			{"role": "user", "content": "Bonjour, je m'appelle Jean Dupont."},
+		},
+		{
+			{"role": "assistant", "content": "Bonjour Jean Dupont."},
+			{"role": "user", "content": "Mon collègue Pierre Martin habite à Lyon."},
+		},
+		{
+			{"role": "assistant", "content": "Noté : Pierre Martin, à Lyon."},
+			{"role": "user", "content": "Écris un courriel à Jean Dupont et Pierre Martin."},
+		},
+	}
+	// The fake provider echoes the last user message: each answer must come
+	// back with the names of that message restored.
+	restored := [][]string{
+		{"Jean Dupont"},
+		{"Pierre Martin"},
+		{"Jean Dupont", "Pierre Martin"},
+	}
+
+	type upstreamBody struct {
+		System   json.RawMessage   `json:"system"`
+		Messages []json.RawMessage `json:"messages"`
+	}
+
+	var (
+		history  []map[string]any
+		previous *upstreamBody
+	)
+	for turn, messages := range turns {
+		history = append(history, messages...)
+
+		before := len(env.provider.Requests())
+		res := postMessages(t, tokenAlice, map[string]any{
+			"model":      modelClaude,
+			"max_tokens": 256,
+			"system":     cachedSystemPrompt(system),
+			"messages":   history,
+		})
+		if res.Status != 200 {
+			t.Fatalf("turn %d: status = %d, body = %s", turn+1, res.Status, res.Body)
+		}
+		upstream := env.provider.RequestsSince(before)
+		if len(upstream) != 1 {
+			t.Fatalf("turn %d: upstream calls = %d, want 1", turn+1, len(upstream))
+		}
+		for _, name := range []string{"Jean Dupont", "Pierre Martin"} {
+			if strings.Contains(upstream[0].Raw, name) {
+				t.Fatalf("turn %d: %q reached the upstream: %s", turn+1, name, upstream[0].Raw)
+			}
+		}
+		for _, name := range restored[turn] {
+			if !strings.Contains(res.Content, name) {
+				t.Errorf("turn %d: %q was not restored in the answer: %q", turn+1, name, res.Content)
+			}
+		}
+		if cc := systemCacheControl(t, upstream[0].Raw); cc == nil || cc["type"] != "ephemeral" {
+			t.Errorf("turn %d: the cache breakpoint did not reach the upstream.\nsent: %s", turn+1, upstream[0].Raw)
+		}
+
+		var current upstreamBody
+		if err := json.Unmarshal([]byte(upstream[0].Raw), &current); err != nil {
+			t.Fatalf("turn %d: could not parse the upstream request: %v", turn+1, err)
+		}
+		if len(current.Messages) != len(history) {
+			t.Fatalf("turn %d: upstream messages = %d, want %d", turn+1, len(current.Messages), len(history))
+		}
+
+		if previous != nil {
+			if !bytes.Equal(previous.System, current.System) {
+				t.Errorf("turn %d: the system prompt changed.\nbefore: %s\nnow:    %s", turn+1, previous.System, current.System)
+			}
+			for i := range previous.Messages {
+				if !bytes.Equal(previous.Messages[i], current.Messages[i]) {
+					t.Errorf("turn %d: message %d changed.\nbefore: %s\nnow:    %s", turn+1, i, previous.Messages[i], current.Messages[i])
+				}
+			}
+		}
+		previous = &current
+	}
+}
+
 // The cache reads reported by the Messages upstream must land in the usage
 // record, and be billed at the cached-prompt tariff.
 func TestCacheControl_CachedTokensAreRecorded(t *testing.T) {

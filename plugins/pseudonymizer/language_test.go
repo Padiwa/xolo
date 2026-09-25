@@ -8,7 +8,7 @@ import (
 	goanon "github.com/bornholm/go-anon"
 )
 
-func TestDetectionSample_PrefersRecentUserMessages(t *testing.T) {
+func TestDetectionSample_PrefersUserMessages(t *testing.T) {
 	messages := []map[string]any{
 		{"role": "system", "content": "You are a helpful assistant."},
 		{"role": "user", "content": "Bonjour, je m'appelle William."},
@@ -17,11 +17,19 @@ func TestDetectionSample_PrefersRecentUserMessages(t *testing.T) {
 
 	got := detectionSample(messages, maxDetectionSample)
 
-	if !strings.HasPrefix(got, "Bonjour, je m'appelle William.") {
-		t.Errorf("sample should start with the user message, got %q", got)
+	if got != "Bonjour, je m'appelle William." {
+		t.Errorf("sample should hold the user message only, got %q", got)
 	}
-	if !strings.Contains(got, "You are a helpful assistant.") {
-		t.Errorf("sample should also contain the remaining messages, got %q", got)
+}
+
+func TestDetectionSample_FallsBackOnOtherMessages(t *testing.T) {
+	messages := []map[string]any{
+		{"role": "system", "content": "Tu es un assistant utile."},
+		{"role": "user", "content": []any{map[string]any{"type": "image_url"}}},
+	}
+
+	if got := detectionSample(messages, maxDetectionSample); got != "Tu es un assistant utile." {
+		t.Errorf("sample = %q, want the system message when no user text exists", got)
 	}
 }
 
@@ -54,8 +62,43 @@ func TestDetectionSample_RespectsMaxLen(t *testing.T) {
 	if len(got) > 32 {
 		t.Errorf("len(sample) = %d, want <= 32", len(got))
 	}
-	if !strings.HasPrefix(got, "a") {
-		t.Errorf("sample should start with the most recent message, got %q", got)
+	if !strings.HasPrefix(got, "é") {
+		t.Errorf("sample should start with the oldest message, got %q", got)
+	}
+}
+
+// A new turn must not change the sample once it is full, and must only extend
+// it before that: a language that flips between turns changes the instruction
+// and the NER model, and breaks the upstream prompt cache (#85).
+func TestDetectionSample_StableAcrossTurns(t *testing.T) {
+	turns := [][]map[string]any{
+		{
+			{"role": "user", "content": "Bonjour, peux-tu relire ce module ?"},
+		},
+		{
+			{"role": "assistant", "content": "Here is the review of the module you asked for."},
+			{"role": "user", "content": "panic: runtime error: index out of range [3] with length 3"},
+		},
+		{
+			{"role": "assistant", "content": "The slice is shorter than the loop bound."},
+			{"role": "user", "content": "Corrige-le."},
+		},
+	}
+
+	var history []map[string]any
+	previous := ""
+	for i, turn := range turns {
+		history = append(history, turn...)
+		sample := detectionSample(history, maxDetectionSample)
+		if !strings.HasPrefix(sample, previous) {
+			t.Errorf("turn %d: sample does not extend the previous one:\nbefore: %q\nnow:    %q", i+1, previous, sample)
+		}
+		previous = sample
+	}
+
+	full := detectionSample(history[:1], 16)
+	if got := detectionSample(history, 16); got != full {
+		t.Errorf("a full sample changed with new turns: %q, then %q", full, got)
 	}
 }
 

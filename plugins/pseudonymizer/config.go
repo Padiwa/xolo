@@ -29,7 +29,7 @@ const configSchemaJSON = `{
     "language": {
       "type": "string",
       "title": "Langue",
-      "description": "Langue des messages à anonymiser. 'auto' détecte automatiquement la langue de chaque requête parmi les modèles disponibles.",
+      "description": "Langue des messages à anonymiser. 'auto' détecte automatiquement la langue de la conversation, à partir de ses premiers messages utilisateur, parmi les modèles disponibles.",
       "default": "auto",
       "enum": ["auto", "fr", "en", "es"]
     },
@@ -43,7 +43,7 @@ const configSchemaJSON = `{
     "strategy": {
       "type": "string",
       "title": "Stratégie d'anonymisation",
-      "description": "Mode de remplacement des entités : tag=[PERSON_1], redact=████, hash=[PER_a1b2], consistent=numérotation cohérente. La stratégie hash exige une clé HMAC enregistrée sur le nœud : sans clé, les requêtes sont refusées.",
+      "description": "Mode de remplacement des entités : tag=⟦PERSON_1_a1b2c3⟧, redact=████, hash=⟦PER_a1b2⟧, consistent=numérotation cohérente. La stratégie hash exige une clé HMAC enregistrée sur le nœud : sans clé, les requêtes sont refusées.",
       "default": "tag",
       "enum": ["tag", "redact", "hash", "consistent"]
     },
@@ -153,7 +153,7 @@ const configSchemaJSON = `{
     "inject_instruction": {
       "type": "boolean",
       "title": "Instruction de préservation des jetons",
-      "description": "Ajoute une instruction système demandant au LLM de recopier les jetons de substitution (ex: [PERSON_1]) sans les modifier. Ignoré pour la stratégie 'redact'.",
+      "description": "Ajoute une instruction système demandant au LLM de recopier les jetons de substitution (délimités par ⟦ et ⟧) sans les modifier. Ignoré pour la stratégie 'redact'.",
       "default": true
     },
     "verification": {
