@@ -3,9 +3,11 @@ package proxy
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/bornholm/genai/llm"
 	genaiProxy "github.com/bornholm/genai/proxy"
+	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/pipeline"
 )
 
@@ -180,5 +182,123 @@ func TestRequestSystemMessages_Absent(t *testing.T) {
 func TestRequestSystemMessages_UnsupportedType(t *testing.T) {
 	if _, err := requestSystemMessages([]byte(`{"system":42}`)); err == nil {
 		t.Error("expected an error for a numeric system prompt")
+	}
+}
+
+// --- Regression tests for issue #34 -----------------------------------------
+//
+// ExecutionContext used to declare both RequestJSON and BodyJSON carrying the
+// same semantic ("the raw LLM request body"), but only BodyJSON was populated
+// by buildEC / buildMiddlewareEC. The downstream consumers (generator node's
+// "request" output, PreRequest plugins' Model field, script-processor's
+// ctx.request) therefore read "" at runtime, while tests passed because they
+// seeded RequestJSON by hand through the harness. Going through buildEC — not
+// the harness — is what makes the tests below catch a future regression.
+
+// stubVM satisfies model.VirtualModel with just an ID, which is all buildEC
+// reads off it (it stores vm.ID() in VisitedVMs).
+type stubVM struct {
+	id model.VirtualModelID
+}
+
+func (s *stubVM) ID() model.VirtualModelID    { return s.id }
+func (s *stubVM) EntityID() string            { return string(s.id) }
+func (s *stubVM) OrgID() model.OrgID          { return "" }
+func (s *stubVM) Name() string                { return "" }
+func (s *stubVM) Description() string         { return "" }
+func (s *stubVM) Graph() *model.PipelineGraph { return nil }
+func (s *stubVM) CreatedAt() time.Time        { return time.Time{} }
+func (s *stubVM) UpdatedAt() time.Time        { return time.Time{} }
+
+// newAdapterForBuildEC builds a PipelineHookAdapter with just enough fields
+// wired for buildEC to run without touching stores (no org, no OrgID in ctx
+// → no store lookups).
+func newAdapterForBuildEC() *PipelineHookAdapter {
+	return &PipelineHookAdapter{}
+}
+
+// stubOrg satisfies model.Organization with just an ID, which is all
+// buildMiddlewareEC reads off it.
+func stubOrg() model.Organization {
+	return model.NewOrganization("", "stub", "Stub", "")
+}
+
+func TestBuildEC_PopulatesBodyJSON(t *testing.T) {
+	adapter := newAdapterForBuildEC()
+
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"temperature":0.7}`)
+
+	ec := adapter.buildEC(context.Background(), &genaiProxy.ProxyRequest{
+		Body:  body,
+		Type:  genaiProxy.RequestTypeChatCompletion,
+		Model: "m",
+	}, nil, &stubVM{id: "vm-1"})
+
+	if ec.BodyJSON != string(body) {
+		t.Fatalf("BodyJSON = %q, want %q", ec.BodyJSON, string(body))
+	}
+}
+
+// TestBuildEC_PopulatesBodyJSON_PersonalVMPath covers the personal-VM branch of
+// buildEC: org == nil but OrgIDFromContext(ctx) != "". In production this
+// happens when a personal virtual model is resolved through XoloAuthExtractor;
+// buildEC then derives orgID from the token's org and tries to populate
+// protoModels/protoVMs. With nil stores those stay nil, but the BodyJSON seed
+// must still happen — and the branch itself must not panic.
+func TestBuildEC_PopulatesBodyJSON_PersonalVMPath(t *testing.T) {
+	adapter := newAdapterForBuildEC()
+
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+
+	ctx := context.WithValue(context.Background(), contextKeyOrgID, "org-from-token")
+
+	ec := adapter.buildEC(ctx, &genaiProxy.ProxyRequest{
+		Body:  body,
+		Type:  genaiProxy.RequestTypeChatCompletion,
+		Model: "m",
+	}, nil, &stubVM{id: "vm-personal"})
+
+	if ec.OrgID != "org-from-token" {
+		t.Errorf("OrgID = %q, want %q (derived from ctx)", ec.OrgID, "org-from-token")
+	}
+	if ec.BodyJSON != string(body) {
+		t.Fatalf("BodyJSON = %q, want %q", ec.BodyJSON, string(body))
+	}
+}
+
+func TestBuildMiddlewareEC_PopulatesBodyJSON(t *testing.T) {
+	adapter := newAdapterForBuildEC()
+
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+
+	ec := adapter.buildMiddlewareEC(context.Background(), &genaiProxy.ProxyRequest{
+		Body:  body,
+		Type:  genaiProxy.RequestTypeChatCompletion,
+		Model: "m",
+	}, stubOrg())
+
+	if ec.BodyJSON != string(body) {
+		t.Fatalf("BodyJSON = %q, want %q", ec.BodyJSON, string(body))
+	}
+}
+
+// Sanity check: GeneratorExecutor.Forward exposes ec.BodyJSON as the
+// "request" output port — that is the value the engine seeds into the
+// generator node's ValueContext and what downstream nodes receive.
+func TestGeneratorExecutor_RequestPortCarriesBodyJSON(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[{"role":"user","content":"hello"}]}`)
+	ec := pipeline.ExecutionContext{BodyJSON: string(body)}
+
+	out, err := pipeline.NewGeneratorExecutor().Forward(
+		context.Background(),
+		model.PipelineNode{ID: "g", Type: model.NodeTypeGenerator},
+		nil, ec,
+	)
+	if err != nil {
+		t.Fatalf("generator.Forward: %v", err)
+	}
+	got, _ := out.OutputValues["request"].(string)
+	if got != string(body) {
+		t.Fatalf("generator request output = %q, want %q", got, string(body))
 	}
 }

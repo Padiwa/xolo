@@ -141,9 +141,11 @@ func WithMessagesJSON(messagesJSON string) ECOption {
 	return func(ec *pipeline.ExecutionContext) { ec.MessagesJSON = messagesJSON }
 }
 
-// WithRequestJSON sets the execution context's raw request JSON payload.
-func WithRequestJSON(requestJSON string) ECOption {
-	return func(ec *pipeline.ExecutionContext) { ec.RequestJSON = requestJSON }
+// WithBodyJSON sets the execution context's raw request body JSON payload.
+// This is the single source of truth that backs the generator node's
+// "request" output and PreRequest plugins' Model field.
+func WithBodyJSON(bodyJSON string) ECOption {
+	return func(ec *pipeline.ExecutionContext) { ec.BodyJSON = bodyJSON }
 }
 
 // WithTargetModel sets the model requested by the caller, resolved by

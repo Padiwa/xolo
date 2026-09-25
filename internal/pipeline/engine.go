@@ -74,7 +74,7 @@ func (e *Engine) RunForward(ctx context.Context, graph *model.PipelineGraph, ec 
 	// Seed the generator node's output.
 	for _, node := range graph.Nodes {
 		if node.Type == model.NodeTypeGenerator {
-			vc.Set(node.ID, "request", ec.RequestJSON)
+			vc.Set(node.ID, "request", ec.BodyJSON)
 		}
 	}
 

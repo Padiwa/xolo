@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/xolo-gateway/xolo/pkg/pluginsdk/proto"
 	"github.com/d5/tengo/v2"
 	"github.com/d5/tengo/v2/stdlib"
+	"github.com/xolo-gateway/xolo/pkg/pluginsdk/proto"
 )
 
 const PluginName = "script-processor"
@@ -56,7 +56,7 @@ func (p *Plugin) PreRequest(_ context.Context, in *proto.PreRequestInput) (*prot
 		}
 	}
 
-	// Build ctx.request from the full LLM request body (in.Model = ec.RequestJSON).
+	// Build ctx.request from the full LLM request body (in.Model = ec.BodyJSON).
 	requestMap := make(map[string]interface{})
 	if in.GetModel() != "" {
 		if err := json.Unmarshal([]byte(in.GetModel()), &requestMap); err != nil {

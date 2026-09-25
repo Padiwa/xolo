@@ -17,7 +17,7 @@ func (e *GeneratorExecutor) Forward(_ context.Context, _ model.PipelineNode, inp
 	// The request value was already seeded by the engine; just expose it as output.
 	return &ForwardResult{
 		OutputValues: map[string]interface{}{
-			"request": ec.RequestJSON,
+			"request": ec.BodyJSON,
 		},
 	}, nil
 }
