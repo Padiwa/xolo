@@ -115,6 +115,15 @@ type BackwardInput struct {
 	// NodeState is the blob Forward returned for the same node in the same
 	// execution.
 	NodeState []byte
+	// Model is the identifier of the model that handled the forward pass
+	// (ForwardExecution.ResolvedModel). It matches what the plugin contract
+	// documents on PostResponseInput.Model ("Model that was called").
+	//
+	// For a RESOLVE_MODEL plugin that short-circuits with a forged response
+	// (e.g. the bundled dummy-model), PluginExecutor hardcodes the literal
+	// "dummy" into ResolvedModel, so this field carries that string rather
+	// than the user's requested model.
+	Model string
 	// ResponseContent is the response text as the previous backward nodes left
 	// it.
 	ResponseContent string

@@ -215,6 +215,7 @@ func (e *Engine) RunBackwardWithToolCalls(
 		result, err := ex.Backward(ctx, BackwardInput{
 			Node:            en.Node,
 			NodeState:       en.NodeState,
+			Model:           exec.ResolvedModel,
 			ResponseContent: current,
 			ToolCallsJSON:   currentToolCalls,
 			Tokens:          tokens,
