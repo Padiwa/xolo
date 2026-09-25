@@ -293,7 +293,7 @@ func (p *Plugin) PostResponse(ctx context.Context, in *proto.PostResponseInput) 
 | Field               | Type              | Description                                                        |
 | ------------------- | ----------------- | ------------------------------------------------------------------ |
 | `Ctx`               | `*RequestContext` | Organisation, user, token, config                                  |
-| `Model`             | `string`          | Model that was called                                              |
+| `Model`             | `string`          | Modèle qui a effectivement répondu. Sur une chaîne `ModelFallback`, c'est le candidat retenu (pas forcément le primaire résolu en amont). Si aucun candidat n'a répondu, retombe sur le modèle résolu par le forward pass. |
 | `PromptTokens`      | `int64`           | Tokens in the prompt                                               |
 | `CompletionTokens`  | `int64`           | Tokens generated                                                   |
 | `HadError`          | `bool`            | Whether the LLM call failed                                        |
