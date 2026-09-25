@@ -315,10 +315,8 @@ func (h *Handler) renderEditApplicationPage(w http.ResponseWriter, r *http.Reque
 	// which would diverge from what the enforcer actually enforces.
 	quota, err := h.quotaStore.GetQuota(ctx, model.QuotaScopeApplication, appID)
 	quotaSummary, quotaLoadError := applicationBudgetSummary(quota, err)
-	quotaLoadErrorFull := ""
 	if quotaLoadError != "" {
 		slog.ErrorContext(ctx, "could not load application budget for summary", slogx.Error(err))
-		quotaLoadErrorFull = "Budget indisponible : le store a renvoyé une erreur. La page affiche les informations connues mais le total dépensé peut être inexact."
 	}
 	quotaEditURL := common.BaseURLString(ctx, common.WithPath("/orgs/", orgSlug, "/admin/applications/", appID, "/quota"))
 
@@ -332,7 +330,7 @@ func (h *Handler) renderEditApplicationPage(w http.ResponseWriter, r *http.Reque
 		IsNew:           false,
 		QuotaSummary:    quotaSummary,
 		QuotaEditURL:    quotaEditURL,
-		QuotaLoadError:  quotaLoadErrorFull,
+		QuotaLoadError:  quotaLoadError,
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
 			SelectedItem: "org-" + orgSlug + "-applications",
@@ -352,21 +350,20 @@ func (h *Handler) renderEditApplicationPage(w http.ResponseWriter, r *http.Reque
 }
 
 // applicationBudgetSummary renders a one-line description of a QuotaScopeApplication
-// row plus a short error indicator. The (summary, loadError) pair is
-// computed in one place so the call site cannot accidentally render a stale
-// "Aucun budget" on top of a "Budget indisponible" banner.
+// row, plus a banner text rendered on the form when the store returned an
+// error other than port.ErrNotFound.
 //
-// loadError is non-empty exactly when the caller should show the
-// "Budget indisponible" banner — i.e. when the store returned an error other
-// than port.ErrNotFound. The summary is still computed from whatever quota
-// row was returned (typically nil on error) so the caller can render either
-// a useful summary or an explicit "Budget indisponible" line.
+// The pair (summary, banner) is computed in one place so the call site does
+// not duplicate the wording or risk rendering a stale "Aucun budget" on
+// top of a "Budget indisponible" banner. The banner is empty on success and
+// non-empty on store failure; callers check it with `if banner != ""` and
+// pass it through to the template.
 func applicationBudgetSummary(quota model.Quota, err error) (string, string) {
 	if err != nil && !errors.Is(err, port.ErrNotFound) {
-		// Return an empty summary so the operator does not see "Budget
-		// indisponible" twice (once as the summary, once as the banner).
-		// The banner alone carries the diagnostic.
-		return "", "Budget indisponible : le store a renvoyé une erreur."
+		// Empty summary: the operator would otherwise see "Budget indisponible"
+		// twice (once as the summary, once as the banner). The banner alone
+		// carries the diagnostic.
+		return "", "Budget indisponible : le store a renvoyé une erreur. La page affiche les informations connues mais le total dépensé peut être inexact."
 	}
 	if quota == nil {
 		return "Aucun budget", ""
