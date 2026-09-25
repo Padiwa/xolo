@@ -31,7 +31,8 @@ func TestBackfillQuotaUsage(t *testing.T) {
 		{ID: "u1", CreatedAt: now, UserID: "user-a", OrgID: "org-1", ProviderID: "p", ModelID: "m", Cost: 1_000, Currency: "USD"},
 		{ID: "u2", CreatedAt: now, UserID: "user-a", OrgID: "org-1", ProviderID: "p", ModelID: "m", Cost: 2_000, Currency: "USD"},
 		{ID: "u3", CreatedAt: yesterday, UserID: "user-b", OrgID: "org-1", ProviderID: "p", ModelID: "m", Cost: 500, Currency: "USD"},
-		// An application principal: it feeds the org counter only.
+		// An application principal: it feeds the org counter and its own
+		// application counter (issue #64), not the shadow user's user counter.
 		{ID: "u4", CreatedAt: now, ApplicationID: "app-1", OrgID: "org-1", ProviderID: "p", ModelID: "m", Cost: 300, Currency: "USD"},
 		// Subscription-covered usage consumes no monetary budget.
 		{ID: "u5", CreatedAt: now, UserID: "user-a", OrgID: "org-1", ProviderID: "p", ModelID: "m", Cost: 9_999, Currency: "USD", PlanCovered: 1},
@@ -75,6 +76,12 @@ func TestBackfillQuotaUsage(t *testing.T) {
 	if got := sum("org", "org-1", "org-1", startOfDayLocal(now)); got != 3_300 {
 		t.Errorf("org-1 today = %d, want 3300", got)
 	}
+	// The application principal feeds its own scope (issue #64). The shadow
+	// user has no budget, so the application record must not leak under
+	// QuotaScopeUser either.
+	if got := sum("application", "app-1", "org-1", startOfDayLocal(now)); got != 300 {
+		t.Errorf("application app-1 today = %d, want 300", got)
+	}
 	if got := sum("user", "app-1", "org-1", startOfDayLocal(now)); got != 0 {
 		t.Errorf("application user-scope total = %d, want 0", got)
 	}
@@ -89,6 +96,9 @@ func TestBackfillQuotaUsage(t *testing.T) {
 	}
 	if got := sum("org", "org-1", "org-1", startOfDayLocal(now)); got != 3_300 {
 		t.Errorf("org-1 after replay = %d, want 3300", got)
+	}
+	if got := sum("application", "app-1", "org-1", startOfDayLocal(now)); got != 300 {
+		t.Errorf("application app-1 after replay = %d, want 300", got)
 	}
 }
 
@@ -224,6 +234,13 @@ func TestUpgradeFromExistingDatabase(t *testing.T) {
 	if got := sum("org", "org-1"); got != 2_500 {
 		t.Errorf("org-1 counter = %d, want 2500: the application's spending counts too", got)
 	}
+	// The application record (u3) feeds its own counter on the upgrade path
+	// (issue #64): without this assertion the new appSQL clause in
+	// backfillQuotaUsage is unverified for the legacy-table scenario this test
+	// exists to cover.
+	if got := sum("application", "app-1"); got != 500 {
+		t.Errorf("application app-1 counter = %d, want 500", got)
+	}
 
 	// A record written after the upgrade keeps adding to the same counters.
 	store := &Store{getDatabase: createGetDatabase(db)}
@@ -234,5 +251,93 @@ func TestUpgradeFromExistingDatabase(t *testing.T) {
 	}
 	if got := sum("user", "user-a"); got != 2_300 {
 		t.Errorf("user-a counter after a new record = %d, want 2300", got)
+	}
+}
+
+// TestUpgradeReplaysApplicationBackfill pins the upgrade path the conftest
+// review surfaced: any instance that already ran migration 202609170002
+// before application counters existed (i.e. almost every production
+// deployment, since that id shipped with #63) has gormigrate mark it
+// applied, so the new appSQL clause in backfillQuotaUsage is skipped on
+// upgrade. Migration 202609240001 re-runs the backfill explicitly so the
+// application counter is populated on the day an operator first enables
+// application-scope quotas. Without that replay, a pre-fix instance
+// upgrading to this PR sees an empty application counter and a budget set
+// afterwards would grant a fresh allowance regardless of past spending.
+func TestUpgradeReplaysApplicationBackfill(t *testing.T) {
+	db, err := gormpkg.Open(gormlite.Open(":memory:"), &gormpkg.Config{})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+
+	if err := db.Table("usage_records").AutoMigrate(&legacyUsageRecord{}); err != nil {
+		t.Fatalf("migrate legacy usage_records: %v", err)
+	}
+	// quota_usages must already exist: on a real production instance it was
+	// created by migration 202609170002 (which is marked applied here, so it
+	// never runs). The replay in 202609240001 assumes the table is there;
+	// the test mirrors that production state by creating it explicitly.
+	if err := db.AutoMigrate(&QuotaUsage{}); err != nil {
+		t.Fatalf("migrate quota_usages: %v", err)
+	}
+	if err := db.Exec("CREATE TABLE migrations (id VARCHAR(255) PRIMARY KEY)").Error; err != nil {
+		t.Fatalf("create migrations table: %v", err)
+	}
+
+	// Mark every migration up to and including 202609170002 as already
+	// applied: this simulates an instance upgrading from a pre-application-
+	// enforcement build. The fix (migration 202609240001) must still populate
+	// the application counter rows.
+	applied := []string{
+		"202602010001", "202506040001", "202606080001", "202606180001", "202606250001",
+		"202506290001", "202606290001", "202607010001", "202607050001", "202607050002",
+		"202607170001", "202607210001", "202607220001", "202608130001", "202608220001",
+		"202609040001", "202609150001", "202609150002", "202609170001", "202609170002",
+	}
+	for _, id := range applied {
+		if err := db.Exec("INSERT INTO migrations (id) VALUES (?)", id).Error; err != nil {
+			t.Fatalf("mark %s applied: %v", id, err)
+		}
+	}
+
+	now := time.Now()
+	records := []legacyUsageRecord{
+		// Application traffic that happened before the fix landed.
+		{ID: "u-app-1", CreatedAt: now, ApplicationID: "app-pre", OrgID: "org-1", ProviderID: "p", ModelID: "m", Cost: 800, Currency: "USD"},
+		// A human user is unaffected.
+		{ID: "u-user-1", CreatedAt: now, UserID: "user-a", OrgID: "org-1", ProviderID: "p", ModelID: "m", Cost: 400, Currency: "USD"},
+	}
+	for _, r := range records {
+		if err := db.Table("usage_records").Create(&r).Error; err != nil {
+			t.Fatalf("seed %s: %v", r.ID, err)
+		}
+	}
+
+	if _, err := createGetDatabase(db)(context.Background()); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	sum := func(scope, scopeID string) int64 {
+		t.Helper()
+		var result struct{ Total int64 }
+		err := db.Model(&QuotaUsage{}).
+			Select("COALESCE(SUM(cost), 0) as total").
+			Where("scope = ? AND scope_id = ? AND org_id = ?", scope, scopeID, "org-1").
+			Scan(&result).Error
+		if err != nil {
+			t.Fatalf("sum %s/%s: %v", scope, scopeID, err)
+		}
+		return result.Total
+	}
+
+	// The replay must have populated the application counter from
+	// u-app-1, even though 202609170002 was already marked applied and
+	// therefore skipped.
+	if got := sum("application", "app-pre"); got != 800 {
+		t.Errorf("application app-pre counter after upgrade replay = %d, want 800", got)
+	}
+	// Sanity: the user counter is unaffected by the application replay.
+	if got := sum("user", "user-a"); got != 400 {
+		t.Errorf("user-a counter = %d, want 400", got)
 	}
 }

@@ -3,9 +3,9 @@ package service
 import (
 	"context"
 
+	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
-	"github.com/pkg/errors"
 )
 
 // OrgProvider is a narrow interface used by QuotaService.
@@ -101,6 +101,77 @@ func divPtr(v *int64, n int64) *int64 {
 	}
 	r := *v / n
 	return &r
+}
+
+// ResolveEffectiveQuotaForApplication merges the application and org quotas at
+// each period, taking the minimum of the two non-nil values. Currency is taken
+// from the org quota first so the same defaults ResolveEffectiveQuota uses
+// apply here.
+//
+// There is no "sharing" branch on this path: an application has no membership
+// to share an org budget across, and an operator who set a budget on the
+// application means the whole of it, not a slice.
+//
+// The result is fed to the enforcer's application-scope check, which runs
+// against the QuotaScopeApplication counter. The shadow user's user-scope
+// check is not run at all on the application path: the enforcer skips it
+// (see XoloQuotaEnforcer.PreRequest) because the counter is never fed for an
+// application record (see quotaUsageRows). The application budget is the only
+// budget the enforcer ever checks for a request carrying an ApplicationID
+// (issue #64).
+func (s *QuotaService) ResolveEffectiveQuotaForApplication(
+	ctx context.Context,
+	appID model.ApplicationID,
+	orgID model.OrgID,
+) (*model.EffectiveQuota, error) {
+	appQuota, err := s.quotaStore.GetQuota(ctx, model.QuotaScopeApplication, string(appID))
+	if err != nil && !errors.Is(err, port.ErrNotFound) {
+		return nil, errors.WithStack(err)
+	}
+	if errors.Is(err, port.ErrNotFound) {
+		appQuota = nil
+	}
+
+	orgQuota, err := s.quotaStore.GetQuota(ctx, model.QuotaScopeOrg, string(orgID))
+	if err != nil && !errors.Is(err, port.ErrNotFound) {
+		return nil, errors.WithStack(err)
+	}
+	if errors.Is(err, port.ErrNotFound) {
+		orgQuota = nil
+	}
+
+	effective := &model.EffectiveQuota{}
+	// Currency precedence: org quota first, then app quota, then default.
+	// Both quota writers freeze budget amounts in the org's currency at
+	// SetQuota time (the handler does the conversion), so even if an operator
+	// somehow wrote a QuotaScopeApplication row in a different currency, its
+	// microcent amounts are still in org currency by the time we min-merge
+	// them. Picking the org currency here keeps the merged EffectiveQuota
+	// internally consistent: every *int64 it returns is denominated in the
+	// same currency.
+	switch {
+	case orgQuota != nil:
+		effective.Currency = orgQuota.Currency()
+	case appQuota != nil:
+		effective.Currency = appQuota.Currency()
+	default:
+		effective.Currency = model.DefaultCurrency
+	}
+
+	effective.DailyBudget = minPtrSvc(
+		ptrOf(appQuota, func(q model.Quota) *int64 { return q.DailyBudget() }),
+		ptrOf(orgQuota, func(q model.Quota) *int64 { return q.DailyBudget() }),
+	)
+	effective.MonthlyBudget = minPtrSvc(
+		ptrOf(appQuota, func(q model.Quota) *int64 { return q.MonthlyBudget() }),
+		ptrOf(orgQuota, func(q model.Quota) *int64 { return q.MonthlyBudget() }),
+	)
+	effective.YearlyBudget = minPtrSvc(
+		ptrOf(appQuota, func(q model.Quota) *int64 { return q.YearlyBudget() }),
+		ptrOf(orgQuota, func(q model.Quota) *int64 { return q.YearlyBudget() }),
+	)
+
+	return effective, nil
 }
 
 func ptrOf(q model.Quota, f func(model.Quota) *int64) *int64 {

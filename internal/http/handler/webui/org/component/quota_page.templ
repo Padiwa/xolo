@@ -17,6 +17,10 @@ templ QuotaPage(vmodel QuotaPageVModel) {
 		{{ title = "Budget du membre" }}
 		{{ action = common.BaseURLString(ctx, common.WithPath("/orgs/", vmodel.Org.Slug(), "/admin/members/", string(vmodel.Membership.ID()), "/quota")) }}
 	}
+	if vmodel.ScopeType == "application" && vmodel.Application != nil {
+		{{ title = "Budget de l'application" }}
+		{{ action = common.BaseURLString(ctx, common.WithPath("/orgs/", vmodel.Org.Slug(), "/admin/applications/", string(vmodel.Application.ID()), "/quota")) }}
+	}
 	@common.AppLayout(vmodel.AppLayoutVModel, common.WithTitle(title)) {
 		{{ readonly := !common.HasPermission(ctx, vmodel.Org.ID(), rbac.PermQuotaWrite) }}
 		<div class="max-w-4xl">
@@ -27,6 +31,11 @@ templ QuotaPage(vmodel QuotaPageVModel) {
 			if vmodel.Success != "" {
 				<div class="mb-3.5">
 					@common.InfoBanner(common.TonePositive, "Budget enregistré.")
+				</div>
+			}
+			if vmodel.LoadError != "" {
+				<div class="mb-3.5">
+					@common.InfoBanner(common.ToneNegative, vmodel.LoadError)
 				</div>
 			}
 			<form method="POST" action={ templ.SafeURL(action) } class="space-y-3.5">

@@ -113,13 +113,24 @@ func scenarioQuotaUsageSeparatesScopes(t *testing.T, store *xologorm.Store) {
 		t.Errorf("other org total = %d, want 9999", other)
 	}
 
-	// An application principal feeds the org counter but has no user counter of
-	// its own: nothing is stored under its id.
+	// An application principal feeds both the org counter and its own
+	// application counter (issue #64); the shadow user's user counter is
+	// skipped because the application id is the budget principal.
 	appTotal, err := store.SumQuotaCostSince(ctx, model.QuotaScopeUser, string(f.appID), f.orgID, since)
 	if err != nil {
 		t.Fatalf("SumQuotaCostSince (application): %v", err)
 	}
 	if appTotal != 0 {
 		t.Errorf("application user-scope total = %d, want 0", appTotal)
+	}
+
+	// Symmetric to the no-leak assertion above: the application record must
+	// show up under the application scope, at the cost recorded in the fixture.
+	appScopeTotal, err := store.SumQuotaCostSince(ctx, model.QuotaScopeApplication, string(f.appID), f.orgID, since)
+	if err != nil {
+		t.Fatalf("SumQuotaCostSince (application scope): %v", err)
+	}
+	if appScopeTotal != 8_000 {
+		t.Errorf("application scope total = %d, want 8000", appScopeTotal)
 	}
 }

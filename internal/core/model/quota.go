@@ -15,8 +15,15 @@ func NewQuotaID() QuotaID {
 type QuotaScope string
 
 const (
-	QuotaScopeOrg         QuotaScope = "org"
-	QuotaScopeUser        QuotaScope = "user"
+	QuotaScopeOrg  QuotaScope = "org"
+	QuotaScopeUser QuotaScope = "user"
+	// QuotaScopeApplication caps the spend attributed to a single application
+	// principal (an M2M token). The proxy enforces it in XoloQuotaEnforcer
+	// against a running counter populated per usage record: a row that
+	// references ApplicationID feeds the application counter and the org
+	// counter, never the shadow user's user counter (issue #64). The
+	// migration timeline that populates the counter lives next to the
+	// gormigrate entry in internal/adapter/gorm/database.go.
 	QuotaScopeApplication QuotaScope = "application"
 )
 

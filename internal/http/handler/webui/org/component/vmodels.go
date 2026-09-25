@@ -67,6 +67,7 @@ type QuotaPageVModel struct {
 	common.AppLayoutVModel
 	Org         model.Organization
 	Membership  model.Membership
+	Application model.Application
 	ScopeType   string
 	ScopeID     string
 	Quota       model.Quota
@@ -74,6 +75,11 @@ type QuotaPageVModel struct {
 	DailyCost   int64 // current period spend in org currency (microcents)
 	MonthlyCost int64
 	YearlyCost  int64
+	// LoadError is set when the quota store or a spend lookup returned an
+	// error other than ErrNotFound. The page still renders what it has, but
+	// a banner warns the operator so the displayed numbers do not silently
+	// disagree with what the enforcer actually enforces.
+	LoadError string
 }
 
 type InvitesPageVModel struct {

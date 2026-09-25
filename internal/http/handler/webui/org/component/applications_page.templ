@@ -41,6 +41,23 @@ type ApplicationFormVModel struct {
 	AssignedRoleIDs map[model.RoleID]bool
 	IsNew           bool
 	Error           string
+	// QuotaSummary is a short description of the budget currently set on the
+	// application ("Aucun budget", "10,00 EUR / jour + 100,00 / mois", ...).
+	// It is shown inline in the application edit form so the operator can see
+	// at a glance whether a budget is in effect, with a link to the full
+	// editor for changes. Filled only on edit (not on the new-application
+	// form), so empty on IsNew.
+	QuotaSummary string
+	// QuotaEditURL is the URL of the dedicated budget editor. The application
+	// edit form links to it instead of carrying its own POST: the budget is
+	// configured via its own page so the edit form does not have to mix
+	// principal metadata and spending caps in the same submit.
+	QuotaEditURL string
+	// QuotaLoadError is set when the budget store returned an error other
+	// than ErrNotFound. The summary still renders the cached value (which
+	// may be stale), but a banner warns the operator so the UI does not
+	// silently disagree with what the enforcer actually applies.
+	QuotaLoadError string
 }
 
 // HasAssignedRole reports whether at least one role is assigned. An application
@@ -312,6 +329,35 @@ templ ApplicationForm(vmodel ApplicationFormVModel) {
 			</form>
 			if !vmodel.IsNew && vmodel.App != nil {
 				@applicationTokensSection(vmodel, readonly)
+				<div class="mt-3.5">
+					@common.Section() {
+						@common.SectionHeader() {
+							@common.SectionTitle() {
+								Budget
+							}
+							@button.Button(button.Props{
+								Href:    vmodel.QuotaEditURL,
+								Variant: button.VariantOutline,
+								Size:    button.SizeSm,
+							}) {
+								Modifier
+							}
+						}
+						@common.SectionBody(common.SectionBodyProps{Class: "space-y-2"}) {
+							<p class="text-sm text-muted-foreground">
+								Un plafond bloque les nouvelles requêtes de cette application
+								une fois atteint. Les plafonds ne s'appliquent qu'aux fournisseurs
+								en mode pay-as-you-go.
+							</p>
+							if vmodel.QuotaLoadError != "" {
+								@common.InfoBanner(common.ToneNegative, vmodel.QuotaLoadError)
+							}
+							<p class="text-sm font-medium">
+								{ vmodel.QuotaSummary }
+							</p>
+						}
+					}
+				</div>
 				<div class="mt-3.5">
 					@common.Section(common.SectionProps{Class: "border-destructive/40"}) {
 						@common.SectionHeader(common.SectionHeaderProps{Class: "border-destructive/40"}) {

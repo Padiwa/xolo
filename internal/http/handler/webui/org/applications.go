@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/a-h/templ"
@@ -304,6 +305,21 @@ func (h *Handler) renderEditApplicationPage(w http.ResponseWriter, r *http.Reque
 		assigned[role.ID()] = true
 	}
 
+	// Load the application budget, if any, and precompute a short summary for
+	// the edit form. The dedicated editor lives at /admin/applications/{appID}/quota;
+	// the edit form shows the current value and links to it.
+	//
+	// A quota row missing (port.ErrNotFound) is the normal "no budget yet"
+	// case and renders as such. Any other error means the store is failing:
+	// we surface it on the form rather than silently rendering "no budget",
+	// which would diverge from what the enforcer actually enforces.
+	quota, err := h.quotaStore.GetQuota(ctx, model.QuotaScopeApplication, appID)
+	quotaSummary, quotaLoadError := applicationBudgetSummary(quota, err)
+	if quotaLoadError != "" {
+		slog.ErrorContext(ctx, "could not load application budget for summary", slogx.Error(err))
+	}
+	quotaEditURL := common.BaseURLString(ctx, common.WithPath("/orgs/", orgSlug, "/admin/applications/", appID, "/quota"))
+
 	vmodel := component.ApplicationFormVModel{
 		Org:             org,
 		App:             app,
@@ -312,6 +328,9 @@ func (h *Handler) renderEditApplicationPage(w http.ResponseWriter, r *http.Reque
 		OrgRoles:        orgRoles,
 		AssignedRoleIDs: assigned,
 		IsNew:           false,
+		QuotaSummary:    quotaSummary,
+		QuotaEditURL:    quotaEditURL,
+		QuotaLoadError:  quotaLoadError,
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
 			SelectedItem: "org-" + orgSlug + "-applications",
@@ -328,6 +347,45 @@ func (h *Handler) renderEditApplicationPage(w http.ResponseWriter, r *http.Reque
 	}
 
 	templ.Handler(component.ApplicationForm(vmodel)).ServeHTTP(w, r)
+}
+
+// applicationBudgetSummary renders a one-line description of a QuotaScopeApplication
+// row, plus a banner text rendered on the form when the store returned an
+// error other than port.ErrNotFound.
+//
+// The pair (summary, banner) is computed in one place so the call site does
+// not duplicate the wording or risk rendering a stale "Aucun budget" on
+// top of a "Budget indisponible" banner. The banner is empty on success and
+// non-empty on store failure; callers check it with `if banner != ""` and
+// pass it through to the template.
+func applicationBudgetSummary(quota model.Quota, err error) (string, string) {
+	if err != nil && !errors.Is(err, port.ErrNotFound) {
+		// Empty summary: the operator would otherwise see "Budget indisponible"
+		// twice (once as the summary, once as the banner). The banner alone
+		// carries the diagnostic.
+		return "", "Budget indisponible : le store a renvoyé une erreur. La page affiche les informations connues mais le total dépensé peut être inexact."
+	}
+	if quota == nil {
+		return "Aucun budget", ""
+	}
+	currency := quota.Currency()
+	if currency == "" {
+		currency = model.DefaultCurrency
+	}
+	parts := make([]string, 0, 3)
+	if d := quota.DailyBudget(); d != nil {
+		parts = append(parts, fmt.Sprintf("%s / jour", common.FormatCost(*d, currency)))
+	}
+	if m := quota.MonthlyBudget(); m != nil {
+		parts = append(parts, fmt.Sprintf("%s / mois", common.FormatCost(*m, currency)))
+	}
+	if y := quota.YearlyBudget(); y != nil {
+		parts = append(parts, fmt.Sprintf("%s / an", common.FormatCost(*y, currency)))
+	}
+	if len(parts) == 0 {
+		return "Aucun budget", ""
+	}
+	return strings.Join(parts, "  +  "), ""
 }
 
 func (h *Handler) updateApplication(w http.ResponseWriter, r *http.Request) {

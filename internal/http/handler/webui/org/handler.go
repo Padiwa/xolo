@@ -218,6 +218,12 @@ func NewHandler(
 	h.mux.Handle("POST /{orgSlug}/admin/applications/{appID}/tokens", assertPerm(rbac.PermApplicationsWrite)(http.HandlerFunc(h.createApplicationToken)))
 	h.mux.Handle("POST /{orgSlug}/admin/applications/{appID}/tokens/{tokenID}/delete", assertPerm(rbac.PermApplicationsWrite)(http.HandlerFunc(h.deleteApplicationToken)))
 
+	// Per-application quota editor (issue #64). The application handler above
+	// already isolates an app to its org; the permission gate below also
+	// covers the cross-org case where the URL slugs disagree.
+	h.mux.Handle("GET /{orgSlug}/admin/applications/{appID}/quota", assertPerm(rbac.PermQuotaRead)(http.HandlerFunc(h.getApplicationQuotaPage)))
+	h.mux.Handle("POST /{orgSlug}/admin/applications/{appID}/quota", assertPerm(rbac.PermQuotaWrite)(http.HandlerFunc(h.saveApplicationQuota)))
+
 	// Plugin HTTP UI proxy — tied to virtual model / pipeline administration.
 	h.mux.Handle("/{orgSlug}/plugins/{pluginName}/ui/{uiPath...}", assertPerm(rbac.PermVirtualModelsWrite)(http.HandlerFunc(h.servePluginUI)))
 
