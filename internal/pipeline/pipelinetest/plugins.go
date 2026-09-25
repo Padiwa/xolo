@@ -23,6 +23,16 @@ func ToolProviderDescriptor(name string) *proto.PluginDescriptor {
 	}
 }
 
+// PostOnlyDescriptor returns a PluginDescriptor with the POST_RESPONSE capability only.
+// Useful for tests that exercise the post-response pass in isolation, without a
+// matching PRE_REQUEST plugin in the same graph.
+func PostOnlyDescriptor(name string) *proto.PluginDescriptor {
+	return &proto.PluginDescriptor{
+		Name:         name,
+		Capabilities: []proto.PluginDescriptor_Capability{proto.PluginDescriptor_POST_RESPONSE},
+	}
+}
+
 // PrePostDescriptor returns a PluginDescriptor with PRE_REQUEST and POST_RESPONSE capabilities.
 func PrePostDescriptor(name string) *proto.PluginDescriptor {
 	return &proto.PluginDescriptor{

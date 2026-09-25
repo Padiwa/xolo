@@ -85,7 +85,7 @@ func (e *PluginExecutor) forwardToolProvider(
 	ctx context.Context,
 	client proto.XoloPluginClient,
 	reqCtx *proto.RequestContext,
-	node model.PipelineNode,
+	_ model.PipelineNode,
 	inputs map[string]interface{},
 	ec ExecutionContext,
 ) (*ForwardResult, error) {
@@ -141,7 +141,7 @@ func (e *PluginExecutor) forwardPreRequest(
 	ctx context.Context,
 	client proto.XoloPluginClient,
 	reqCtx *proto.RequestContext,
-	node model.PipelineNode,
+	_ model.PipelineNode,
 	inputs map[string]interface{},
 	inputsJSON string,
 	ec ExecutionContext,
@@ -187,9 +187,9 @@ func (e *PluginExecutor) forwardResolveModel(
 	ctx context.Context,
 	client proto.XoloPluginClient,
 	reqCtx *proto.RequestContext,
-	node model.PipelineNode,
+	_ model.PipelineNode,
 	inputs map[string]interface{},
-	inputsJSON string,
+	_ string,
 	ec ExecutionContext,
 ) (*ForwardResult, error) {
 	messagesJSON, _ := inputs["messages_json"].(string)
@@ -266,7 +266,7 @@ func (e *PluginExecutor) Backward(ctx context.Context, in BackwardInput) (*Backw
 	}
 
 	out, err := client.PostResponse(ctx, &proto.PostResponseInput{
-		Model:                 "",
+		Model:                 in.Model,
 		PromptTokens:          prompt,
 		CompletionTokens:      completion,
 		HadError:              in.HadError,

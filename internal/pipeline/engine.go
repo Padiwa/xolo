@@ -205,6 +205,16 @@ func (e *Engine) RunBackwardWithToolCalls(
 	current := responseContent
 	currentToolCalls := toolCallsJSON
 	rewrittenToolCalls := ""
+	// Prefer the model that actually answered over the model the forward pass
+	// resolved first. A ModelFallbackExecutor may switch candidates at call
+	// time; without this, plugins that bill or attribute per model would
+	// under-report every fallback that answered on a secondary candidate.
+	modelForBackward := exec.ResolvedModel
+	if exec.ModelOutcome != nil {
+		if realModel, _, used := exec.ModelOutcome.UsedModel(); used && realModel != "" {
+			modelForBackward = realModel
+		}
+	}
 	// Iterate in reverse order.
 	for i := len(exec.ExecutedNodes) - 1; i >= 0; i-- {
 		en := exec.ExecutedNodes[i]
@@ -215,6 +225,7 @@ func (e *Engine) RunBackwardWithToolCalls(
 		result, err := ex.Backward(ctx, BackwardInput{
 			Node:            en.Node,
 			NodeState:       en.NodeState,
+			Model:           modelForBackward,
 			ResponseContent: current,
 			ToolCallsJSON:   currentToolCalls,
 			Tokens:          tokens,

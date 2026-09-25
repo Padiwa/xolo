@@ -116,6 +116,20 @@ type BackwardInput struct {
 	// NodeState is the blob Forward returned for the same node in the same
 	// execution.
 	NodeState []byte
+	// Model is the identifier of the model that answered the request, surfaced
+	// to plugins through PostResponseInput.Model ("Model that was called").
+	//
+	// For a chain with a ModelFallback terminal node, this is the candidate
+	// that actually answered (exec.ModelOutcome.UsedModel()), not the primary
+	// resolved first. The forward pass otherwise resolves to a single client
+	// (ModelExecutor or a RESOLVE_MODEL short-circuit), in which case it
+	// matches ForwardExecution.ResolvedModel.
+	//
+	// A RESOLVE_MODEL plugin that short-circuits with a forged response
+	// (e.g. the bundled dummy-model) hardcodes the literal "dummy" into
+	// ResolvedModel, so this field carries that string rather than the user's
+	// requested model.
+	Model string
 	// ResponseContent is the response text as the previous backward nodes left
 	// it.
 	ResponseContent string

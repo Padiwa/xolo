@@ -58,6 +58,18 @@ func (b *GraphBuilder) ModelWithProxy(id, proxyName string) *GraphBuilder {
 	return b
 }
 
+// ModelFallback adds a fallback node trying the given candidates in order.
+// The first candidate is resolved eagerly and used as the primary; subsequent
+// candidates are tried when the previous call fails.
+func (b *GraphBuilder) ModelFallback(id string, models ...string) *GraphBuilder {
+	b.nodes = append(b.nodes, model.PipelineNode{
+		ID:   id,
+		Type: model.NodeTypeModelFallback,
+		Data: MustJSON(model.ModelFallbackNodeData{Models: models}),
+	})
+	return b
+}
+
 // ModelPassthrough adds a passthrough model node, which resolves the model
 // requested by the caller (ExecutionContext.TargetModelName) or the next pending
 // middleware. Used to test Middleware pipelines.
