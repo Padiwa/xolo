@@ -28,10 +28,10 @@ func (s *QuotaService) ResolveEffectiveQuota(
 	ctx context.Context,
 	userID model.UserID,
 	orgID model.OrgID,
-) (*model.EffectiveQuota, error) {
+) (*model.EffectiveQuota, model.Quota, error) {
 	userQuota, err := s.quotaStore.GetQuota(ctx, model.QuotaScopeUser, string(userID))
 	if err != nil && !errors.Is(err, port.ErrNotFound) {
-		return nil, errors.WithStack(err)
+		return nil, nil, errors.WithStack(err)
 	}
 	if errors.Is(err, port.ErrNotFound) {
 		userQuota = nil
@@ -39,7 +39,7 @@ func (s *QuotaService) ResolveEffectiveQuota(
 
 	orgQuota, err := s.quotaStore.GetQuota(ctx, model.QuotaScopeOrg, string(orgID))
 	if err != nil && !errors.Is(err, port.ErrNotFound) {
-		return nil, errors.WithStack(err)
+		return nil, nil, errors.WithStack(err)
 	}
 	if errors.Is(err, port.ErrNotFound) {
 		orgQuota = nil
@@ -47,7 +47,7 @@ func (s *QuotaService) ResolveEffectiveQuota(
 
 	org, err := s.orgStore.GetOrgByID(ctx, orgID)
 	if err != nil {
-		return nil, errors.WithStack(err)
+		return nil, nil, errors.WithStack(err)
 	}
 
 	effective := &model.EffectiveQuota{}
@@ -70,7 +70,7 @@ func (s *QuotaService) ResolveEffectiveQuota(
 	if !userHasPersonalQuota && org.ShareQuotaEqually() && orgQuota != nil {
 		members, _, err := s.orgStore.ListOrgMembers(ctx, orgID, port.ListOrgMembersOptions{})
 		if err != nil {
-			return nil, errors.WithStack(err)
+			return nil, nil, errors.WithStack(err)
 		}
 		n := int64(len(members))
 		if n > 0 {
@@ -78,10 +78,13 @@ func (s *QuotaService) ResolveEffectiveQuota(
 			effective.DailyBudget = divPtr(orgQuota.DailyBudget(), n)
 			effective.MonthlyBudget = divPtr(orgQuota.MonthlyBudget(), n)
 			effective.YearlyBudget = divPtr(orgQuota.YearlyBudget(), n)
-			return effective, nil
+			// The synthesized per-user budget is only the member's share; the
+			// global org cap must remain enforceable, so the raw org quota is
+			// still returned for the enforcer's org-wide block (issue #82).
+			return effective, orgQuota, nil
 		}
 		// n == 0: unlimited (theoretically impossible if requester is a member).
-		return effective, nil
+		return effective, orgQuota, nil
 	}
 
 	// Default: min-merge of user and org quotas.
@@ -92,7 +95,11 @@ func (s *QuotaService) ResolveEffectiveQuota(
 	effective.YearlyBudget = minPtrSvc(ptrOf(userQuota, func(q model.Quota) *int64 { return q.YearlyBudget() }),
 		ptrOf(orgQuota, func(q model.Quota) *int64 { return q.YearlyBudget() }))
 
-	return effective, nil
+	// Return the raw org quota as the second value so the budget enforcer can
+	// reuse the lookup we just did instead of hitting the store again on the
+	// hot path. nil carries the same meaning as a GetQuota that returned
+	// port.ErrNotFound (issue #82).
+	return effective, orgQuota, nil
 }
 
 func divPtr(v *int64, n int64) *int64 {
@@ -123,10 +130,10 @@ func (s *QuotaService) ResolveEffectiveQuotaForApplication(
 	ctx context.Context,
 	appID model.ApplicationID,
 	orgID model.OrgID,
-) (*model.EffectiveQuota, error) {
+) (*model.EffectiveQuota, model.Quota, error) {
 	appQuota, err := s.quotaStore.GetQuota(ctx, model.QuotaScopeApplication, string(appID))
 	if err != nil && !errors.Is(err, port.ErrNotFound) {
-		return nil, errors.WithStack(err)
+		return nil, nil, errors.WithStack(err)
 	}
 	if errors.Is(err, port.ErrNotFound) {
 		appQuota = nil
@@ -134,7 +141,7 @@ func (s *QuotaService) ResolveEffectiveQuotaForApplication(
 
 	orgQuota, err := s.quotaStore.GetQuota(ctx, model.QuotaScopeOrg, string(orgID))
 	if err != nil && !errors.Is(err, port.ErrNotFound) {
-		return nil, errors.WithStack(err)
+		return nil, nil, errors.WithStack(err)
 	}
 	if errors.Is(err, port.ErrNotFound) {
 		orgQuota = nil
@@ -171,7 +178,13 @@ func (s *QuotaService) ResolveEffectiveQuotaForApplication(
 		ptrOf(orgQuota, func(q model.Quota) *int64 { return q.YearlyBudget() }),
 	)
 
-	return effective, nil
+	// Return the raw org quota as the second value so the budget enforcer can
+	// reuse the lookup we just did instead of hitting the store again on the
+	// hot path. nil carries the same meaning as a GetQuota that returned
+	// port.ErrNotFound. Without it the enforcer would silently turn the org
+	// cap off for application traffic the day a future resolver forgets the
+	// field — see the regression Bornholm flagged on issue #82.
+	return effective, orgQuota, nil
 }
 
 func ptrOf(q model.Quota, f func(model.Quota) *int64) *int64 {

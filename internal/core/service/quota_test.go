@@ -42,12 +42,12 @@ func (f *fakeQuotaStore) GetQuota(_ context.Context, scope model.QuotaScope, _ s
 	return nil, port.ErrNotFound
 }
 
-func (f *fakeQuotaStore) ResolveEffectiveQuota(_ context.Context, _ model.UserID, _ model.OrgID) (*model.EffectiveQuota, error) {
-	return nil, nil // not used by QuotaService
+func (f *fakeQuotaStore) ResolveEffectiveQuota(_ context.Context, _ model.UserID, _ model.OrgID) (*model.EffectiveQuota, model.Quota, error) {
+	return nil, f.orgQuota, nil // not used by QuotaService
 }
 
-func (f *fakeQuotaStore) ResolveEffectiveQuotaForApplication(_ context.Context, _ model.ApplicationID, _ model.OrgID) (*model.EffectiveQuota, error) {
-	return nil, nil
+func (f *fakeQuotaStore) ResolveEffectiveQuotaForApplication(_ context.Context, _ model.ApplicationID, _ model.OrgID) (*model.EffectiveQuota, model.Quota, error) {
+	return nil, f.orgQuota, nil
 }
 
 // fakeOrgProvider satisfies service.OrgProvider (narrow interface used by QuotaService).
@@ -124,7 +124,7 @@ func TestQuotaService_ResolveEffectiveQuota_NoSharing(t *testing.T) {
 		&fakeOrgProvider{org: &fakeOrg{shareQuotaEqually: false}},
 	)
 
-	got, err := svc.ResolveEffectiveQuota(context.Background(), "user1", "org1")
+	got, _, err := svc.ResolveEffectiveQuota(context.Background(), "user1", "org1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestQuotaService_ResolveEffectiveQuota_SharingEnabled_NoUserQuota(t *testin
 		&fakeOrgProvider{org: &fakeOrg{shareQuotaEqually: true}, members: members},
 	)
 
-	got, err := svc.ResolveEffectiveQuota(context.Background(), "user1", "org1")
+	got, returnedOrgQuota, err := svc.ResolveEffectiveQuota(context.Background(), "user1", "org1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -155,6 +155,15 @@ func TestQuotaService_ResolveEffectiveQuota_SharingEnabled_NoUserQuota(t *testin
 	}
 	if got.YearlyBudget != nil {
 		t.Errorf("expected nil yearly budget, got %v", got.YearlyBudget)
+	}
+	// Issue #82: the sharing branch synthesises the per-user budget from the
+	// raw org quota (org/N), but the second return value MUST still be the
+	// raw org quota — the org-wide block in the enforcer depends on it. A
+	// regression where the sharing branch returns nil here would silently
+	// turn the org cap off for every user in a sharing-enabled organisation,
+	// and that bug class is exactly what this PR is meant to close.
+	if returnedOrgQuota != orgQuota {
+		t.Errorf("expected the second return value to be the raw orgQuota, got %+v", returnedOrgQuota)
 	}
 }
 
@@ -169,7 +178,7 @@ func TestQuotaService_ResolveEffectiveQuota_SharingEnabled_WithUserQuota(t *test
 		&fakeOrgProvider{org: &fakeOrg{shareQuotaEqually: true}, members: members},
 	)
 
-	got, err := svc.ResolveEffectiveQuota(context.Background(), "user1", "org1")
+	got, _, err := svc.ResolveEffectiveQuota(context.Background(), "user1", "org1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -188,12 +197,19 @@ func TestQuotaService_ResolveEffectiveQuota_SharingEnabled_ZeroMembers(t *testin
 		&fakeOrgProvider{org: &fakeOrg{shareQuotaEqually: true}, members: nil},
 	)
 
-	got, err := svc.ResolveEffectiveQuota(context.Background(), "user1", "org1")
+	got, returnedOrgQuota, err := svc.ResolveEffectiveQuota(context.Background(), "user1", "org1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got.DailyBudget != nil {
 		t.Errorf("expected nil daily budget (unlimited), got %v", got.DailyBudget)
+	}
+	// Issue #82: the n==0 sharing branch must still surface the raw org
+	// quota so the enforcer's org-wide block keeps enforcing the cap on this
+	// path. Without this assertion a future refactor could drop the second
+	// return on the n==0 path without any test noticing.
+	if returnedOrgQuota != orgQuota {
+		t.Errorf("expected the second return value to be the raw orgQuota, got %+v", returnedOrgQuota)
 	}
 }
 
@@ -207,7 +223,7 @@ func TestQuotaService_ResolveEffectiveQuota_ListMembersError(t *testing.T) {
 		&fakeOrgProvider{org: &fakeOrg{shareQuotaEqually: true}, listErr: listErr},
 	)
 
-	_, err := svc.ResolveEffectiveQuota(context.Background(), "user1", "org1")
+	_, _, err := svc.ResolveEffectiveQuota(context.Background(), "user1", "org1")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -227,7 +243,7 @@ func TestQuotaService_ResolveEffectiveQuotaForApplication_MinMerge(t *testing.T)
 		&fakeOrgProvider{org: &fakeOrg{shareQuotaEqually: true}, members: []model.Membership{&fakeMembership{}, &fakeMembership{}, &fakeMembership{}}},
 	)
 
-	got, err := svc.ResolveEffectiveQuotaForApplication(context.Background(), "app-1", "org1")
+	got, _, err := svc.ResolveEffectiveQuotaForApplication(context.Background(), "app-1", "org1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -253,7 +269,7 @@ func TestQuotaService_ResolveEffectiveQuotaForApplication_OrgOnly(t *testing.T) 
 		&fakeOrgProvider{org: &fakeOrg{shareQuotaEqually: true}, members: []model.Membership{&fakeMembership{}, &fakeMembership{}}},
 	)
 
-	got, err := svc.ResolveEffectiveQuotaForApplication(context.Background(), "app-1", "org1")
+	got, _, err := svc.ResolveEffectiveQuotaForApplication(context.Background(), "app-1", "org1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -271,7 +287,7 @@ func TestQuotaService_ResolveEffectiveQuotaForApplication_NothingSet(t *testing.
 		&fakeOrgProvider{org: &fakeOrg{}},
 	)
 
-	got, err := svc.ResolveEffectiveQuotaForApplication(context.Background(), "app-1", "org1")
+	got, _, err := svc.ResolveEffectiveQuotaForApplication(context.Background(), "app-1", "org1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -296,7 +312,7 @@ func TestQuotaService_ResolveEffectiveQuotaForApplication_OrgTakesPrecedenceOnCu
 		&fakeOrgProvider{org: &fakeOrg{}},
 	)
 
-	got, err := svc.ResolveEffectiveQuotaForApplication(context.Background(), "app-1", "org1")
+	got, _, err := svc.ResolveEffectiveQuotaForApplication(context.Background(), "app-1", "org1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

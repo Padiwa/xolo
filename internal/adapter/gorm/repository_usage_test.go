@@ -15,6 +15,107 @@ func TestQuotaStore_SetGetAndResolve(t *testing.T) {
 	eachBackend(t, scenarioQuotaStoreSetGetAndResolve)
 }
 
+// Issue #82: ResolveEffectiveQuotaForApplication must surface OrgQuota in the
+// same way ResolveEffectiveQuota does, so the budget enforcer's org-wide
+// block can consume the org quota the resolver just loaded instead of issuing
+// a second GetQuota on the hot path. Without this, a rebase onto main would
+// silently turn the org cap off for application traffic.
+func TestQuotaStore_ResolveEffectiveQuotaForApplication_CarriesOrgQuota(t *testing.T) {
+	eachBackend(t, scenarioQuotaStoreResolveEffectiveQuotaForApplication)
+}
+
+func scenarioQuotaStoreResolveEffectiveQuotaForApplication(t *testing.T, store *xologorm.Store) {
+	ctx := context.Background()
+
+	orgID := model.NewOrgID()
+	appID := model.NewApplicationID()
+
+	// With no org quota on file, the resolver's second return value (the raw
+	// org quota) must be nil. nil is the same shape a GetQuota that returned
+	// port.ErrNotFound would produce, so the enforcer's org-wide branch
+	// can skip the check without a follow-up store call (issue #82).
+	_, orgQuota, err := store.ResolveEffectiveQuotaForApplication(ctx, appID, orgID)
+	if err != nil {
+		t.Fatalf("ResolveEffectiveQuotaForApplication (no org quota): %v", err)
+	}
+	if orgQuota != nil {
+		t.Errorf("expected org quota == nil when no org quota is on file, got %+v", orgQuota)
+	}
+
+	// Set an org quota and an application quota; the resolver must surface
+	// the org quota as its second return value so the enforcer can reuse it.
+	stored := model.NewQuota(model.QuotaScopeOrg, string(orgID), "EUR",
+		ptr(int64(1_000)), ptr(int64(20_000)), nil)
+	if err := store.SetQuota(ctx, stored); err != nil {
+		t.Fatalf("SetQuota (org): %v", err)
+	}
+	appQuota := model.NewQuota(model.QuotaScopeApplication, string(appID), "EUR",
+		ptr(int64(800)), nil, nil)
+	if err := store.SetQuota(ctx, appQuota); err != nil {
+		t.Fatalf("SetQuota (app): %v", err)
+	}
+
+	effective, orgQuota, err := store.ResolveEffectiveQuotaForApplication(ctx, appID, orgID)
+	if err != nil {
+		t.Fatalf("ResolveEffectiveQuotaForApplication: %v", err)
+	}
+	if orgQuota == nil {
+		t.Fatalf("expected the resolver to surface the loaded org quota, got nil")
+	}
+	if orgQuota.Currency() != "EUR" {
+		t.Errorf("expected org quota currency EUR, got %q", orgQuota.Currency())
+	}
+	if orgQuota.DailyBudget() == nil || *orgQuota.DailyBudget() != 1_000 {
+		t.Errorf("expected org quota daily budget 1_000, got %v", orgQuota.DailyBudget())
+	}
+	// The merged effective daily budget is the min(app=800, org=1000) = 800.
+	if effective.DailyBudget == nil || *effective.DailyBudget != 800 {
+		t.Errorf("expected merged daily budget 800, got %v", effective.DailyBudget)
+	}
+}
+
+// Issue #82: the same OrgQuota contract must hold on ResolveEffectiveQuota,
+// so the user branch of the enforcer does not need a second GetQuota round
+// trip on the hot path.
+func TestQuotaStore_ResolveEffectiveQuota_CarriesOrgQuota(t *testing.T) {
+	eachBackend(t, scenarioQuotaStoreResolveEffectiveQuotaCarriesOrgQuota)
+}
+
+func scenarioQuotaStoreResolveEffectiveQuotaCarriesOrgQuota(t *testing.T, store *xologorm.Store) {
+	ctx := context.Background()
+
+	orgID := model.NewOrgID()
+	userID := model.NewUserID()
+
+	// No org quota on file: the resolver's second return value must be nil.
+	_, orgQuota, err := store.ResolveEffectiveQuota(ctx, userID, orgID)
+	if err != nil {
+		t.Fatalf("ResolveEffectiveQuota (no org quota): %v", err)
+	}
+	if orgQuota != nil {
+		t.Errorf("expected org quota == nil when no org quota is on file, got %+v", orgQuota)
+	}
+
+	// With an org quota on file, the resolver must surface it as its second
+	// return value (issue #82: dedup on the enforcer's hot path).
+	stored := model.NewQuota(model.QuotaScopeOrg, string(orgID), "EUR",
+		ptr(int64(500)), ptr(int64(20_000)), nil)
+	if err := store.SetQuota(ctx, stored); err != nil {
+		t.Fatalf("SetQuota (org): %v", err)
+	}
+
+	_, orgQuota, err = store.ResolveEffectiveQuota(ctx, userID, orgID)
+	if err != nil {
+		t.Fatalf("ResolveEffectiveQuota: %v", err)
+	}
+	if orgQuota == nil {
+		t.Fatalf("expected the resolver to surface the org quota, got nil")
+	}
+	if orgQuota.DailyBudget() == nil || *orgQuota.DailyBudget() != 500 {
+		t.Errorf("expected org quota daily budget 500, got %v", orgQuota.DailyBudget())
+	}
+}
+
 func scenarioQuotaStoreSetGetAndResolve(t *testing.T, store *xologorm.Store) {
 	ctx := context.Background()
 
@@ -64,7 +165,7 @@ func scenarioQuotaStoreSetGetAndResolve(t *testing.T, store *xologorm.Store) {
 		t.Fatalf("SetQuota (user): %v", err)
 	}
 
-	effective, err := store.ResolveEffectiveQuota(ctx, userID, orgID)
+	effective, _, err := store.ResolveEffectiveQuota(ctx, userID, orgID)
 	if err != nil {
 		t.Fatalf("ResolveEffectiveQuota: %v", err)
 	}
