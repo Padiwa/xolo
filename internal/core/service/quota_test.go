@@ -143,7 +143,7 @@ func TestQuotaService_ResolveEffectiveQuota_SharingEnabled_NoUserQuota(t *testin
 		&fakeOrgProvider{org: &fakeOrg{shareQuotaEqually: true}, members: members},
 	)
 
-	got, _, err := svc.ResolveEffectiveQuota(context.Background(), "user1", "org1")
+	got, returnedOrgQuota, err := svc.ResolveEffectiveQuota(context.Background(), "user1", "org1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -155,6 +155,15 @@ func TestQuotaService_ResolveEffectiveQuota_SharingEnabled_NoUserQuota(t *testin
 	}
 	if got.YearlyBudget != nil {
 		t.Errorf("expected nil yearly budget, got %v", got.YearlyBudget)
+	}
+	// Issue #82: the sharing branch synthesises the per-user budget from the
+	// raw org quota (org/N), but the second return value MUST still be the
+	// raw org quota — the org-wide block in the enforcer depends on it. A
+	// regression where the sharing branch returns nil here would silently
+	// turn the org cap off for every user in a sharing-enabled organisation,
+	// and that bug class is exactly what this PR is meant to close.
+	if returnedOrgQuota != orgQuota {
+		t.Errorf("expected the second return value to be the raw orgQuota, got %+v", returnedOrgQuota)
 	}
 }
 
@@ -188,12 +197,19 @@ func TestQuotaService_ResolveEffectiveQuota_SharingEnabled_ZeroMembers(t *testin
 		&fakeOrgProvider{org: &fakeOrg{shareQuotaEqually: true}, members: nil},
 	)
 
-	got, _, err := svc.ResolveEffectiveQuota(context.Background(), "user1", "org1")
+	got, returnedOrgQuota, err := svc.ResolveEffectiveQuota(context.Background(), "user1", "org1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got.DailyBudget != nil {
 		t.Errorf("expected nil daily budget (unlimited), got %v", got.DailyBudget)
+	}
+	// Issue #82: the n==0 sharing branch must still surface the raw org
+	// quota so the enforcer's org-wide block keeps enforcing the cap on this
+	// path. Without this assertion a future refactor could drop the second
+	// return on the n==0 path without any test noticing.
+	if returnedOrgQuota != orgQuota {
+		t.Errorf("expected the second return value to be the raw orgQuota, got %+v", returnedOrgQuota)
 	}
 }
 
