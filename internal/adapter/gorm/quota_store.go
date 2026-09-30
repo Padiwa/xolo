@@ -40,17 +40,21 @@ func (s *Store) GetQuota(ctx context.Context, scope model.QuotaScope, scopeID st
 
 // ResolveEffectiveQuota implements port.QuotaStore.
 // Takes the minimum non-nil budget at each period across user and org quotas.
-func (s *Store) ResolveEffectiveQuota(ctx context.Context, userID model.UserID, orgID model.OrgID) (*model.EffectiveQuota, error) {
+// The second return value is the raw org quota the resolver loaded to feed the
+// merge: callers (the budget enforcer, mostly) reuse it instead of issuing a
+// second GetQuota on the hot path. nil means "no org quota on file", same
+// shape as a GetQuota that returned port.ErrNotFound (issue #82).
+func (s *Store) ResolveEffectiveQuota(ctx context.Context, userID model.UserID, orgID model.OrgID) (*model.EffectiveQuota, model.Quota, error) {
 	effective := &model.EffectiveQuota{}
 
 	userQuota, err := s.GetQuota(ctx, model.QuotaScopeUser, string(userID))
 	if err != nil && !errors.Is(err, port.ErrNotFound) {
-		return nil, errors.WithStack(err)
+		return nil, nil, errors.WithStack(err)
 	}
 
 	orgQuota, err := s.GetQuota(ctx, model.QuotaScopeOrg, string(orgID))
 	if err != nil && !errors.Is(err, port.ErrNotFound) {
-		return nil, errors.WithStack(err)
+		return nil, nil, errors.WithStack(err)
 	}
 
 	// Currency: org quota takes precedence; fall back to user quota, then default.
@@ -72,22 +76,24 @@ func (s *Store) ResolveEffectiveQuota(ctx context.Context, userID model.UserID, 
 	effective.MonthlyBudget = minPtr(quotaMonthly(userQuota), quotaMonthly(orgQuota))
 	effective.YearlyBudget = minPtr(quotaYearly(userQuota), quotaYearly(orgQuota))
 
-	return effective, nil
+	return effective, orgQuota, nil
 }
 
 // ResolveEffectiveQuotaForApplication implements port.QuotaStore.
 // Takes the minimum non-nil budget at each period across application and org quotas.
-func (s *Store) ResolveEffectiveQuotaForApplication(ctx context.Context, appID model.ApplicationID, orgID model.OrgID) (*model.EffectiveQuota, error) {
+// The second return value is the raw org quota the resolver loaded to feed the
+// merge, for the same dedup reason as ResolveEffectiveQuota (issue #82).
+func (s *Store) ResolveEffectiveQuotaForApplication(ctx context.Context, appID model.ApplicationID, orgID model.OrgID) (*model.EffectiveQuota, model.Quota, error) {
 	effective := &model.EffectiveQuota{}
 
 	appQuota, err := s.GetQuota(ctx, model.QuotaScopeApplication, string(appID))
 	if err != nil && !errors.Is(err, port.ErrNotFound) {
-		return nil, errors.WithStack(err)
+		return nil, nil, errors.WithStack(err)
 	}
 
 	orgQuota, err := s.GetQuota(ctx, model.QuotaScopeOrg, string(orgID))
 	if err != nil && !errors.Is(err, port.ErrNotFound) {
-		return nil, errors.WithStack(err)
+		return nil, nil, errors.WithStack(err)
 	}
 
 	switch {
@@ -103,7 +109,7 @@ func (s *Store) ResolveEffectiveQuotaForApplication(ctx context.Context, appID m
 	effective.MonthlyBudget = minPtr(quotaMonthly(appQuota), quotaMonthly(orgQuota))
 	effective.YearlyBudget = minPtr(quotaYearly(appQuota), quotaYearly(orgQuota))
 
-	return effective, nil
+	return effective, orgQuota, nil
 }
 
 func quotaDaily(q model.Quota) *int64 {

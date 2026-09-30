@@ -9,6 +9,7 @@ import (
 	genaiProxy "github.com/bornholm/genai/proxy"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
+	"github.com/xolo-gateway/xolo/internal/core/service"
 	"github.com/xolo-gateway/xolo/internal/pipeline"
 )
 
@@ -27,6 +28,9 @@ func (s *unknownModelStore) GetLLMModelByProxyName(context.Context, model.OrgID,
 }
 
 // exhaustedEnforcer builds an enforcer whose user has spent its whole daily budget.
+// The resolver is wired with no org quota on file so the org-wide branch (the
+// one that consumes OrgQuota from the second resolver return value) reaches
+// the "no org cap" branch without trying to read a quota store.
 func exhaustedEnforcer(providerStore port.ProviderStore) *XoloQuotaEnforcer {
 	usage := &fakeUsage{spent: map[time.Time]int64{
 		model.StartOfDay(time.Now()): 1_000_000,
@@ -35,7 +39,7 @@ func exhaustedEnforcer(providerStore port.ProviderStore) *XoloQuotaEnforcer {
 		DailyBudget: i64(1_000),
 		Currency:    "EUR",
 	}}
-	return NewXoloQuotaEnforcer(resolver, nil, usage, providerStore)
+	return NewXoloQuotaEnforcer(resolver, usage, providerStore)
 }
 
 func quotaTestRequest(exec *pipeline.ForwardExecution) *genaiProxy.ProxyRequest {
@@ -111,6 +115,11 @@ func TestQuotaEnforcerEnforcesPipelineAnswerFromProvider(t *testing.T) {
 // an extra GetOrgByID + ListOrgMembers when ShareQuotaEqually is on. The
 // countingResolver below asserts that ResolveEffectiveQuota is not called at
 // all for an application request.
+//
+// The resolver simulates "no org quota on file" for the org-wide branch by
+// returning nil as the org quota — the same shape the real resolvers return
+// when their GetQuota on QuotaScopeOrg hits ErrNotFound. Without nil the
+// test would not exercise the org-wide branch at all (the enforcer would skip).
 func TestQuotaEnforcerEnforcesApplicationQuota(t *testing.T) {
 	orgID := model.OrgID("org-1")
 	providerID := model.NewProviderID()
@@ -129,9 +138,10 @@ func TestQuotaEnforcerEnforcesApplicationQuota(t *testing.T) {
 		appQuotaResolver: appQuotaResolver{
 			userQuota: &model.EffectiveQuota{Currency: "EUR"}, // no user budget
 			appQuota:  &model.EffectiveQuota{DailyBudget: i64(60_000), Currency: "EUR"},
+			orgQuota:  nil, // no org quota on file: org-wide branch skips
 		},
 	}
-	enforcer := NewXoloQuotaEnforcer(counting, &noOrgQuotaStore{}, usage, &fakeProviderStore{provider: provider, llmModel: llmModel})
+	enforcer := NewXoloQuotaEnforcer(counting, usage, &fakeProviderStore{provider: provider, llmModel: llmModel})
 
 	req := quotaTestRequest(&pipeline.ForwardExecution{
 		ResolvedClient:  NewDummyLLMClient("hello", "qwen"),
@@ -192,12 +202,12 @@ type countingQuotaResolver struct {
 	appCalls  int
 }
 
-func (r *countingQuotaResolver) ResolveEffectiveQuota(ctx context.Context, u model.UserID, o model.OrgID) (*model.EffectiveQuota, error) {
+func (r *countingQuotaResolver) ResolveEffectiveQuota(ctx context.Context, u model.UserID, o model.OrgID) (*model.EffectiveQuota, model.Quota, error) {
 	r.userCalls++
 	return r.appQuotaResolver.ResolveEffectiveQuota(ctx, u, o)
 }
 
-func (r *countingQuotaResolver) ResolveEffectiveQuotaForApplication(ctx context.Context, a model.ApplicationID, o model.OrgID) (*model.EffectiveQuota, error) {
+func (r *countingQuotaResolver) ResolveEffectiveQuotaForApplication(ctx context.Context, a model.ApplicationID, o model.OrgID) (*model.EffectiveQuota, model.Quota, error) {
 	r.appCalls++
 	return r.appQuotaResolver.ResolveEffectiveQuotaForApplication(ctx, a, o)
 }
@@ -267,8 +277,8 @@ func TestQuotaEnforcerEnforcesApplicationQuotaMonthlyAndYearly(t *testing.T) {
 				appQuotaResolver{
 					userQuota: &model.EffectiveQuota{Currency: "EUR"},
 					appQuota:  tc.appQuota,
+					orgQuota:  nil, // no org quota on file
 				},
-				&noOrgQuotaStore{},
 				&fakeUsage{spent: tc.spent},
 				&fakeProviderStore{provider: provider, llmModel: llmModel},
 			)
@@ -308,8 +318,8 @@ func TestQuotaEnforcerSkipsApplicationPathWithoutAppID(t *testing.T) {
 	enforcer := NewXoloQuotaEnforcer(
 		appQuotaResolver{
 			userQuota: &model.EffectiveQuota{DailyBudget: i64(1_000), Currency: "EUR"},
+			orgQuota:  nil,
 		},
-		&noOrgQuotaStore{},
 		&fakeUsage{spent: map[time.Time]int64{model.StartOfDay(time.Now()): 0}},
 		&fakeProviderStore{provider: provider, llmModel: llmModel},
 	)
@@ -334,10 +344,10 @@ func TestQuotaEnforcerSkipsApplicationPathWithoutAppID(t *testing.T) {
 // Application budget under the cap, organisation budget exhausted: the
 // org-wide branch must still trip on the application path. The application
 // resolver is called first and succeeds; the org-wide branch then reads the
-// org quota and rejects. This is the mirror of the existing
-// TestQuotaEnforcerEnforcesApplicationQuota, which uses noOrgQuotaStore to
-// avoid this branch entirely — the gap a future guard on appID=="" around
-// the org-wide check would silently reopen.
+// org quota from the resolver's second return value and rejects. This is the
+// mirror of the existing TestQuotaEnforcerEnforcesApplicationQuota, which
+// set orgQuota: nil to skip this branch entirely — the gap a future guard
+// on appID=="" around the org-wide check would silently reopen.
 func TestQuotaEnforcerEnforcesOrgBudgetWhenAppUnderLimit(t *testing.T) {
 	orgID := model.OrgID("org-1")
 	providerID := model.NewProviderID()
@@ -345,16 +355,17 @@ func TestQuotaEnforcerEnforcesOrgBudgetWhenAppUnderLimit(t *testing.T) {
 	provider := model.NewProvider(orgID, "ollama", "openai", "http://localhost:11434/v1", "key", "EUR")
 
 	now := time.Now()
+	// Org-wide daily budget at zero: any non-negative spend exceeds it.
+	orgDaily := int64(0)
 	counting := &countingQuotaResolver{
 		appQuotaResolver: appQuotaResolver{
 			// Application budget is generous; the request stays under it.
 			appQuota: &model.EffectiveQuota{DailyBudget: i64(1_000_000), Currency: "EUR"},
+			orgQuota: &fakeQuota{scope: model.QuotaScopeOrg, currency: "EUR", daily: &orgDaily},
 		},
 	}
-	// Org quota: daily budget at zero, so any non-negative spend exceeds it.
 	enforcer := NewXoloQuotaEnforcer(
 		counting,
-		&exhaustedOrgQuotaStore{daily: 0},
 		&fakeUsage{spent: map[time.Time]int64{model.StartOfDay(now): 1_000}},
 		&fakeProviderStore{provider: provider, llmModel: llmModel},
 	)
@@ -403,10 +414,14 @@ func TestQuotaEnforcerPrefersApplicationErrorWhenBothExhausted(t *testing.T) {
 	provider := model.NewProvider(orgID, "ollama", "openai", "http://localhost:11434/v1", "key", "EUR")
 
 	now := time.Now()
+	orgDaily := int64(0)
 	counting := &countingQuotaResolver{
 		appQuotaResolver: appQuotaResolver{
 			// Application budget: 60 000 µ¢/day, primed to the cap.
 			appQuota: &model.EffectiveQuota{DailyBudget: i64(60_000), Currency: "EUR"},
+			// Org budget: also exhausted, but the application branch should
+			// trip first and we never reach the org check.
+			orgQuota: &fakeQuota{scope: model.QuotaScopeOrg, currency: "EUR", daily: &orgDaily},
 		},
 	}
 	usage := &fakeUsage{spent: map[time.Time]int64{
@@ -416,7 +431,6 @@ func TestQuotaEnforcerPrefersApplicationErrorWhenBothExhausted(t *testing.T) {
 	}}
 	enforcer := NewXoloQuotaEnforcer(
 		counting,
-		&exhaustedOrgQuotaStore{daily: 0},
 		usage,
 		&fakeProviderStore{provider: provider, llmModel: llmModel},
 	)
@@ -461,69 +475,30 @@ func TestQuotaEnforcerPrefersApplicationErrorWhenBothExhausted(t *testing.T) {
 // tests can exercise each independently. The two effective quotas are merged
 // at call time; the per-principal fields exist purely so each test case can
 // spell out what it expects.
+//
+// The resolver also carries the org quota that the org-wide branch in
+// XoloQuotaEnforcer consumes (issue #82). Setting orgQuota simulates the
+// contract the production resolvers honour; leaving it nil exercises the
+// resolver-loaded-none-on-file path the org-wide branch skips.
 type appQuotaResolver struct {
 	userQuota *model.EffectiveQuota
 	appQuota  *model.EffectiveQuota
+	orgQuota  model.Quota
 	err       error
 }
 
-func (r appQuotaResolver) ResolveEffectiveQuota(context.Context, model.UserID, model.OrgID) (*model.EffectiveQuota, error) {
+func (r appQuotaResolver) ResolveEffectiveQuota(context.Context, model.UserID, model.OrgID) (*model.EffectiveQuota, model.Quota, error) {
 	if r.err != nil {
-		return nil, r.err
+		return nil, nil, r.err
 	}
-	return r.userQuota, nil
+	return r.userQuota, r.orgQuota, nil
 }
 
-func (r appQuotaResolver) ResolveEffectiveQuotaForApplication(context.Context, model.ApplicationID, model.OrgID) (*model.EffectiveQuota, error) {
+func (r appQuotaResolver) ResolveEffectiveQuotaForApplication(context.Context, model.ApplicationID, model.OrgID) (*model.EffectiveQuota, model.Quota, error) {
 	if r.err != nil {
-		return nil, r.err
+		return nil, nil, r.err
 	}
-	return r.appQuota, nil
-}
-
-// noOrgQuotaStore answers every quota lookup with ErrNotFound: the enforcer
-// should treat this as "no quota set" and skip the org-wide check, the same
-// way a store with no quota row does.
-type noOrgQuotaStore struct {
-	port.QuotaStore
-}
-
-func (s *noOrgQuotaStore) GetQuota(context.Context, model.QuotaScope, string) (model.Quota, error) {
-	return nil, port.ErrNotFound
-}
-
-func (s *noOrgQuotaStore) ResolveEffectiveQuota(context.Context, model.UserID, model.OrgID) (*model.EffectiveQuota, error) {
-	return &model.EffectiveQuota{}, nil
-}
-
-func (s *noOrgQuotaStore) ResolveEffectiveQuotaForApplication(context.Context, model.ApplicationID, model.OrgID) (*model.EffectiveQuota, error) {
-	return &model.EffectiveQuota{}, nil
-}
-
-// exhaustedOrgQuotaStore returns a fixed org quota with a daily budget at zero:
-// the enforcer's org-wide check is expected to trip on this. The mirror case
-// (application budget not exhausted but org budget exceeded) is what the
-// TestQuotaEnforcerEnforcesOrgBudgetWhenAppUnderLimit test pins: a regression
-// that guarded the org-wide branch on appID=="" would silently bypass the
-// org limit for application requests.
-type exhaustedOrgQuotaStore struct {
-	port.QuotaStore
-	daily int64
-}
-
-func (s *exhaustedOrgQuotaStore) GetQuota(_ context.Context, scope model.QuotaScope, _ string) (model.Quota, error) {
-	if scope != model.QuotaScopeOrg {
-		return nil, port.ErrNotFound
-	}
-	return &fakeQuota{scope: scope, currency: "EUR", daily: &s.daily}, nil
-}
-
-func (s *exhaustedOrgQuotaStore) ResolveEffectiveQuota(context.Context, model.UserID, model.OrgID) (*model.EffectiveQuota, error) {
-	return &model.EffectiveQuota{}, nil
-}
-
-func (s *exhaustedOrgQuotaStore) ResolveEffectiveQuotaForApplication(context.Context, model.ApplicationID, model.OrgID) (*model.EffectiveQuota, error) {
-	return &model.EffectiveQuota{}, nil
+	return r.appQuota, r.orgQuota, nil
 }
 
 // fakeQuota implements model.Quota with the minimum the enforcer reads.
@@ -546,3 +521,243 @@ func (q *fakeQuota) CreatedAt() time.Time    { return time.Time{} }
 func (q *fakeQuota) UpdatedAt() time.Time    { return time.Time{} }
 
 var _ model.Quota = (*fakeQuota)(nil)
+
+// ── End-to-end: real service.QuotaService wiring ───────────────────────────────────
+//
+// Issue #82 requires a test that goes through the production QuotaService
+// rather than a stub resolver: a regression that drops the org quota from
+// the resolver's second return value would slip past the unit tests that
+// only inspect the enforcer's behaviour with the fakeQuotaResolver stub.
+// This test wires a real service.QuotaService on top of a minimal
+// endToEndQuotaStore, then drives the enforcer through an application
+// request whose org-wide daily budget is exhausted: the org-wide block must
+// trip on the org quota the resolver returns as its second value.
+
+// endToEndQuotaStore is a minimal port.QuotaStore that returns configured
+// records for org and application scopes. Anything else answers ErrNotFound,
+// matching the production store's contract for an unset quota.
+type endToEndQuotaStore struct {
+	port.QuotaStore
+	orgQuota model.Quota
+	appQuota model.Quota
+}
+
+func (s *endToEndQuotaStore) GetQuota(_ context.Context, scope model.QuotaScope, _ string) (model.Quota, error) {
+	switch scope {
+	case model.QuotaScopeOrg:
+		if s.orgQuota == nil {
+			return nil, port.ErrNotFound
+		}
+		return s.orgQuota, nil
+	case model.QuotaScopeApplication:
+		if s.appQuota == nil {
+			return nil, port.ErrNotFound
+		}
+		return s.appQuota, nil
+	}
+	return nil, port.ErrNotFound
+}
+
+func (s *endToEndQuotaStore) ResolveEffectiveQuota(context.Context, model.UserID, model.OrgID) (*model.EffectiveQuota, model.Quota, error) {
+	return &model.EffectiveQuota{}, nil, nil
+}
+
+func (s *endToEndQuotaStore) ResolveEffectiveQuotaForApplication(context.Context, model.ApplicationID, model.OrgID) (*model.EffectiveQuota, model.Quota, error) {
+	return &model.EffectiveQuota{}, nil, nil
+}
+
+// endToEndScopedUsage lets the end-to-end tests return different spent
+// amounts for each scope. The default fakeUsage answers the same value for
+// every scope, which is fine for the unit tests but cannot express the
+// org-wide-tripping-with-application-passing shape the end-to-end tests need:
+// the resolver merges min(app, org) into a single EffectiveQuota, so the
+// application-scope check would trip on the same threshold as the org-wide
+// branch. Splitting the counters per scope is what lets each branch see
+// the spent amount it should see.
+type endToEndScopedUsage struct {
+	port.UsageStore
+	byScope map[model.QuotaScope]int64
+}
+
+func (s *endToEndScopedUsage) SumQuotaCostSince(_ context.Context, scope model.QuotaScope, _ string, _ model.OrgID, _ time.Time) (int64, error) {
+	return s.byScope[scope], nil
+}
+
+// endToEndOrgStore is a minimal service.OrgProvider: a single org with
+// sharing disabled, no members. The service only ever queries one orgID in
+// this test, so a fixed response is enough.
+type endToEndOrgStore struct{}
+
+func (endToEndOrgStore) GetOrgByID(_ context.Context, _ model.OrgID) (model.Organization, error) {
+	return endToEndOrg{}, nil
+}
+
+func (endToEndOrgStore) ListOrgMembers(context.Context, model.OrgID, port.ListOrgMembersOptions) ([]model.Membership, int64, error) {
+	return nil, 0, nil
+}
+
+// endToEndOrg implements model.Organization with sharing disabled. It does
+// not need to be exhaustive — the resolver only calls ID, ShareQuotaEqually
+// and Currency, the rest can be zero values.
+type endToEndOrg struct{}
+
+func (endToEndOrg) ID() model.OrgID                 { return "" }
+func (endToEndOrg) TenantID() model.TenantID        { return "" }
+func (endToEndOrg) Slug() string                    { return "" }
+func (endToEndOrg) Name() string                    { return "" }
+func (endToEndOrg) Description() string             { return "" }
+func (endToEndOrg) Active() bool                    { return true }
+func (endToEndOrg) Currency() string                { return "EUR" }
+func (endToEndOrg) CreatedAt() time.Time            { return time.Time{} }
+func (endToEndOrg) UpdatedAt() time.Time            { return time.Time{} }
+func (endToEndOrg) ShareQuotaEqually() bool         { return false }
+
+var _ service.OrgProvider = endToEndOrgStore{}
+
+// TestQuotaEnforcer_ApplicationOrgCap_ThroughRealQuotaService is the
+// regression catch Bornholm asked for on issue #82. It exercises the
+// production service.QuotaService through the enforcer on the application
+// path: an application request whose org-wide daily budget is spent must
+// get a 429 from the org-wide block. A regression that drops the second
+// return value (the org quota) on ResolveEffectiveQuotaForApplication
+// would make the enforcer skip the org-wide block silently, the request
+// would return 200, and this test would fail loudly.
+func TestQuotaEnforcer_ApplicationOrgCap_ThroughRealQuotaService(t *testing.T) {
+	orgID := model.OrgID("org-1")
+	providerID := model.NewProviderID()
+	llmModel := model.NewLLMModel(providerID, orgID, "acme/qwen-strong", "qwen", "desc", 1000, 2000)
+	provider := model.NewProvider(orgID, "ollama", "openai", "http://localhost:11434/v1", "key", "EUR")
+
+	orgDaily := int64(1_000)
+	store := &endToEndQuotaStore{
+		orgQuota: &fakeQuota{scope: model.QuotaScopeOrg, currency: "EUR", daily: &orgDaily},
+	}
+	svc := service.NewQuotaService(store, endToEndOrgStore{})
+
+	usage := &endToEndScopedUsage{
+		byScope: map[model.QuotaScope]int64{
+			// Application counter: nothing spent, the application check passes.
+			model.QuotaScopeApplication: 0,
+			// Org counter: spent above the cap, the org-wide branch must trip.
+			model.QuotaScopeOrg: 5_000,
+		},
+	}
+	enforcer := NewXoloQuotaEnforcer(svc, usage, &fakeProviderStore{provider: provider, llmModel: llmModel})
+
+	req := quotaTestRequest(&pipeline.ForwardExecution{
+		ResolvedClient:  NewDummyLLMClient("hello", "qwen"),
+		ResolvedModel:   "qwen",
+		ResolvedModelID: llmModel.ID(),
+	})
+	req.Metadata[MetaModelID] = string(llmModel.ID())
+	req.Metadata[MetaApplicationID] = "app-acme-ci"
+
+	result, err := enforcer.PreRequest(context.Background(), req)
+	if err != nil {
+		t.Fatalf("PreRequest() error = %v", err)
+	}
+	if result == nil || result.Response == nil || result.Response.StatusCode != 429 {
+		t.Fatalf("expected a 429 organisation quota response, got %+v", result)
+	}
+	body, _ := result.Response.Body.(map[string]any)
+	errBody, _ := body["error"].(map[string]any)
+	msg, _ := errBody["message"].(string)
+	if !strings.Contains(msg, "Organization daily budget exceeded") {
+		t.Errorf("expected organisation daily budget error, got %q", msg)
+	}
+}
+
+// TestQuotaEnforcer_UserOrgCap_ThroughRealQuotaService is the user-path
+// mirror: a regular user request that has spent its org's daily budget must
+// get a 429 from the org-wide block. This pins the same contract on
+// ResolveEffectiveQuota (the user resolver) as the application test pins
+// on ResolveEffectiveQuotaForApplication.
+func TestQuotaEnforcer_UserOrgCap_ThroughRealQuotaService(t *testing.T) {
+	orgID := model.OrgID("org-1")
+	providerID := model.NewProviderID()
+	llmModel := model.NewLLMModel(providerID, orgID, "acme/qwen-strong", "qwen", "desc", 1000, 2000)
+	provider := model.NewProvider(orgID, "ollama", "openai", "http://localhost:11434/v1", "key", "EUR")
+
+	orgDaily := int64(1_000)
+	store := &endToEndQuotaStore{
+		orgQuota: &fakeQuota{scope: model.QuotaScopeOrg, currency: "EUR", daily: &orgDaily},
+	}
+	svc := service.NewQuotaService(store, endToEndOrgStore{})
+
+	usage := &endToEndScopedUsage{
+		byScope: map[model.QuotaScope]int64{
+			// User counter: nothing spent, the user-scope check passes.
+			model.QuotaScopeUser: 0,
+			// Org counter: spent above the cap, the org-wide branch must trip.
+			model.QuotaScopeOrg: 5_000,
+		},
+	}
+	enforcer := NewXoloQuotaEnforcer(svc, usage, &fakeProviderStore{provider: provider, llmModel: llmModel})
+
+	req := quotaTestRequest(&pipeline.ForwardExecution{
+		ResolvedClient:  NewDummyLLMClient("hello", "qwen"),
+		ResolvedModel:   "qwen",
+		ResolvedModelID: llmModel.ID(),
+	})
+	req.Metadata[MetaModelID] = string(llmModel.ID())
+	// No MetaApplicationID — this is the user path.
+
+	result, err := enforcer.PreRequest(context.Background(), req)
+	if err != nil {
+		t.Fatalf("PreRequest() error = %v", err)
+	}
+	if result == nil || result.Response == nil || result.Response.StatusCode != 429 {
+		t.Fatalf("expected a 429 organisation quota response, got %+v", result)
+	}
+	body, _ := result.Response.Body.(map[string]any)
+	errBody, _ := body["error"].(map[string]any)
+	msg, _ := errBody["message"].(string)
+	if !strings.Contains(msg, "Organization daily budget exceeded") {
+		t.Errorf("expected organisation daily budget error, got %q", msg)
+	}
+}
+
+// Issue #82 fail-closed sanity check. The contract is now structural
+// (the resolver interface requires the second return value), so a resolver
+// that forgets the org quota does not compile — but the contract must also
+// keep the org-wide block from rejecting requests when no org quota is on
+// file (the legitimate nil-org-quota path). This test exercises that
+// branch end to end, through the production QuotaService.
+func TestQuotaEnforcer_NoOrgQuotaOnFilePassesThroughQuotaService(t *testing.T) {
+	orgID := model.OrgID("org-1")
+	providerID := model.NewProviderID()
+	llmModel := model.NewLLMModel(providerID, orgID, "acme/qwen-strong", "qwen", "desc", 1000, 2000)
+	provider := model.NewProvider(orgID, "ollama", "openai", "http://localhost:11434/v1", "key", "EUR")
+
+	// No org quota on file, no app quota on file: the org-wide block must
+	// skip without error. The resolver returns nil for the org quota on
+	// both methods and the enforcer must accept that.
+	store := &endToEndQuotaStore{}
+	svc := service.NewQuotaService(store, endToEndOrgStore{})
+
+	usage := &endToEndScopedUsage{
+		byScope: map[model.QuotaScope]int64{
+			model.QuotaScopeApplication: 0,
+			model.QuotaScopeOrg:         0,
+		},
+	}
+	enforcer := NewXoloQuotaEnforcer(svc, usage, &fakeProviderStore{provider: provider, llmModel: llmModel})
+
+	req := quotaTestRequest(&pipeline.ForwardExecution{
+		ResolvedClient:  NewDummyLLMClient("hello", "qwen"),
+		ResolvedModel:   "qwen",
+		ResolvedModelID: llmModel.ID(),
+	})
+	req.Metadata[MetaModelID] = string(llmModel.ID())
+	req.Metadata[MetaApplicationID] = "app-acme-ci"
+
+	result, err := enforcer.PreRequest(context.Background(), req)
+	if err != nil {
+		t.Fatalf("PreRequest() error = %v", err)
+	}
+	if result != nil {
+		t.Fatalf("expected the request to pass with no org quota on file, got %+v", result.Response)
+	}
+}
+
+// no further helpers.

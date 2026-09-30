@@ -19,14 +19,18 @@ import (
 // period); ResolveEffectiveQuotaForApplication merges application and org
 // quotas the same way.
 //
+// Both methods also return the raw org quota the resolver loaded for the
+// merge. The enforcer consumes it instead of issuing a second GetQuota on
+// the hot path (issue #82).
+//
 // When MetaApplicationID is set, XoloQuotaEnforcer calls only
 // ResolveEffectiveQuotaForApplication: the user-scope path is skipped because
 // the shadow user's counter is never fed for an application record (see
 // quotaUsageRows). The application budget is the only one the enforcer checks
 // on the application path (issue #64).
 type quotaResolver interface {
-	ResolveEffectiveQuota(ctx context.Context, userID model.UserID, orgID model.OrgID) (*model.EffectiveQuota, error)
-	ResolveEffectiveQuotaForApplication(ctx context.Context, appID model.ApplicationID, orgID model.OrgID) (*model.EffectiveQuota, error)
+	ResolveEffectiveQuota(ctx context.Context, userID model.UserID, orgID model.OrgID) (*model.EffectiveQuota, model.Quota, error)
+	ResolveEffectiveQuotaForApplication(ctx context.Context, appID model.ApplicationID, orgID model.OrgID) (*model.EffectiveQuota, model.Quota, error)
 }
 
 // XoloQuotaEnforcer is a PreRequestHook that checks the effective budget quota
@@ -39,16 +43,14 @@ type quotaResolver interface {
 // runs for both, against the organization counter, regardless of which scope
 // drove the request.
 type XoloQuotaEnforcer struct {
-	quotaResolver quotaResolver   // for per-user and per-application effective quotas
-	quotaStore    port.QuotaStore // for org-level GetQuota + SumCost checks
+	quotaResolver quotaResolver
 	usageStore    port.UsageStore
 	providerStore port.ProviderStore
 }
 
-func NewXoloQuotaEnforcer(quotaResolver quotaResolver, quotaStore port.QuotaStore, usageStore port.UsageStore, providerStore port.ProviderStore) *XoloQuotaEnforcer {
+func NewXoloQuotaEnforcer(quotaResolver quotaResolver, usageStore port.UsageStore, providerStore port.ProviderStore) *XoloQuotaEnforcer {
 	return &XoloQuotaEnforcer{
 		quotaResolver: quotaResolver,
-		quotaStore:    quotaStore,
 		usageStore:    usageStore,
 		providerStore: providerStore,
 	}
@@ -109,7 +111,7 @@ func (e *XoloQuotaEnforcer) PreRequest(ctx context.Context, req *genaiProxy.Prox
 	// whole call is exact and cheaper.
 	appID := ApplicationIDFromMeta(req.Metadata)
 	if appID != "" {
-		appQuota, err := e.quotaResolver.ResolveEffectiveQuotaForApplication(ctx, appID, orgID)
+		appQuota, orgQuota, err := e.quotaResolver.ResolveEffectiveQuotaForApplication(ctx, appID, orgID)
 		if err != nil {
 			return nil, errors.WithStack(err)
 		}
@@ -119,9 +121,15 @@ func (e *XoloQuotaEnforcer) PreRequest(ctx context.Context, req *genaiProxy.Prox
 		} else if result != nil {
 			return result, nil
 		}
+
+		if result, err := e.checkOrgWide(ctx, orgQuota, orgID, now); err != nil {
+			return nil, err
+		} else if result != nil {
+			return result, nil
+		}
 	} else {
 		// ── Per-user quota check (effective = min of user quota and org quota) ──────
-		effectiveQuota, err := e.quotaResolver.ResolveEffectiveQuota(ctx, userID, orgID)
+		effectiveQuota, orgQuota, err := e.quotaResolver.ResolveEffectiveQuota(ctx, userID, orgID)
 		if err != nil {
 			return nil, errors.WithStack(err)
 		}
@@ -131,59 +139,80 @@ func (e *XoloQuotaEnforcer) PreRequest(ctx context.Context, req *genaiProxy.Prox
 		} else if result != nil {
 			return result, nil
 		}
+
+		if result, err := e.checkOrgWide(ctx, orgQuota, orgID, now); err != nil {
+			return nil, err
+		} else if result != nil {
+			return result, nil
+		}
 	}
 
-	// ── Org-wide quota check (total spending by all users in the org) ──────────
-	orgQuota, err := e.quotaStore.GetQuota(ctx, model.QuotaScopeOrg, string(orgID))
-	if err != nil && !errors.Is(err, port.ErrNotFound) {
-		return nil, errors.WithStack(err)
+	return nil, nil
+}
+
+// checkOrgWide runs the three daily/monthly/yearly checks against the
+// organization counter, using the raw org quota the resolver already loaded
+// for the per-principal merge. Issue #82: the org-wide block used to call
+// quotaStore.GetQuota here, duplicating the lookup the resolver did upstream.
+// The contract is now on the resolver signature — every implementation must
+// return the org quota as its second value, so a resolver that forgets the
+// field does not compile. nil org quota means "none on file", same shape as
+// a GetQuota that returned port.ErrNotFound. Returning a non-nil HookResult
+// means a budget was exceeded and the caller must short-circuit.
+func (e *XoloQuotaEnforcer) checkOrgWide(
+	ctx context.Context,
+	orgQuota model.Quota,
+	orgID model.OrgID,
+	now time.Time,
+) (*genaiProxy.HookResult, error) {
+	if orgQuota == nil {
+		return nil, nil
 	}
-	if orgQuota != nil {
-		orgCurrency := orgQuota.Currency()
 
-		if orgQuota.DailyBudget() != nil {
-			orgSpent, err := e.sumOrgCost(ctx, orgID, model.StartOfDay(now))
-			if err != nil {
-				return nil, errors.WithStack(err)
-			}
-			if orgSpent >= *orgQuota.DailyBudget() {
-				return &genaiProxy.HookResult{
-					Response: rateLimitResponse(fmt.Sprintf(
-						"Organization daily budget exceeded: %s / %s",
-						formatMicrocents(orgSpent, orgCurrency), formatMicrocents(*orgQuota.DailyBudget(), orgCurrency),
-					)),
-				}, nil
-			}
+	orgCurrency := orgQuota.Currency()
+
+	if orgQuota.DailyBudget() != nil {
+		orgSpent, err := e.sumOrgCost(ctx, orgID, model.StartOfDay(now))
+		if err != nil {
+			return nil, errors.WithStack(err)
 		}
-
-		if orgQuota.MonthlyBudget() != nil {
-			orgSpent, err := e.sumOrgCost(ctx, orgID, model.StartOfMonth(now))
-			if err != nil {
-				return nil, errors.WithStack(err)
-			}
-			if orgSpent >= *orgQuota.MonthlyBudget() {
-				return &genaiProxy.HookResult{
-					Response: rateLimitResponse(fmt.Sprintf(
-						"Organization monthly budget exceeded: %s / %s",
-						formatMicrocents(orgSpent, orgCurrency), formatMicrocents(*orgQuota.MonthlyBudget(), orgCurrency),
-					)),
-				}, nil
-			}
+		if orgSpent >= *orgQuota.DailyBudget() {
+			return &genaiProxy.HookResult{
+				Response: rateLimitResponse(fmt.Sprintf(
+					"Organization daily budget exceeded: %s / %s",
+					formatMicrocents(orgSpent, orgCurrency), formatMicrocents(*orgQuota.DailyBudget(), orgCurrency),
+				)),
+			}, nil
 		}
+	}
 
-		if orgQuota.YearlyBudget() != nil {
-			orgSpent, err := e.sumOrgCost(ctx, orgID, model.StartOfYear(now))
-			if err != nil {
-				return nil, errors.WithStack(err)
-			}
-			if orgSpent >= *orgQuota.YearlyBudget() {
-				return &genaiProxy.HookResult{
-					Response: rateLimitResponse(fmt.Sprintf(
-						"Organization yearly budget exceeded: %s / %s",
-						formatMicrocents(orgSpent, orgCurrency), formatMicrocents(*orgQuota.YearlyBudget(), orgCurrency),
-					)),
-				}, nil
-			}
+	if orgQuota.MonthlyBudget() != nil {
+		orgSpent, err := e.sumOrgCost(ctx, orgID, model.StartOfMonth(now))
+		if err != nil {
+			return nil, errors.WithStack(err)
+		}
+		if orgSpent >= *orgQuota.MonthlyBudget() {
+			return &genaiProxy.HookResult{
+				Response: rateLimitResponse(fmt.Sprintf(
+					"Organization monthly budget exceeded: %s / %s",
+					formatMicrocents(orgSpent, orgCurrency), formatMicrocents(*orgQuota.MonthlyBudget(), orgCurrency),
+				)),
+			}, nil
+		}
+	}
+
+	if orgQuota.YearlyBudget() != nil {
+		orgSpent, err := e.sumOrgCost(ctx, orgID, model.StartOfYear(now))
+		if err != nil {
+			return nil, errors.WithStack(err)
+		}
+		if orgSpent >= *orgQuota.YearlyBudget() {
+			return &genaiProxy.HookResult{
+				Response: rateLimitResponse(fmt.Sprintf(
+					"Organization yearly budget exceeded: %s / %s",
+					formatMicrocents(orgSpent, orgCurrency), formatMicrocents(*orgQuota.YearlyBudget(), orgCurrency),
+				)),
+			}, nil
 		}
 	}
 

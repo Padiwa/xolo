@@ -40,12 +40,12 @@ func (s *stubQuotaStore) SetQuota(_ context.Context, q model.Quota) error {
 	return s.err
 }
 
-func (s *stubQuotaStore) ResolveEffectiveQuota(context.Context, model.UserID, model.OrgID) (*model.EffectiveQuota, error) {
-	return &model.EffectiveQuota{}, nil
+func (s *stubQuotaStore) ResolveEffectiveQuota(context.Context, model.UserID, model.OrgID) (*model.EffectiveQuota, model.Quota, error) {
+	return &model.EffectiveQuota{}, nil, nil
 }
 
-func (s *stubQuotaStore) ResolveEffectiveQuotaForApplication(context.Context, model.ApplicationID, model.OrgID) (*model.EffectiveQuota, error) {
-	return &model.EffectiveQuota{}, nil
+func (s *stubQuotaStore) ResolveEffectiveQuotaForApplication(context.Context, model.ApplicationID, model.OrgID) (*model.EffectiveQuota, model.Quota, error) {
+	return &model.EffectiveQuota{}, nil, nil
 }
 
 // stubUsageStore for the application-quota handler tests: every read returns

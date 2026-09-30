@@ -15,12 +15,12 @@ type fakeQuotaResolver struct {
 	err   error
 }
 
-func (f fakeQuotaResolver) ResolveEffectiveQuota(context.Context, model.UserID, model.OrgID) (*model.EffectiveQuota, error) {
-	return f.quota, f.err
+func (f fakeQuotaResolver) ResolveEffectiveQuota(context.Context, model.UserID, model.OrgID) (*model.EffectiveQuota, model.Quota, error) {
+	return f.quota, nil, f.err
 }
 
-func (f fakeQuotaResolver) ResolveEffectiveQuotaForApplication(context.Context, model.ApplicationID, model.OrgID) (*model.EffectiveQuota, error) {
-	return f.quota, f.err
+func (f fakeQuotaResolver) ResolveEffectiveQuotaForApplication(context.Context, model.ApplicationID, model.OrgID) (*model.EffectiveQuota, model.Quota, error) {
+	return f.quota, nil, f.err
 }
 
 // fakeUsage answers SumQuotaCostSince with the amount registered for the period start.

@@ -29,7 +29,7 @@ func NewQuotaInfoResolver(quotaResolver quotaResolver, usageStore port.UsageStor
 // configured for the user, so that plugins fall back to their neutral value
 // instead of reacting to a spurious zero.
 func (r *QuotaInfoResolver) Resolve(ctx context.Context, userID model.UserID, orgID model.OrgID) *proto.QuotaInfo {
-	effective, err := r.quotaResolver.ResolveEffectiveQuota(ctx, userID, orgID)
+	effective, _, err := r.quotaResolver.ResolveEffectiveQuota(ctx, userID, orgID)
 	if err != nil {
 		slog.WarnContext(ctx, "pipeline: could not resolve effective quota", slog.Any("error", err))
 		return nil
