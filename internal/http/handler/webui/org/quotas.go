@@ -128,19 +128,40 @@ func (h *Handler) saveOrgQuota(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/orgs/"+orgSlug+"/admin/quota?success=saved", http.StatusSeeOther)
 }
 
+// membershipFromQuotaPath loads the org from the URL slug, then the
+// membership from the URL id, and asserts the membership belongs to the
+// org. A mismatch is reported as port.ErrNotFound so callers answer 404
+// rather than confirming the membership exists elsewhere.
+//
+// port.OrgStore.GetMembership is keyed by membership id alone, so without
+// this check the route's permission gate on the URL org is not enough to
+// stop an operator with PermQuotaWrite on one org from writing a
+// QuotaScopeUser row that affects every org the target user belongs to
+// (QuotaStore.GetQuota is filtered on scope+scope_id with no org column).
+// resolveOrgAndApplication implements the same pattern for applications;
+// the member path needs to do it explicitly.
+func (h *Handler) membershipFromQuotaPath(ctx context.Context, orgSlug, membershipID string) (model.Organization, model.Membership, error) {
+	org, err := h.orgFromSlug(ctx, orgSlug)
+	if err != nil {
+		return nil, nil, err
+	}
+	membership, err := h.orgStore.GetMembership(ctx, model.MembershipID(membershipID))
+	if err != nil {
+		return nil, nil, err
+	}
+	if membership.OrgID() != org.ID() {
+		return nil, nil, errors.WithStack(port.ErrNotFound)
+	}
+	return org, membership, nil
+}
+
 func (h *Handler) getMemberQuotaPage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := httpCtx.User(ctx)
 	orgSlug := r.PathValue("orgSlug")
 	membershipID := r.PathValue("membershipID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
-	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	membership, err := h.orgStore.GetMembership(ctx, model.MembershipID(membershipID))
+	org, membership, err := h.membershipFromQuotaPath(ctx, orgSlug, membershipID)
 	if err != nil {
 		if errors.Is(err, port.ErrNotFound) {
 			http.Error(w, "Membership not found", http.StatusNotFound)
@@ -217,13 +238,7 @@ func (h *Handler) saveMemberQuota(w http.ResponseWriter, r *http.Request) {
 	orgSlug := r.PathValue("orgSlug")
 	membershipID := r.PathValue("membershipID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
-	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	membership, err := h.orgStore.GetMembership(ctx, model.MembershipID(membershipID))
+	org, membership, err := h.membershipFromQuotaPath(ctx, orgSlug, membershipID)
 	if err != nil {
 		if errors.Is(err, port.ErrNotFound) {
 			http.Error(w, "Membership not found", http.StatusNotFound)
@@ -424,156 +439,137 @@ func quotaFormSubmitted(r *http.Request) map[string]string {
 	}
 }
 
-// renderOrgQuotaFormError re-renders the org quota editor when validation
-// fails on POST. The page is returned with HTTP 422, the field errors
-// attached to the view model and the operator's submitted values, so the
-// "?success=saved" redirect is never reached on a rejected submit
-// (issue #88). Spending figures are loaded the same way as on GET so the
-// operator still sees their current consumption alongside the editor; any
-// load error surfaces as a banner, mirroring the GET path.
-func (h *Handler) renderOrgQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, fieldErrors map[string]string) {
-	existing, err := h.quotaStore.GetQuota(ctx, model.QuotaScopeOrg, string(org.ID()))
-	loadError := ""
-	if err != nil && !errors.Is(err, port.ErrNotFound) {
-		slog.ErrorContext(ctx, "could not load org budget for re-render", slogx.Error(err))
-		loadError = "Budget indisponible : le store a renvoyé une erreur. Le formulaire ci-dessous reste éditable mais le total dépensé peut être inexact."
-	}
+// quotaSpendLoader abstracts the three ways the quota editor reads the
+// spent-so-far totals for a scope. Org and member scopes both go through
+// loadOrgSpend (with a nil vs per-member user list), application scope goes
+// through applicationSpend (issue #64). Returning a single function type
+// lets renderQuotaFormError share its body across the three editors.
+type quotaSpendLoader func(ctx context.Context, currency string) (daily, monthly, yearly int64, err error)
 
-	orgCurrency := org.Currency()
-	if orgCurrency == "" {
-		orgCurrency = model.DefaultCurrency
-	}
+// loadOrgScopeSpend is the org-wide loader: every user in the org counts.
+func (h *Handler) loadOrgScopeSpend(ctx context.Context, org model.Organization, currency string) (int64, int64, int64, error) {
 	now := time.Now()
-	dailyCost, dailyErr := h.loadOrgSpend(ctx, nil, org.ID(), startOfPeriod("day", now), orgCurrency)
-	monthlyCost, monthlyErr := h.loadOrgSpend(ctx, nil, org.ID(), startOfPeriod("month", now), orgCurrency)
-	yearlyCost, yearlyErr := h.loadOrgSpend(ctx, nil, org.ID(), startOfPeriod("year", now), orgCurrency)
-	for _, e := range []error{dailyErr, monthlyErr, yearlyErr} {
-		if e != nil {
-			slog.ErrorContext(ctx, "could not load org spend for re-render", slogx.Error(e))
-			loadError = "Consommation indisponible : le store a renvoyé une erreur. Les barres peuvent afficher 0 %."
-			break
-		}
+	daily, err := h.loadOrgSpend(ctx, nil, org.ID(), startOfPeriod("day", now), currency)
+	if err != nil {
+		return 0, 0, 0, err
 	}
-
-	vmodel := component.QuotaPageVModel{
-		Org:         org,
-		ScopeType:   "org",
-		ScopeID:     string(org.ID()),
-		Quota:       existing,
-		DailyCost:   dailyCost,
-		MonthlyCost: monthlyCost,
-		YearlyCost:  yearlyCost,
-		LoadError:   loadError,
-		Submitted:   quotaFormSubmitted(r),
-		FieldErrors: fieldErrors,
-		AppLayoutVModel: common.AppLayoutVModel{
-			User:         user,
-			SelectedItem: "org-" + orgSlug + "-quota",
-			Context:      common.ContextOrg,
-			ContextName:  org.Name(),
-			ContextSlug:  org.Slug(),
-			ContextOrgID: org.ID(),
-			Breadcrumbs: []common.BreadcrumbItem{
-				{Label: org.Name(), Href: "/orgs/" + orgSlug + "/usage"},
-				{Label: "Budget", Href: "/orgs/" + orgSlug + "/admin/quota"},
-			},
-		},
+	monthly, err := h.loadOrgSpend(ctx, nil, org.ID(), startOfPeriod("month", now), currency)
+	if err != nil {
+		return 0, 0, 0, err
 	}
-	w.WriteHeader(http.StatusUnprocessableEntity)
-	templ.Handler(component.QuotaPage(vmodel)).ServeHTTP(w, r)
+	yearly, err := h.loadOrgSpend(ctx, nil, org.ID(), startOfPeriod("year", now), currency)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return daily, monthly, yearly, nil
 }
 
-// renderMemberQuotaFormError mirrors renderOrgQuotaFormError for the
-// per-member quota editor. Same shape, different scope.
-func (h *Handler) renderMemberQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, membership model.Membership, fieldErrors map[string]string) {
-	existing, err := h.quotaStore.GetQuota(ctx, model.QuotaScopeUser, string(membership.UserID()))
-	loadError := ""
-	if err != nil && !errors.Is(err, port.ErrNotFound) {
-		slog.ErrorContext(ctx, "could not load member budget for re-render", slogx.Error(err))
-		loadError = "Budget indisponible : le store a renvoyé une erreur. Le formulaire ci-dessous reste éditable mais le total dépensé peut être inexact."
-	}
-
-	orgCurrency := org.Currency()
-	if orgCurrency == "" {
-		orgCurrency = model.DefaultCurrency
-	}
+// loadMemberScopeSpend narrows the org spend to a single member.
+func (h *Handler) loadMemberScopeSpend(ctx context.Context, org model.Organization, membership model.Membership, currency string) (int64, int64, int64, error) {
 	now := time.Now()
 	userIDs := []model.UserID{membership.UserID()}
-	dailyCost, dailyErr := h.loadOrgSpend(ctx, userIDs, org.ID(), startOfPeriod("day", now), orgCurrency)
-	monthlyCost, monthlyErr := h.loadOrgSpend(ctx, userIDs, org.ID(), startOfPeriod("month", now), orgCurrency)
-	yearlyCost, yearlyErr := h.loadOrgSpend(ctx, userIDs, org.ID(), startOfPeriod("year", now), orgCurrency)
-	for _, e := range []error{dailyErr, monthlyErr, yearlyErr} {
-		if e != nil {
-			slog.ErrorContext(ctx, "could not load member spend for re-render", slogx.Error(e))
-			loadError = "Consommation indisponible : le store a renvoyé une erreur. Les barres peuvent afficher 0 %."
-			break
-		}
+	daily, err := h.loadOrgSpend(ctx, userIDs, org.ID(), startOfPeriod("day", now), currency)
+	if err != nil {
+		return 0, 0, 0, err
 	}
-
-	vmodel := component.QuotaPageVModel{
-		Org:         org,
-		Membership:  membership,
-		ScopeType:   "user",
-		ScopeID:     string(membership.UserID()),
-		Quota:       existing,
-		DailyCost:   dailyCost,
-		MonthlyCost: monthlyCost,
-		YearlyCost:  yearlyCost,
-		LoadError:   loadError,
-		Submitted:   quotaFormSubmitted(r),
-		FieldErrors: fieldErrors,
-		AppLayoutVModel: common.AppLayoutVModel{
-			User:         user,
-			SelectedItem: "org-" + orgSlug + "-members",
-			Context:      common.ContextOrg,
-			ContextName:  org.Name(),
-			ContextSlug:  org.Slug(),
-			ContextOrgID: org.ID(),
-			Breadcrumbs: []common.BreadcrumbItem{
-				{Label: org.Name(), Href: "/orgs/" + orgSlug + "/usage"},
-				{Label: "Membres", Href: "/orgs/" + orgSlug + "/admin/members"},
-				{Label: membership.User().DisplayName(), Href: ""},
-				{Label: "Budget", Href: ""},
-			},
-		},
+	monthly, err := h.loadOrgSpend(ctx, userIDs, org.ID(), startOfPeriod("month", now), currency)
+	if err != nil {
+		return 0, 0, 0, err
 	}
-	w.WriteHeader(http.StatusUnprocessableEntity)
-	templ.Handler(component.QuotaPage(vmodel)).ServeHTTP(w, r)
+	yearly, err := h.loadOrgSpend(ctx, userIDs, org.ID(), startOfPeriod("year", now), currency)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return daily, monthly, yearly, nil
 }
 
-// renderApplicationQuotaFormError mirrors renderOrgQuotaFormError for the
-// per-application quota editor (issue #64). The application is needed to
-// render the breadcrumbs and the application row of the layout.
-func (h *Handler) renderApplicationQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, app model.Application, fieldErrors map[string]string) {
-	appID := string(app.ID())
-	existing, err := h.quotaStore.GetQuota(ctx, model.QuotaScopeApplication, appID)
-	loadError := ""
+// loadApplicationScopeSpend reads the application spend via applicationSpend.
+func loadApplicationScopeSpend(ctx context.Context, usageStore port.UsageStore, orgID model.OrgID, appID model.ApplicationID, currency string) (int64, int64, int64, error) {
+	now := time.Now()
+	daily, err := applicationSpend(ctx, usageStore, appID, orgID, model.StartOfDay(now))
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	monthly, err := applicationSpend(ctx, usageStore, appID, orgID, model.StartOfMonth(now))
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	yearly, err := applicationSpend(ctx, usageStore, appID, orgID, model.StartOfYear(now))
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return daily, monthly, yearly, nil
+}
+
+// quotaFormConfig captures everything that varies between the three quota
+// editors, so renderQuotaFormError can serve all three without
+// duplication. The fields are read once at the call site and never
+// mutated; passing the struct by value keeps the helper pure with respect
+// to its inputs.
+type quotaFormConfig struct {
+	Scope        model.QuotaScope
+	ScopeID      string
+	Membership   model.Membership  // optional
+	Application  model.Application // optional
+	Breadcrumbs  []common.BreadcrumbItem
+	SelectedItem string
+	SpendLoader  quotaSpendLoader
+	LoadLog      string // describes the scope in log lines, e.g. "member budget"
+}
+
+// renderQuotaFormError re-renders the quota editor with HTTP 422 when
+// validation fails on POST. The page carries the operator's submitted
+// values, per-field errors and the existing budget/spend figures so the
+// "?success=saved" redirect is never reached on a rejected submit
+// (issue #88). Quota-load and spend-load failures are reported
+// separately and combined into a single banner, matching the GET path:
+// dropping one to surface the other would hide a real store failure
+// from the operator.
+func (h *Handler) renderQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, cfg quotaFormConfig, fieldErrors map[string]string) {
+	existing, err := h.quotaStore.GetQuota(ctx, cfg.Scope, cfg.ScopeID)
+	budgetLoadError := ""
 	if err != nil && !errors.Is(err, port.ErrNotFound) {
-		slog.ErrorContext(ctx, "could not load application budget for re-render", slogx.Error(err))
-		loadError = "Budget indisponible : le store a renvoyé une erreur. Le formulaire ci-dessous reste éditable mais le total dépensé peut être inexact."
+		slog.ErrorContext(ctx, "could not load "+cfg.LoadLog+" for re-render", slogx.Error(err))
+		budgetLoadError = "Budget indisponible : le store a renvoyé une erreur. Le formulaire ci-dessous reste éditable mais le total dépensé peut être inexact."
 	}
 
 	orgCurrency := org.Currency()
 	if orgCurrency == "" {
 		orgCurrency = model.DefaultCurrency
 	}
-	now := time.Now()
-	dailyCost, dailyErr := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), model.StartOfDay(now))
-	monthlyCost, monthlyErr := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), model.StartOfMonth(now))
-	yearlyCost, yearlyErr := applicationSpend(ctx, h.usageStore, model.ApplicationID(appID), org.ID(), model.StartOfYear(now))
-	for _, e := range []error{dailyErr, monthlyErr, yearlyErr} {
-		if e != nil {
-			slog.ErrorContext(ctx, "could not load application spend for re-render", slogx.Error(e))
-			loadError = "Consommation indisponible : le store a renvoyé une erreur. Les barres peuvent afficher 0 %."
-			break
-		}
+	dailyCost, monthlyCost, yearlyCost, spendErr := cfg.SpendLoader(ctx, orgCurrency)
+	spendLoadError := ""
+	if spendErr != nil {
+		slog.ErrorContext(ctx, "could not load "+cfg.LoadLog+" spend for re-render", slogx.Error(spendErr))
+		spendLoadError = "Consommation indisponible : le store a renvoyé une erreur. Les barres peuvent afficher 0 %."
+	}
+	// Mirror the GET handlers' combine switch: if both stores fail, the
+	// operator sees one banner that mentions both problems rather than
+	// the second silently overwriting the first.
+	loadError := budgetLoadError
+	switch {
+	case budgetLoadError != "" && spendLoadError != "":
+		loadError = budgetLoadError + " " + spendLoadError
+	case spendLoadError != "":
+		loadError = spendLoadError
+	}
+
+	scopeType := ""
+	switch cfg.Scope {
+	case model.QuotaScopeOrg:
+		scopeType = "org"
+	case model.QuotaScopeUser:
+		scopeType = "user"
+	case model.QuotaScopeApplication:
+		scopeType = "application"
 	}
 
 	vmodel := component.QuotaPageVModel{
 		Org:         org,
-		Application: app,
-		ScopeType:   "application",
-		ScopeID:     appID,
+		Membership:  cfg.Membership,
+		Application: cfg.Application,
+		ScopeType:   scopeType,
+		ScopeID:     cfg.ScopeID,
 		Quota:       existing,
 		DailyCost:   dailyCost,
 		MonthlyCost: monthlyCost,
@@ -583,21 +579,80 @@ func (h *Handler) renderApplicationQuotaFormError(w http.ResponseWriter, r *http
 		FieldErrors: fieldErrors,
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
-			SelectedItem: "org-" + orgSlug + "-applications",
+			SelectedItem: cfg.SelectedItem,
 			Context:      common.ContextOrg,
 			ContextName:  org.Name(),
 			ContextSlug:  org.Slug(),
 			ContextOrgID: org.ID(),
-			Breadcrumbs: []common.BreadcrumbItem{
-				{Label: org.Name(), Href: "/orgs/" + orgSlug + "/usage"},
-				{Label: "Applications", Href: "/orgs/" + orgSlug + "/admin/applications"},
-				{Label: app.Name(), Href: "/orgs/" + orgSlug + "/admin/applications/" + appID + "/edit"},
-				{Label: "Budget", Href: ""},
-			},
+			Breadcrumbs:  cfg.Breadcrumbs,
 		},
 	}
 	w.WriteHeader(http.StatusUnprocessableEntity)
 	templ.Handler(component.QuotaPage(vmodel)).ServeHTTP(w, r)
+}
+
+// renderOrgQuotaFormError re-renders the org quota editor when validation
+// fails on POST. See renderQuotaFormError for the shared body.
+func (h *Handler) renderOrgQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, fieldErrors map[string]string) {
+	h.renderQuotaFormError(w, r, ctx, user, orgSlug, org, quotaFormConfig{
+		Scope:        model.QuotaScopeOrg,
+		ScopeID:      string(org.ID()),
+		SelectedItem: "org-" + orgSlug + "-quota",
+		LoadLog:      "org budget",
+		SpendLoader: func(ctx context.Context, currency string) (int64, int64, int64, error) {
+			return h.loadOrgScopeSpend(ctx, org, currency)
+		},
+		Breadcrumbs: []common.BreadcrumbItem{
+			{Label: org.Name(), Href: "/orgs/" + orgSlug + "/usage"},
+			{Label: "Budget", Href: "/orgs/" + orgSlug + "/admin/quota"},
+		},
+	}, fieldErrors)
+}
+
+// renderMemberQuotaFormError re-renders the per-member quota editor when
+// validation fails on POST. membershipFromQuotaPath is the only safe way
+// for callers to obtain the membership here: GetMembership is keyed by
+// membership id alone, so a foreign membership would let an operator
+// rewrite another org's per-user budget.
+func (h *Handler) renderMemberQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, membership model.Membership, fieldErrors map[string]string) {
+	h.renderQuotaFormError(w, r, ctx, user, orgSlug, org, quotaFormConfig{
+		Scope:        model.QuotaScopeUser,
+		ScopeID:      string(membership.UserID()),
+		Membership:   membership,
+		SelectedItem: "org-" + orgSlug + "-members",
+		LoadLog:      "member budget",
+		SpendLoader: func(ctx context.Context, currency string) (int64, int64, int64, error) {
+			return h.loadMemberScopeSpend(ctx, org, membership, currency)
+		},
+		Breadcrumbs: []common.BreadcrumbItem{
+			{Label: org.Name(), Href: "/orgs/" + orgSlug + "/usage"},
+			{Label: "Membres", Href: "/orgs/" + orgSlug + "/admin/members"},
+			{Label: membership.User().DisplayName(), Href: ""},
+			{Label: "Budget", Href: ""},
+		},
+	}, fieldErrors)
+}
+
+// renderApplicationQuotaFormError re-renders the per-application quota
+// editor when validation fails on POST (issue #64).
+func (h *Handler) renderApplicationQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, app model.Application, fieldErrors map[string]string) {
+	appID := string(app.ID())
+	h.renderQuotaFormError(w, r, ctx, user, orgSlug, org, quotaFormConfig{
+		Scope:        model.QuotaScopeApplication,
+		ScopeID:      appID,
+		Application:  app,
+		SelectedItem: "org-" + orgSlug + "-applications",
+		LoadLog:      "application budget",
+		SpendLoader: func(ctx context.Context, currency string) (int64, int64, int64, error) {
+			return loadApplicationScopeSpend(ctx, h.usageStore, org.ID(), model.ApplicationID(appID), currency)
+		},
+		Breadcrumbs: []common.BreadcrumbItem{
+			{Label: org.Name(), Href: "/orgs/" + orgSlug + "/usage"},
+			{Label: "Applications", Href: "/orgs/" + orgSlug + "/admin/applications"},
+			{Label: app.Name(), Href: "/orgs/" + orgSlug + "/admin/applications/" + appID + "/edit"},
+			{Label: "Budget", Href: ""},
+		},
+	}, fieldErrors)
 }
 
 // applicationSpend returns the PAYG spending attributed to one application

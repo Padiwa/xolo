@@ -20,18 +20,21 @@ import (
 // stubQuotaStore for the application-quota handler tests. Every method
 // returns ErrNotFound unless the test sets the corresponding field, which
 // lets each table-driven case pin one branch without constructing a fully
-// populated store.
+// populated store. quotaScope filters GetQuota by scope (Quotas are scoped,
+// so a stub seeded with an application quota would otherwise also match
+// when a handler asks for the org quota of the same id).
 type stubQuotaStore struct {
 	port.QuotaStore
-	quota model.Quota
-	err   error
+	quota      model.Quota
+	quotaScope model.QuotaScope // scope GetQuota responds to; zero value = match any scope
+	err        error
 }
 
 func (s *stubQuotaStore) GetQuota(_ context.Context, scope model.QuotaScope, _ string) (model.Quota, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
-	if s.quota != nil && scope == model.QuotaScopeApplication {
+	if s.quota != nil && (s.quotaScope == "" || s.quotaScope == scope) {
 		return s.quota, nil
 	}
 	return nil, port.ErrNotFound
@@ -39,6 +42,7 @@ func (s *stubQuotaStore) GetQuota(_ context.Context, scope model.QuotaScope, _ s
 
 func (s *stubQuotaStore) SetQuota(_ context.Context, q model.Quota) error {
 	s.quota = q
+	s.quotaScope = q.Scope()
 	return s.err
 }
 
@@ -496,5 +500,214 @@ func TestSaveOrgQuotaZeroSucceeds(t *testing.T) {
 	if qStore.quota.MonthlyBudget() != nil || qStore.quota.YearlyBudget() != nil {
 		t.Errorf("empty fields should be stored as nil (unlimited), got %v / %v",
 			qStore.quota.MonthlyBudget(), qStore.quota.YearlyBudget())
+	}
+}
+
+// membershipWithUser is the test-only constructor for the quota member
+// tests: it bundles a user into a membership the way gorm's preload
+// would at runtime, since model.NewMembership has no public setter for
+// the preloaded user. Implements model.Membership.
+type membershipWithUser struct {
+	id     model.MembershipID
+	userID model.UserID
+	orgID  model.OrgID
+	user   model.User
+}
+
+func (m membershipWithUser) ID() model.MembershipID  { return m.id }
+func (m membershipWithUser) UserID() model.UserID    { return m.userID }
+func (m membershipWithUser) OrgID() model.OrgID      { return m.orgID }
+func (m membershipWithUser) CreatedAt() time.Time    { return time.Time{} }
+func (m membershipWithUser) User() model.User        { return m.user }
+func (m membershipWithUser) Org() model.Organization { return nil }
+func (m membershipWithUser) Roles() []model.Role     { return nil }
+
+// TestSaveOrgQuotaBadValueDoesNotOverwriteBudget is the org-scoped mirror of
+// TestSaveApplicationQuotaBadValueDoesNotOverwriteBudget. The re-render
+// path is shared, but the per-scope wiring (loader, scope ID, breadcrumbs)
+// diverged when the three helpers were extracted, so each scope is pinned
+// independently. A regression in the org path must not pass on the
+// application test alone.
+func TestSaveOrgQuotaBadValueDoesNotOverwriteBudget(t *testing.T) {
+	org := model.NewOrganization("tenant", "acme", "Acme", "EUR")
+	daily := int64(8_000_000) // 8.00
+	existing := model.NewQuota(model.QuotaScopeOrg, string(org.ID()), "EUR", &daily, nil, nil)
+	qStore := &stubQuotaStore{quota: existing, quotaScope: model.QuotaScopeOrg}
+
+	h := &Handler{
+		orgStore:   &stubOrgStore{org: org},
+		quotaStore: qStore,
+		usageStore: &stubUsageStore{},
+	}
+
+	// 1e16 is the ticket's overflow example: the previous parser silently
+	// dropped it to nil (unlimited). With the fix it must reject.
+	form := url.Values{}
+	form.Set("daily_budget", "1e16")
+	form.Set("monthly_budget", "")
+	form.Set("yearly_budget", "")
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.SetPathValue("orgSlug", org.Slug())
+	base, _ := url.Parse("http://example.test")
+	r = r.WithContext(httpCtx.SetBaseURL(r.Context(), base.String()))
+
+	rec := httptest.NewRecorder()
+	h.saveOrgQuota(rec, r)
+
+	if loc := rec.Header().Get("Location"); strings.Contains(loc, "success=saved") {
+		t.Errorf("Location = %q, must not redirect to ?success=saved on a rejected submit", loc)
+	}
+	if qStore.quota != existing {
+		t.Errorf("store quota pointer changed; SetQuota was called on a rejected submit")
+	}
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want 422", rec.Code)
+	}
+	body := strings.ToLower(rec.Body.String())
+	for _, want := range []string{"plafond invalide", "journalier", "valeur invalide"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+	if !strings.Contains(rec.Body.String(), `value="1e16"`) {
+		t.Errorf("re-rendered form does not echo the operator's typed 1e16")
+	}
+}
+
+// TestSaveMemberQuotaBadValueDoesNotOverwriteBudget is the per-member mirror
+
+// TestSaveMemberQuotaBadValueDoesNotOverwriteBudget is the per-member mirror
+// of the application regression test. It exercises the per-member loader
+// and the member-specific breadcrumbs, which diverge from the org helper.
+func TestSaveMemberQuotaBadValueDoesNotOverwriteBudget(t *testing.T) {
+	org := model.NewOrganization("tenant", "acme", "Acme", "EUR")
+	otherUser := model.NewUser(model.TenantID("tenant"), "alice", "alice-sub", "alice@example.com", "Alice", true)
+	membership := membershipWithUser{
+		id:     model.NewMembershipID(),
+		userID: otherUser.ID(),
+		orgID:  org.ID(),
+		user:   otherUser,
+	}
+
+	daily := int64(3_000_000) // 3.00
+	existing := model.NewQuota(model.QuotaScopeUser, string(membership.UserID()), "EUR", &daily, nil, nil)
+	qStore := &stubQuotaStore{quota: existing, quotaScope: model.QuotaScopeUser}
+
+	h := &Handler{
+		orgStore:   &stubOrgStore{org: org, membership: membership},
+		quotaStore: qStore,
+		usageStore: &stubUsageStore{},
+	}
+
+	// Negative value: hand-crafted POST, since the form's min="0" rejects
+	// it client-side. The previous parser dropped it to nil silently.
+	form := url.Values{}
+	form.Set("daily_budget", "-5")
+	form.Set("monthly_budget", "")
+	form.Set("yearly_budget", "")
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.SetPathValue("orgSlug", org.Slug())
+	r.SetPathValue("membershipID", string(membership.ID()))
+	base, _ := url.Parse("http://example.test")
+	r = r.WithContext(httpCtx.SetBaseURL(r.Context(), base.String()))
+
+	rec := httptest.NewRecorder()
+	h.saveMemberQuota(rec, r)
+
+	if loc := rec.Header().Get("Location"); strings.Contains(loc, "success=saved") {
+		t.Errorf("Location = %q, must not redirect to ?success=saved on a rejected submit", loc)
+	}
+	if qStore.quota != existing {
+		t.Errorf("store quota pointer changed; SetQuota was called on a rejected submit")
+	}
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want 422", rec.Code)
+	}
+	body := strings.ToLower(rec.Body.String())
+	for _, want := range []string{"plafond invalide", "journalier"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+	if !strings.Contains(rec.Body.String(), `value="-5"`) {
+		t.Errorf("re-rendered form does not echo the operator's typed -5")
+	}
+}
+
+// TestSaveMemberQuotaForeignMembership covers the cross-org privilege
+// escalation the Conclave review flagged on PR #111: an operator with
+// PermQuotaWrite on their own org must not write a QuotaScopeUser row
+// for a membership that belongs to another org, since QuotaStore keys
+// user quotas by userID alone (no org column) and one user can belong to
+// several orgs. membershipFromQuotaPath is the fix; this test pins the
+// answer is 404 and the store is not touched.
+func TestSaveMemberQuotaForeignMembership(t *testing.T) {
+	// Operator's own org.
+	attackerOrg := model.NewOrganization("tenant-attacker", "attacker", "Attacker", "EUR")
+	// Membership in a *different* org — the operator has no business
+	// editing this user's quota from the attacker org's admin.
+	victimOrg := model.NewOrganization("tenant-victim", "victim", "Victim", "EUR")
+	victimUser := model.NewUser(model.TenantID("tenant-victim"), "victim-user", "victim-sub", "victim@example.com", "Victim User", true)
+	foreignMembership := model.NewMembership(victimUser.ID(), victimOrg.ID())
+
+	qStore := &stubQuotaStore{}
+
+	h := &Handler{
+		orgStore:   &stubOrgStore{org: attackerOrg, membership: foreignMembership},
+		quotaStore: qStore,
+		usageStore: &stubUsageStore{},
+	}
+
+	form := url.Values{}
+	form.Set("daily_budget", "10")
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.SetPathValue("orgSlug", attackerOrg.Slug())
+	r.SetPathValue("membershipID", string(foreignMembership.ID()))
+
+	rec := httptest.NewRecorder()
+	h.saveMemberQuota(rec, r)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (foreign membership must look like a not-found)", rec.Code)
+	}
+	if qStore.quota != nil {
+		t.Errorf("SetQuota was called for a foreign membership")
+	}
+	// No redirect either: the operator must not even see a misleading
+	// banner or a preserved previous value through the redirect.
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("Location = %q, want empty (no redirect on cross-org 404)", loc)
+	}
+}
+
+// TestGetMemberQuotaPageForeignMembership mirrors the save handler test for
+// the GET path: the same flaw affected getMemberQuotaPage (it used the
+// same membership lookup) and the fix covers both routes.
+func TestGetMemberQuotaPageForeignMembership(t *testing.T) {
+	attackerOrg := model.NewOrganization("tenant-attacker", "attacker", "Attacker", "EUR")
+	victimOrg := model.NewOrganization("tenant-victim", "victim", "Victim", "EUR")
+	victimUser := model.NewUser(model.TenantID("tenant-victim"), "victim-user", "victim-sub", "victim@example.com", "Victim User", true)
+	foreignMembership := model.NewMembership(victimUser.ID(), victimOrg.ID())
+
+	qStore := &stubQuotaStore{}
+
+	h := &Handler{
+		orgStore:   &stubOrgStore{org: attackerOrg, membership: foreignMembership},
+		quotaStore: qStore,
+		usageStore: &stubUsageStore{},
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.SetPathValue("orgSlug", attackerOrg.Slug())
+	r.SetPathValue("membershipID", string(foreignMembership.ID()))
+
+	rec := httptest.NewRecorder()
+	h.getMemberQuotaPage(rec, r)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 (foreign membership must look like a not-found)", rec.Code)
 	}
 }
