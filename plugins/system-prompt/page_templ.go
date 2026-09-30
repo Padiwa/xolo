@@ -49,7 +49,7 @@ func page(pd uiPageData) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\"><link rel=\"stylesheet\" href=\"/assets/templui.css\"></head><body class=\"bg-background text-foreground min-h-screen p-4 space-y-4\"><h1 class=\"text-lg font-semibold\">System Prompt</h1><p class=\"text-sm text-muted-foreground\">Injecte un prompt système fixe dans les messages de requête LLM. En mode \"remplacer\", les éventuels messages système du client sont supprimés ; en mode \"ajouter\", ils sont concaténés.</p>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 2, "\"><link rel=\"stylesheet\" href=\"/assets/templui.css\"></head><body class=\"bg-background text-foreground min-h-screen p-4 space-y-4\"><h1 class=\"text-lg font-semibold\">System Prompt</h1><p class=\"text-sm text-muted-foreground\">Injecte un prompt système fixe dans les messages de requête LLM. En mode \"remplacer\", les éventuels messages système du client sont supprimés ; en mode \"ajouter\", le premier message système du client (s'il existe) est concaténé.</p>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
