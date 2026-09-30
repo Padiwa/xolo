@@ -64,16 +64,24 @@ func TestPreRequest_ReplaceMode_DropsExistingSystemMessages(t *testing.T) {
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages (configured system + user), got %d: %v", len(msgs), msgs)
 	}
-	if msgs[0]["role"] != "system" || msgs[0]["content"] != "configured prompt" {
-		t.Errorf("expected first message to be the configured system prompt, got %#v", msgs[0])
+	if role, _ := msgs[0]["role"].(string); role != "system" {
+		t.Errorf("expected first message role to be system, got %#v", msgs[0])
 	}
-	if msgs[1]["role"] != "user" || msgs[1]["content"] != "hello" {
-		t.Errorf("expected the user message to follow, got %#v", msgs[1])
+	if content, _ := msgs[0]["content"].(string); content != "configured prompt" {
+		t.Errorf("expected first message content to be the configured prompt, got %#v", msgs[0])
+	}
+	if role, _ := msgs[1]["role"].(string); role != "user" {
+		t.Errorf("expected second message role to be user, got %#v", msgs[1])
+	}
+	if content, _ := msgs[1]["content"].(string); content != "hello" {
+		t.Errorf("expected second message content to be hello, got %#v", msgs[1])
 	}
 
 	for i, m := range msgs {
-		if m["role"] == "system" && m["content"] == "client-provided prompt" {
-			t.Errorf("system message at index %d should have been replaced, got %#v", i, m)
+		if role, _ := m["role"].(string); role == "system" {
+			if content, _ := m["content"].(string); content == "client-provided prompt" {
+				t.Errorf("system message at index %d should have been replaced, got %#v", i, m)
+			}
 		}
 	}
 }
@@ -91,9 +99,9 @@ func TestPreRequest_ReplaceMode_HandlesMultipleExistingSystemMessages(t *testing
 
 	systemCount := 0
 	for _, m := range msgs {
-		if m["role"] == "system" {
+		if role, _ := m["role"].(string); role == "system" {
 			systemCount++
-			if m["content"] != "configured prompt" {
+			if content, _ := m["content"].(string); content != "configured prompt" {
 				t.Errorf("expected only the configured system prompt, got %#v", m)
 			}
 		}
@@ -115,7 +123,10 @@ func TestPreRequest_ReplaceMode_NoExistingSystem(t *testing.T) {
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d: %v", len(msgs), msgs)
 	}
-	if msgs[0]["role"] != "system" || msgs[0]["content"] != "configured prompt" {
+	if role, _ := msgs[0]["role"].(string); role != "system" {
+		t.Errorf("expected system role first, got %#v", msgs[0])
+	}
+	if content, _ := msgs[0]["content"].(string); content != "configured prompt" {
 		t.Errorf("expected configured system prompt first, got %#v", msgs[0])
 	}
 }
@@ -154,7 +165,41 @@ func TestPreRequest_AppendMode_NoExistingSystem(t *testing.T) {
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 messages, got %d: %v", len(msgs), msgs)
 	}
-	if msgs[0]["role"] != "system" || msgs[0]["content"] != "configured prompt" {
+	if role, _ := msgs[0]["role"].(string); role != "system" {
+		t.Errorf("expected system role first, got %#v", msgs[0])
+	}
+	if content, _ := msgs[0]["content"].(string); content != "configured prompt" {
 		t.Errorf("expected configured system prompt first, got %#v", msgs[0])
+	}
+}
+
+// TestPreRequest_AppendMode_OnlyMergesFirstSystemMessage pins the current
+// append-mode behaviour: when several client system messages are already
+// present, only the first one is merged with the configured prompt and any
+// subsequent system messages are left untouched. Tracked as a follow-up to
+// keep the scope of the replace-mode fix narrow.
+func TestPreRequest_AppendMode_OnlyMergesFirstSystemMessage(t *testing.T) {
+	input := mustMarshal(t, []map[string]string{
+		{"role": "system", "content": "first client prompt"},
+		{"role": "user", "content": "middle"},
+		{"role": "system", "content": "second client prompt"},
+	})
+	out := runPreRequest(t, `{"system_prompt":"configured prompt","append":true}`, input)
+	msgs := decodeMessages(t, out)
+
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %v", len(msgs), msgs)
+	}
+	if role, _ := msgs[0]["role"].(string); role != "system" {
+		t.Fatalf("expected first message to be system, got %#v", msgs[0])
+	}
+	if content, _ := msgs[0]["content"].(string); content != "first client prompt\n\nconfigured prompt" {
+		t.Errorf("expected first system message to be merged, got %#v", msgs[0])
+	}
+	if role, _ := msgs[2]["role"].(string); role != "system" {
+		t.Fatalf("expected third message to be system, got %#v", msgs[2])
+	}
+	if content, _ := msgs[2]["content"].(string); content != "second client prompt" {
+		t.Errorf("expected second client system prompt to be left untouched, got %#v", msgs[2])
 	}
 }
