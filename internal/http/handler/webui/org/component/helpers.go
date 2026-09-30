@@ -211,6 +211,57 @@ func budgetFieldValue(vmodel QuotaPageVModel, scope budgetScope) string {
 	return formatBudgetField(*budget)
 }
 
+// budgetInputValue resolves the value to display in a budget input. The
+// Submitted map wins over the stored quota, so a rejected re-render keeps
+// the operator's input verbatim (otherwise the form would appear to swallow
+// the bad value and the operator would have to re-type it from memory —
+// which is the exact failure mode that issue #88 describes for 0). A
+// missing or empty submitted entry falls back to the stored value, which
+// is the right behaviour for a fresh GET (no Submitted yet).
+func budgetInputValue(vmodel QuotaPageVModel, field string, scope budgetScope) string {
+	if vmodel.Submitted != nil {
+		if v, ok := vmodel.Submitted[field]; ok {
+			return v
+		}
+	}
+	return budgetFieldValue(vmodel, scope)
+}
+
+// quotaFieldError returns the field-level error message for a budget input,
+// or "" if the field parsed cleanly. The empty default keeps the templating
+// branch (HasError, form.Message) a single conditional.
+func quotaFieldError(fieldErrors map[string]string, field string) string {
+	if fieldErrors == nil {
+		return ""
+	}
+	return fieldErrors[field]
+}
+
+// quotaFormErrorSummary builds the top-of-form alert description: one line
+// per offending field, prefixed with its label. The alert itself is rendered
+// by the template; this helper only formats the prose so the error copy
+// stays in one place and tests can pin it.
+func quotaFormErrorSummary(fieldErrors map[string]string) string {
+	if len(fieldErrors) == 0 {
+		return ""
+	}
+	labels := map[string]string{
+		"daily_budget":   "Journalier",
+		"monthly_budget": "Mensuel",
+		"yearly_budget":  "Annuel",
+	}
+	// Stable order matches the form layout (daily → monthly → yearly), so
+	// the alert reads top-to-bottom the same way the inputs do.
+	order := []string{"daily_budget", "monthly_budget", "yearly_budget"}
+	var lines []string
+	for _, f := range order {
+		if msg, ok := fieldErrors[f]; ok {
+			lines = append(lines, fmt.Sprintf("%s : %s", labels[f], msg))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // cachedTokensNote states the share of prompt tokens served from the provider's
 // cache — the figure that explains a token count far above the billed cost.
 func cachedTokensNote(agg *port.UsageAggregate) string {
