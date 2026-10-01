@@ -41,9 +41,12 @@ func (s *stubQuotaStore) GetQuota(_ context.Context, scope model.QuotaScope, _ s
 }
 
 func (s *stubQuotaStore) SetQuota(_ context.Context, q model.Quota) error {
+	if s.err != nil {
+		return s.err
+	}
 	s.quota = q
 	s.quotaScope = q.Scope()
-	return s.err
+	return nil
 }
 
 func (s *stubQuotaStore) ResolveEffectiveQuota(context.Context, model.UserID, model.OrgID) (*model.EffectiveQuota, error) {
@@ -148,9 +151,14 @@ func TestGetApplicationQuotaPage(t *testing.T) {
 				quota: model.NewQuota(model.QuotaScopeApplication, "acme-app", "EUR", &daily, nil, nil),
 			},
 			wantStatus: http.StatusOK,
+			// formatBudgetField(60_000) → "0.06" (microcents / 1_000_000).
+			// Pinning the rendered value catches a regression that drops the
+			// stored budget on the GET path (the matching failure mode for
+			// the re-render helper on POST, fixed together under #88).
 			wantInBody: []string{
 				"Budget de l&#39;application",
 				"daily_budget",
+				`value="0.06"`,
 			},
 			wantNotBody: []string{
 				"Budget indisponible",
@@ -292,7 +300,7 @@ func TestParseBudgetField(t *testing.T) {
 	// 1_000_000 to get microcents. The largest representable input is the
 	// one that, scaled by 1_000_000, just fits in int64 — that is
 	// math.MaxInt64 / 1_000_000, rounded down to the nearest whole unit.
-	maxBudgetUnits := int64(math.MaxInt64 / 1_000_000) // ≈ 9_223_372_036
+	maxBudgetUnits := int64(math.MaxInt64 / 1_000_000) // 9_223_372_036_854
 	mc := func(v int64) *int64 { return &v }
 
 	tests := []struct {
@@ -317,6 +325,7 @@ func TestParseBudgetField(t *testing.T) {
 		// precision for values in the trillions, so the assertion compares
 		// the expected *units* (which are still exact) rather than the
 		// int64 microcent output.
+		{name: "value at the integer cap is accepted", input: strconv.FormatInt(maxBudgetUnits, 10), wantExact: nil},
 		{name: "value above the integer cap is rejected", input: strconv.FormatInt(maxBudgetUnits+1, 10), wantErr: true},
 		{name: "scientific notation above the cap is rejected", input: "1e16", wantErr: true},
 		{name: "scientific notation within int64 range is accepted", input: "1e9", wantExact: nil}, // 1e15 microcents, well within int64
@@ -576,8 +585,6 @@ func TestSaveOrgQuotaBadValueDoesNotOverwriteBudget(t *testing.T) {
 }
 
 // TestSaveMemberQuotaBadValueDoesNotOverwriteBudget is the per-member mirror
-
-// TestSaveMemberQuotaBadValueDoesNotOverwriteBudget is the per-member mirror
 // of the application regression test. It exercises the per-member loader
 // and the member-specific breadcrumbs, which diverge from the org helper.
 func TestSaveMemberQuotaBadValueDoesNotOverwriteBudget(t *testing.T) {
@@ -709,5 +716,107 @@ func TestGetMemberQuotaPageForeignMembership(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 (foreign membership must look like a not-found)", rec.Code)
+	}
+}
+
+// TestSaveApplicationQuotaReRenderPreservesUnpostedFields is the regression
+// test for the silent-data-loss bug Conclave review #2 caught on PR #111:
+// when an operator submits only the field they want to edit (the others
+// are absent from the form), the re-render must show the stored values
+// for the unposted fields, and a follow-up save must preserve them.
+//
+// Before the fix, quotaFormSubmitted used r.FormValue which returns ""
+// for both absent and empty values, and budgetInputValue treated the
+// empty string as authoritative. The re-render blanked every unposted
+// field; the next submit stored nil (unlimited) for each, silently
+// wiping the budget the operator never touched.
+func TestSaveApplicationQuotaReRenderPreservesUnpostedFields(t *testing.T) {
+	org := model.NewOrganization("tenant", "acme", "Acme", "EUR")
+	app := model.NewApplication(org.ID(), "acme-app", "", true)
+
+	daily := int64(5_000_000)    // 5.00
+	monthly := int64(40_000_000) // 40.00
+	yearly := int64(200_000_000) // 200.00
+	existing := model.NewQuota(model.QuotaScopeApplication, string(app.ID()), "EUR", &daily, &monthly, &yearly)
+	qStore := &stubQuotaStore{quota: existing, quotaScope: model.QuotaScopeApplication}
+
+	h := handlerWithStubs(org, app, qStore, &stubUsageStore{})
+
+	// Operator only typed into daily (bad value), left monthly and yearly
+	// out of the form entirely. The form's min="0" + browser validation
+	// would normally block this, but a hand-crafted POST reproduces the
+	// exact regression path.
+	form := url.Values{}
+	form.Set("daily_budget", "abc")
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.SetPathValue("orgSlug", org.Slug())
+	r.SetPathValue("appID", string(app.ID()))
+	base, _ := url.Parse("http://example.test")
+	r = r.WithContext(httpCtx.SetBaseURL(r.Context(), base.String()))
+
+	rec := httptest.NewRecorder()
+	h.saveApplicationQuota(rec, r)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", rec.Code)
+	}
+	body := rec.Body.String()
+
+	// (a) The bad value is echoed in the daily field.
+	if !strings.Contains(body, `value="abc"`) {
+		t.Errorf("re-rendered form does not echo the operator's typed abc in daily; got body:\n%s", body)
+	}
+	// (b) The stored monthly and yearly values are re-rendered, not blank.
+	// formatBudgetField returns the value in whole units: 40.00 and 200.00.
+	for _, want := range []string{`value="40"`, `value="200"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("re-rendered form is missing %q; the stored value was wiped by the re-render", want)
+		}
+	}
+	// (c) The store was not touched.
+	if qStore.quota != existing {
+		t.Errorf("store quota pointer changed; SetQuota was called on a rejected submit")
+	}
+
+	// Now simulate the operator fixing daily and resubmitting. With the
+	// fix, monthly=40 and yearly=200 survive because the re-render did
+	// not blank them and parseQuotaBudgetFields sees them via
+	// budgetFieldValue (no Submitted entry, falls back to stored).
+	fixForm := url.Values{}
+	fixForm.Set("daily_budget", "7")
+	fixForm.Set("monthly_budget", "40")
+	fixForm.Set("yearly_budget", "200")
+	r2 := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(fixForm.Encode()))
+	r2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r2.SetPathValue("orgSlug", org.Slug())
+	r2.SetPathValue("appID", string(app.ID()))
+
+	rec2 := httptest.NewRecorder()
+	h.saveApplicationQuota(rec2, r2)
+
+	if rec2.Code != http.StatusSeeOther {
+		t.Fatalf("follow-up save: status = %d, want 303", rec2.Code)
+	}
+	if qStore.quota.DailyBudget() == nil || *qStore.quota.DailyBudget() != 7_000_000 {
+		var got int64
+		if qStore.quota.DailyBudget() != nil {
+			got = *qStore.quota.DailyBudget()
+		}
+		t.Errorf("follow-up save daily budget = %d, want 7_000_000", got)
+	}
+	if qStore.quota.MonthlyBudget() == nil || *qStore.quota.MonthlyBudget() != monthly {
+		var got int64
+		if qStore.quota.MonthlyBudget() != nil {
+			got = *qStore.quota.MonthlyBudget()
+		}
+		t.Errorf("follow-up save wiped monthly: got %d, want %d (stored value must survive)", got, monthly)
+	}
+	if qStore.quota.YearlyBudget() == nil || *qStore.quota.YearlyBudget() != yearly {
+		var got int64
+		if qStore.quota.YearlyBudget() != nil {
+			got = *qStore.quota.YearlyBudget()
+		}
+		t.Errorf("follow-up save wiped yearly: got %d, want %d (stored value must survive)", got, yearly)
 	}
 }

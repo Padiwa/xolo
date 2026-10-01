@@ -130,16 +130,30 @@ func (h *Handler) saveOrgQuota(w http.ResponseWriter, r *http.Request) {
 
 // membershipFromQuotaPath loads the org from the URL slug, then the
 // membership from the URL id, and asserts the membership belongs to the
-// org. A mismatch is reported as port.ErrNotFound so callers answer 404
-// rather than confirming the membership exists elsewhere.
+// org. Returns:
 //
-// port.OrgStore.GetMembership is keyed by membership id alone, so without
-// this check the route's permission gate on the URL org is not enough to
-// stop an operator with PermQuotaWrite on one org from writing a
-// QuotaScopeUser row that affects every org the target user belongs to
-// (QuotaStore.GetQuota is filtered on scope+scope_id with no org column).
-// resolveOrgAndApplication implements the same pattern for applications;
-// the member path needs to do it explicitly.
+//   - org not found: orgFromSlug's error (typically port.ErrNotFound).
+//     The caller answers 404 with "Organization not found".
+//
+//   - membership not found: h.orgStore.GetMembership's error (typically
+//     port.ErrNotFound). The caller answers 404 with "Membership not
+//     found".
+//
+//   - membership belongs to another org: wrapped port.ErrNotFound. The
+//     caller answers 404 with "Membership not found" (the operator must
+//     not learn whether the membership exists in another org of the
+//     same tenant — this matches the resolveOrgAndApplication pattern
+//     where a foreign app also looks like a not-found).
+//
+// What this check does NOT cover: a user who legitimately belongs to
+// several orgs of the same tenant. QuotaStore keys user quotas by userID
+// alone (no org column on the Quota model), so an admin of org A can
+// still set or freeze the shared budget the enforcer applies to that
+// user in org B. That is a model-level property of QuotaScopeUser and
+// would need either (a) scoping Quota by (orgID, userID) end-to-end
+// (model, store, service, enforcer, migration) or (b) refusing to edit
+// a user quota from any membership when the user has memberships in
+// other orgs. Both are out of scope for issue #88.
 func (h *Handler) membershipFromQuotaPath(ctx context.Context, orgSlug, membershipID string) (model.Organization, model.Membership, error) {
 	org, err := h.orgFromSlug(ctx, orgSlug)
 	if err != nil {
@@ -163,7 +177,11 @@ func (h *Handler) getMemberQuotaPage(w http.ResponseWriter, r *http.Request) {
 
 	org, membership, err := h.membershipFromQuotaPath(ctx, orgSlug, membershipID)
 	if err != nil {
-		if errors.Is(err, port.ErrNotFound) {
+		switch {
+		case errors.Is(err, port.ErrNotFound) && org == nil:
+			http.Error(w, "Organization not found", http.StatusNotFound)
+			return
+		case errors.Is(err, port.ErrNotFound):
 			http.Error(w, "Membership not found", http.StatusNotFound)
 			return
 		}
@@ -240,7 +258,11 @@ func (h *Handler) saveMemberQuota(w http.ResponseWriter, r *http.Request) {
 
 	org, membership, err := h.membershipFromQuotaPath(ctx, orgSlug, membershipID)
 	if err != nil {
-		if errors.Is(err, port.ErrNotFound) {
+		switch {
+		case errors.Is(err, port.ErrNotFound) && org == nil:
+			http.Error(w, "Organization not found", http.StatusNotFound)
+			return
+		case errors.Is(err, port.ErrNotFound):
 			http.Error(w, "Membership not found", http.StatusNotFound)
 			return
 		}
@@ -428,15 +450,28 @@ func parseQuotaBudgetFields(r *http.Request) (daily, monthly, yearly *int64, fie
 }
 
 // quotaFormSubmitted picks the raw string the operator typed out of the
-// POSTed form. The form re-renders with these values rather than the stored
-// quota, so a rejected value does not silently vanish and the next save can
-// be a fix-up of the same input rather than a re-typing from memory.
+// POSTed form, one entry per *present* budget field. The form re-renders
+// with these values rather than the stored quota, so a rejected value
+// does not silently vanish and the next save can be a fix-up of the same
+// input rather than a re-typing from memory.
+//
+// Reading from r.Form (not r.FormValue) is what makes this distinction
+// work: r.FormValue returns "" for both an absent key and a present-but-
+// empty value, and treating them as the same erases the stored budget for
+// every field the operator did not re-submit. With r.Form, an absent key
+// means the operator did not touch that field and budgetInputValue falls
+// back to the stored value; a present key with an empty string means the
+// operator cleared the field intentionally and the re-render keeps it
+// empty. Conflating the two was the silent-data-loss regression Conclave
+// review #2 caught (issue #88).
 func quotaFormSubmitted(r *http.Request) map[string]string {
-	return map[string]string{
-		"daily_budget":   r.FormValue("daily_budget"),
-		"monthly_budget": r.FormValue("monthly_budget"),
-		"yearly_budget":  r.FormValue("yearly_budget"),
+	submitted := make(map[string]string, 3)
+	for _, field := range []string{"daily_budget", "monthly_budget", "yearly_budget"} {
+		if values, ok := r.Form[field]; ok && len(values) > 0 {
+			submitted[field] = values[0]
+		}
 	}
+	return submitted
 }
 
 // quotaSpendLoader abstracts the three ways the quota editor reads the
@@ -525,7 +560,7 @@ type quotaFormConfig struct {
 // separately and combined into a single banner, matching the GET path:
 // dropping one to surface the other would hide a real store failure
 // from the operator.
-func (h *Handler) renderQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, cfg quotaFormConfig, fieldErrors map[string]string) {
+func (h *Handler) renderQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, org model.Organization, cfg quotaFormConfig, fieldErrors map[string]string) {
 	existing, err := h.quotaStore.GetQuota(ctx, cfg.Scope, cfg.ScopeID)
 	budgetLoadError := ""
 	if err != nil && !errors.Is(err, port.ErrNotFound) {
@@ -594,7 +629,7 @@ func (h *Handler) renderQuotaFormError(w http.ResponseWriter, r *http.Request, c
 // renderOrgQuotaFormError re-renders the org quota editor when validation
 // fails on POST. See renderQuotaFormError for the shared body.
 func (h *Handler) renderOrgQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, fieldErrors map[string]string) {
-	h.renderQuotaFormError(w, r, ctx, user, orgSlug, org, quotaFormConfig{
+	h.renderQuotaFormError(w, r, ctx, user, org, quotaFormConfig{
 		Scope:        model.QuotaScopeOrg,
 		ScopeID:      string(org.ID()),
 		SelectedItem: "org-" + orgSlug + "-quota",
@@ -615,7 +650,7 @@ func (h *Handler) renderOrgQuotaFormError(w http.ResponseWriter, r *http.Request
 // membership id alone, so a foreign membership would let an operator
 // rewrite another org's per-user budget.
 func (h *Handler) renderMemberQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, membership model.Membership, fieldErrors map[string]string) {
-	h.renderQuotaFormError(w, r, ctx, user, orgSlug, org, quotaFormConfig{
+	h.renderQuotaFormError(w, r, ctx, user, org, quotaFormConfig{
 		Scope:        model.QuotaScopeUser,
 		ScopeID:      string(membership.UserID()),
 		Membership:   membership,
@@ -637,7 +672,7 @@ func (h *Handler) renderMemberQuotaFormError(w http.ResponseWriter, r *http.Requ
 // editor when validation fails on POST (issue #64).
 func (h *Handler) renderApplicationQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, app model.Application, fieldErrors map[string]string) {
 	appID := string(app.ID())
-	h.renderQuotaFormError(w, r, ctx, user, orgSlug, org, quotaFormConfig{
+	h.renderQuotaFormError(w, r, ctx, user, org, quotaFormConfig{
 		Scope:        model.QuotaScopeApplication,
 		ScopeID:      appID,
 		Application:  app,
