@@ -55,6 +55,21 @@ func newPAYGRecord(userID model.UserID, orgID model.OrgID, cost int64) *model.Ba
 		"fast", "", 10, 0, 10, cost, "USD", model.CostSourceComputed, "")
 }
 
+// datedRecord pins a record's CreatedAt() without exposing a mutation setter on
+// the domain type. quotaSumCacheKeysFor and quotaUsageRows both derive their
+// day/month/year windows from record.CreatedAt(), and fromUsageRecord does not
+// persist it (GORM stamps created_at at insert time), so a public SetCreatedAt
+// would let production callers split the cache windows from the persisted
+// counter day. The wrapper is enough because RecordUsage and
+// quotaSumCacheKeysFor take the model.UsageRecord interface, and every other
+// method forwards to the wrapped value.
+type datedRecord struct {
+	model.UsageRecord
+	at time.Time
+}
+
+func (r datedRecord) CreatedAt() time.Time { return r.at }
+
 func TestUsageStore_CachesBudgetTotals(t *testing.T) {
 	ctx := context.Background()
 	backend := &countingUsageStore{total: 5_000}
@@ -110,8 +125,7 @@ func TestUsageStore_RecordUsageUpdatesCachedTotals(t *testing.T) {
 	}
 
 	record := newPAYGRecord("user-1", "org-1", 250)
-	record.SetCreatedAt(midMonth)
-	if err := store.RecordUsage(ctx, record); err != nil {
+	if err := store.RecordUsage(ctx, datedRecord{record, midMonth}); err != nil {
 		t.Fatalf("RecordUsage: %v", err)
 	}
 
@@ -190,10 +204,9 @@ func TestUsageStore_KeysFollowThePrincipalOnTheRecord(t *testing.T) {
 	// id in UserID, the application's own id alongside.
 	shadow := model.NewUsageRecord("usr-shadow-app-1", "app-1", "org-1", "provider", "llm-model",
 		"fast", "", 10, 0, 10, 700, "USD", model.CostSourceComputed, "")
-	shadow.SetCreatedAt(midMonth)
 
-	day := model.StartOfDay(shadow.CreatedAt())
-	keys := quotaSumCacheKeysFor(shadow)
+	day := model.StartOfDay(midMonth)
+	keys := quotaSumCacheKeysFor(datedRecord{shadow, midMonth})
 	if len(keys) != 6 {
 		t.Errorf("keys = %v, want three organization windows and three application windows, no shadow-user windows", keys)
 	}
@@ -207,7 +220,7 @@ func TestUsageStore_KeysFollowThePrincipalOnTheRecord(t *testing.T) {
 		t.Errorf("keys = %v, want no total under the shadow user", keys)
 	}
 
-	if err := store.RecordUsage(ctx, shadow); err != nil {
+	if err := store.RecordUsage(ctx, datedRecord{shadow, midMonth}); err != nil {
 		t.Fatalf("RecordUsage: %v", err)
 	}
 
@@ -215,8 +228,7 @@ func TestUsageStore_KeysFollowThePrincipalOnTheRecord(t *testing.T) {
 	// directly without an auth context — feeds the organization windows only.
 	orphan := model.NewUsageRecord("", "", "org-1", "provider", "llm-model",
 		"fast", "", 10, 0, 10, 700, "USD", model.CostSourceComputed, "")
-	orphan.SetCreatedAt(midMonth)
-	if keys := quotaSumCacheKeysFor(orphan); len(keys) != 3 {
+	if keys := quotaSumCacheKeysFor(datedRecord{orphan, midMonth}); len(keys) != 3 {
 		t.Errorf("keys = %v, want the three organization windows only", keys)
 	}
 }
@@ -283,8 +295,7 @@ func TestUsageStore_DropsTotalReadBeforeAConcurrentRecord(t *testing.T) {
 	// The read has fetched nothing yet; record while it is held open.
 	<-backend.entered
 	record := newPAYGRecord("user-1", "org-1", 250)
-	record.SetCreatedAt(midMonth)
-	if err := store.RecordUsage(ctx, record); err != nil {
+	if err := store.RecordUsage(ctx, datedRecord{record, midMonth}); err != nil {
 		t.Fatalf("RecordUsage: %v", err)
 	}
 	backend.release <- struct{}{}
@@ -337,8 +348,7 @@ func TestUsageStore_DropsApplicationTotalReadBeforeAConcurrentRecord(t *testing.
 	// application counter): application scope id, no user id.
 	record := model.NewUsageRecord("", "app-1", "org-1", "provider", "llm-model",
 		"fast", "", 10, 0, 10, 250, "USD", model.CostSourceComputed, "")
-	record.SetCreatedAt(midMonth)
-	if err := store.RecordUsage(ctx, record); err != nil {
+	if err := store.RecordUsage(ctx, datedRecord{record, midMonth}); err != nil {
 		t.Fatalf("RecordUsage: %v", err)
 	}
 	backend.release <- struct{}{}
@@ -391,8 +401,7 @@ func TestUsageStore_KeepsTotalReadWithoutConcurrentRecord(t *testing.T) {
 	// total stays exact without going back to the backend. Pin its timestamp
 	// to mid-month so the three budget windows stay distinct.
 	record := newPAYGRecord("user-1", "org-1", 250)
-	record.SetCreatedAt(midMonth)
-	if err := store.RecordUsage(ctx, record); err != nil {
+	if err := store.RecordUsage(ctx, datedRecord{record, midMonth}); err != nil {
 		t.Fatalf("RecordUsage: %v", err)
 	}
 
@@ -429,8 +438,7 @@ func TestUsageStore_ConcurrentReadsAndRecords(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < records; i++ {
 			record := newPAYGRecord("user-1", "org-1", 10)
-			record.SetCreatedAt(midMonth)
-			if err := store.RecordUsage(ctx, record); err != nil {
+			if err := store.RecordUsage(ctx, datedRecord{record, midMonth}); err != nil {
 				t.Errorf("RecordUsage: %v", err)
 				return
 			}
@@ -487,8 +495,7 @@ func TestUsageStore_RecordUsageAppliesOnceWhenDayAndMonthCollide(t *testing.T) {
 	}
 
 	record := newPAYGRecord("user-1", "org-1", 250)
-	record.SetCreatedAt(firstOfMonth)
-	if err := store.RecordUsage(ctx, record); err != nil {
+	if err := store.RecordUsage(ctx, datedRecord{record, firstOfMonth}); err != nil {
 		t.Fatalf("RecordUsage: %v", err)
 	}
 
@@ -554,8 +561,7 @@ func TestUsageStore_RecordUsageAppliesOnceWhenAllWindowsCollide(t *testing.T) {
 	}
 
 	record := newPAYGRecord("user-1", "org-1", 250)
-	record.SetCreatedAt(newYear)
-	if err := store.RecordUsage(ctx, record); err != nil {
+	if err := store.RecordUsage(ctx, datedRecord{record, newYear}); err != nil {
 		t.Fatalf("RecordUsage: %v", err)
 	}
 
@@ -575,7 +581,7 @@ func TestUsageStore_RecordUsageAppliesOnceWhenAllWindowsCollide(t *testing.T) {
 	}
 
 	// All three windows collapse into a single user/org pair.
-	keys := quotaSumCacheKeysFor(record)
+	keys := quotaSumCacheKeysFor(datedRecord{record, newYear})
 	if len(keys) != 2 {
 		t.Errorf("keys = %v, want 2 (user + org): day, month and year must produce the same key", keys)
 	}
@@ -604,8 +610,7 @@ func TestUsageStore_RecordUsageStillUpdatesThreeWindowsMidMonth(t *testing.T) {
 	}
 
 	record := newPAYGRecord("user-1", "org-1", 250)
-	record.SetCreatedAt(midMonth)
-	if err := store.RecordUsage(ctx, record); err != nil {
+	if err := store.RecordUsage(ctx, datedRecord{record, midMonth}); err != nil {
 		t.Fatalf("RecordUsage: %v", err)
 	}
 
@@ -635,7 +640,7 @@ func TestUsageStore_RecordUsageStillUpdatesThreeWindowsMidMonth(t *testing.T) {
 	}
 
 	// Three distinct starts, two scopes (user + org) each: six keys.
-	keys := quotaSumCacheKeysFor(record)
+	keys := quotaSumCacheKeysFor(datedRecord{record, midMonth})
 	if len(keys) != 6 {
 		t.Errorf("keys = %v, want 6 (three windows × user + org): the dedup must not collapse distinct windows", keys)
 	}
