@@ -193,10 +193,20 @@ func quotaSumCacheKeysFor(record model.UsageRecord) []string {
 	}
 
 	createdAt := record.CreatedAt()
-	starts := []time.Time{
+	// On the 1st of a month StartOfDay equals StartOfMonth, and on 1 January
+	// it equals StartOfYear too. Without this guard the list of keys would
+	// hold the same entry twice (or three times on new year's day) and
+	// RecordUsage would increment the cached total once per duplicate.
+	starts := make([]time.Time, 0, 3)
+	for _, start := range []time.Time{
 		model.StartOfDay(createdAt),
 		model.StartOfMonth(createdAt),
 		model.StartOfYear(createdAt),
+	} {
+		if len(starts) > 0 && start.Equal(starts[len(starts)-1]) {
+			continue
+		}
+		starts = append(starts, start)
 	}
 
 	appID := record.ApplicationID()

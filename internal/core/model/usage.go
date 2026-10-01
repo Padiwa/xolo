@@ -153,6 +153,11 @@ func (r *BaseUsageRecord) SetPlanCovered(v bool)         { r.planCovered = v }
 func (r *BaseUsageRecord) SetProviderCost(v int64)       { r.providerCost = v }
 func (r *BaseUsageRecord) SetStatus(v UsageStatus)       { r.status = v }
 
+// SetCreatedAt overrides the record's timestamp. It exists so tests can pin
+// a record to a specific window without having to manipulate the wall clock:
+// callers in production always let NewUsageRecord set createdAt to time.Now().
+func (r *BaseUsageRecord) SetCreatedAt(v time.Time) { r.createdAt = v }
+
 var _ UsageRecord = &BaseUsageRecord{}
 
 func NewUsageRecord(

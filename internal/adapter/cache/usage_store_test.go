@@ -60,7 +60,12 @@ func TestUsageStore_CachesBudgetTotals(t *testing.T) {
 	backend := &countingUsageStore{total: 5_000}
 	store := NewUsageStore(backend, NewMemoryCache(64), time.Minute)
 
-	since := model.StartOfDay(time.Now())
+	// Pin both windows to fixed mid-month values. On 1 January StartOfDay and
+	// StartOfYear return the same instant, the two SumQuotaCostSince calls
+	// would hit the same cache entry, and the readCount assertion below would
+	// fire on the very date the dedup regression test targets.
+	midMonth := time.Date(2025, time.March, 15, 12, 0, 0, 0, time.UTC)
+	since := model.StartOfDay(midMonth)
 	for i := 0; i < 3; i++ {
 		total, err := store.SumQuotaCostSince(ctx, model.QuotaScopeOrg, "org-1", "org-1", since)
 		if err != nil {
@@ -75,7 +80,7 @@ func TestUsageStore_CachesBudgetTotals(t *testing.T) {
 	}
 
 	// A different window is a different entry, not a cache hit.
-	if _, err := store.SumQuotaCostSince(ctx, model.QuotaScopeOrg, "org-1", "org-1", model.StartOfYear(time.Now())); err != nil {
+	if _, err := store.SumQuotaCostSince(ctx, model.QuotaScopeOrg, "org-1", "org-1", model.StartOfYear(midMonth)); err != nil {
 		t.Fatalf("SumQuotaCostSince (year): %v", err)
 	}
 	if backend.readCount() != 2 {
@@ -91,7 +96,12 @@ func TestUsageStore_RecordUsageUpdatesCachedTotals(t *testing.T) {
 	backend := &countingUsageStore{total: 1_000}
 	store := NewUsageStore(backend, NewMemoryCache(64), time.Minute)
 
-	since := model.StartOfDay(time.Now())
+	// Pin the record's timestamp to the middle of a month so the day, month
+	// and year windows are distinct. On the 1st of a month StartOfDay equals
+	// StartOfMonth (and on 1 January, StartOfYear too), which is the case the
+	// dedup regression tests cover below; here we want a baseline.
+	midMonth := time.Date(2025, time.March, 15, 12, 0, 0, 0, time.UTC)
+	since := model.StartOfDay(midMonth)
 	if _, err := store.SumQuotaCostSince(ctx, model.QuotaScopeUser, "user-1", "org-1", since); err != nil {
 		t.Fatalf("SumQuotaCostSince: %v", err)
 	}
@@ -99,7 +109,9 @@ func TestUsageStore_RecordUsageUpdatesCachedTotals(t *testing.T) {
 		t.Fatalf("SumQuotaCostSince (org): %v", err)
 	}
 
-	if err := store.RecordUsage(ctx, newPAYGRecord("user-1", "org-1", 250)); err != nil {
+	record := newPAYGRecord("user-1", "org-1", 250)
+	record.SetCreatedAt(midMonth)
+	if err := store.RecordUsage(ctx, record); err != nil {
 		t.Fatalf("RecordUsage: %v", err)
 	}
 
@@ -168,10 +180,17 @@ func TestUsageStore_KeysFollowThePrincipalOnTheRecord(t *testing.T) {
 	backend := &countingUsageStore{}
 	store := NewUsageStore(backend, NewMemoryCache(64), time.Minute)
 
+	// Pin the record's timestamp to mid-month so the day, month and year
+	// windows stay distinct. On the 1st of a month some of those windows
+	// collapse and the assertion below would catch a healthy deduplication as
+	// a regression.
+	midMonth := time.Date(2025, time.March, 15, 12, 0, 0, 0, time.UTC)
+
 	// An application call as the auth extractor produces it: the shadow user's
 	// id in UserID, the application's own id alongside.
 	shadow := model.NewUsageRecord("usr-shadow-app-1", "app-1", "org-1", "provider", "llm-model",
 		"fast", "", 10, 0, 10, 700, "USD", model.CostSourceComputed, "")
+	shadow.SetCreatedAt(midMonth)
 
 	day := model.StartOfDay(shadow.CreatedAt())
 	keys := quotaSumCacheKeysFor(shadow)
@@ -196,6 +215,7 @@ func TestUsageStore_KeysFollowThePrincipalOnTheRecord(t *testing.T) {
 	// directly without an auth context — feeds the organization windows only.
 	orphan := model.NewUsageRecord("", "", "org-1", "provider", "llm-model",
 		"fast", "", 10, 0, 10, 700, "USD", model.CostSourceComputed, "")
+	orphan.SetCreatedAt(midMonth)
 	if keys := quotaSumCacheKeysFor(orphan); len(keys) != 3 {
 		t.Errorf("keys = %v, want the three organization windows only", keys)
 	}
@@ -245,7 +265,11 @@ func TestUsageStore_DropsTotalReadBeforeAConcurrentRecord(t *testing.T) {
 		blockOne: true,
 	}
 	store := NewUsageStore(backend, NewMemoryCache(64), time.Minute)
-	since := model.StartOfDay(time.Now())
+	// Pin the record's timestamp to mid-month so day, month and year stay
+	// distinct; on the 1st of a month those windows collapse and the
+	// dedup regression tests would mask this one.
+	midMonth := time.Date(2025, time.March, 15, 12, 0, 0, 0, time.UTC)
+	since := model.StartOfDay(midMonth)
 
 	read := make(chan int64)
 	go func() {
@@ -258,7 +282,9 @@ func TestUsageStore_DropsTotalReadBeforeAConcurrentRecord(t *testing.T) {
 
 	// The read has fetched nothing yet; record while it is held open.
 	<-backend.entered
-	if err := store.RecordUsage(ctx, newPAYGRecord("user-1", "org-1", 250)); err != nil {
+	record := newPAYGRecord("user-1", "org-1", 250)
+	record.SetCreatedAt(midMonth)
+	if err := store.RecordUsage(ctx, record); err != nil {
 		t.Fatalf("RecordUsage: %v", err)
 	}
 	backend.release <- struct{}{}
@@ -292,7 +318,10 @@ func TestUsageStore_DropsApplicationTotalReadBeforeAConcurrentRecord(t *testing.
 		blockOne: true,
 	}
 	store := NewUsageStore(backend, NewMemoryCache(64), time.Minute)
-	since := model.StartOfDay(time.Now())
+	// Pin the record's timestamp to mid-month so day, month and year stay
+	// distinct.
+	midMonth := time.Date(2025, time.March, 15, 12, 0, 0, 0, time.UTC)
+	since := model.StartOfDay(midMonth)
 
 	read := make(chan int64)
 	go func() {
@@ -308,6 +337,7 @@ func TestUsageStore_DropsApplicationTotalReadBeforeAConcurrentRecord(t *testing.
 	// application counter): application scope id, no user id.
 	record := model.NewUsageRecord("", "app-1", "org-1", "provider", "llm-model",
 		"fast", "", 10, 0, 10, 250, "USD", model.CostSourceComputed, "")
+	record.SetCreatedAt(midMonth)
 	if err := store.RecordUsage(ctx, record); err != nil {
 		t.Fatalf("RecordUsage: %v", err)
 	}
@@ -339,7 +369,11 @@ func TestUsageStore_KeepsTotalReadWithoutConcurrentRecord(t *testing.T) {
 		blockOne: true,
 	}
 	store := NewUsageStore(backend, NewMemoryCache(64), time.Minute)
-	since := model.StartOfDay(time.Now())
+	// Pin the read's window to the middle of a month so day, month and year
+	// stays are distinct: the regression tests below cover the 1st-of-month
+	// and 1 January cases where some of those windows collapse.
+	midMonth := time.Date(2025, time.March, 15, 12, 0, 0, 0, time.UTC)
+	since := model.StartOfDay(midMonth)
 
 	read := make(chan struct{})
 	go func() {
@@ -354,8 +388,11 @@ func TestUsageStore_KeepsTotalReadWithoutConcurrentRecord(t *testing.T) {
 	<-read
 
 	// A record landing after the read was stored is applied in place, so the
-	// total stays exact without going back to the backend.
-	if err := store.RecordUsage(ctx, newPAYGRecord("user-1", "org-1", 250)); err != nil {
+	// total stays exact without going back to the backend. Pin its timestamp
+	// to mid-month so the three budget windows stay distinct.
+	record := newPAYGRecord("user-1", "org-1", 250)
+	record.SetCreatedAt(midMonth)
+	if err := store.RecordUsage(ctx, record); err != nil {
 		t.Fatalf("RecordUsage: %v", err)
 	}
 
@@ -377,7 +414,11 @@ func TestUsageStore_ConcurrentReadsAndRecords(t *testing.T) {
 	ctx := context.Background()
 	backend := &countingUsageStore{}
 	store := NewUsageStore(backend, NewMemoryCache(64), time.Minute)
-	since := model.StartOfDay(time.Now())
+	// Pin the record's timestamp to mid-month so day, month and year stay
+	// distinct; otherwise the same window-collapse would inflate the total
+	// and the sanity check below would fire on the 1st of a month.
+	midMonth := time.Date(2025, time.March, 15, 12, 0, 0, 0, time.UTC)
+	since := model.StartOfDay(midMonth)
 
 	const records = 200
 
@@ -387,7 +428,9 @@ func TestUsageStore_ConcurrentReadsAndRecords(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < records; i++ {
-			if err := store.RecordUsage(ctx, newPAYGRecord("user-1", "org-1", 10)); err != nil {
+			record := newPAYGRecord("user-1", "org-1", 10)
+			record.SetCreatedAt(midMonth)
+			if err := store.RecordUsage(ctx, record); err != nil {
 				t.Errorf("RecordUsage: %v", err)
 				return
 			}
@@ -410,4 +453,190 @@ func TestUsageStore_ConcurrentReadsAndRecords(t *testing.T) {
 	}()
 
 	wg.Wait()
+}
+
+// TestUsageStore_RecordUsageAppliesOnceWhenDayAndMonthCollide pins the
+// regression: on the 1st of a month StartOfDay equals StartOfMonth, so a
+// record dated that day must apply its cost exactly once to the day total
+// and exactly once to the month total, not twice to the same key. Before the
+// fix RecordUsage saw the same key twice in the list and AddInt64'd it
+// twice, inflating every cached total for the length of a TTL and rejecting
+// requests a fresh read would allow.
+func TestUsageStore_RecordUsageAppliesOnceWhenDayAndMonthCollide(t *testing.T) {
+	ctx := context.Background()
+	backend := &countingUsageStore{total: 1_000}
+	store := NewUsageStore(backend, NewMemoryCache(64), time.Minute)
+
+	firstOfMonth := time.Date(2025, time.October, 1, 0, 30, 0, 0, time.UTC)
+
+	// Prime the cache for the day window (which equals the month window) and
+	// for the year window, so the increments have somewhere to land.
+	day := model.StartOfDay(firstOfMonth)
+	if _, err := store.SumQuotaCostSince(ctx, model.QuotaScopeUser, "user-1", "org-1", day); err != nil {
+		t.Fatalf("SumQuotaCostSince (user/day): %v", err)
+	}
+	if _, err := store.SumQuotaCostSince(ctx, model.QuotaScopeOrg, "org-1", "org-1", day); err != nil {
+		t.Fatalf("SumQuotaCostSince (org/day): %v", err)
+	}
+	year := model.StartOfYear(firstOfMonth)
+	if _, err := store.SumQuotaCostSince(ctx, model.QuotaScopeUser, "user-1", "org-1", year); err != nil {
+		t.Fatalf("SumQuotaCostSince (user/year): %v", err)
+	}
+	if _, err := store.SumQuotaCostSince(ctx, model.QuotaScopeOrg, "org-1", "org-1", year); err != nil {
+		t.Fatalf("SumQuotaCostSince (org/year): %v", err)
+	}
+
+	record := newPAYGRecord("user-1", "org-1", 250)
+	record.SetCreatedAt(firstOfMonth)
+	if err := store.RecordUsage(ctx, record); err != nil {
+		t.Fatalf("RecordUsage: %v", err)
+	}
+
+	// The day total equals the month total because the windows share their
+	// start. Each must be 1000 + 250, not 1000 + 500.
+	userTotal, err := store.SumQuotaCostSince(ctx, model.QuotaScopeUser, "user-1", "org-1", day)
+	if err != nil {
+		t.Fatalf("SumQuotaCostSince (user/day): %v", err)
+	}
+	if userTotal != 1_250 {
+		t.Errorf("user total on the 1st = %d, want 1250: a record whose day and month windows collapse must only be counted once per key", userTotal)
+	}
+	orgTotal, err := store.SumQuotaCostSince(ctx, model.QuotaScopeOrg, "org-1", "org-1", day)
+	if err != nil {
+		t.Fatalf("SumQuotaCostSince (org/day): %v", err)
+	}
+	if orgTotal != 1_250 {
+		t.Errorf("org total on the 1st = %d, want 1250", orgTotal)
+	}
+
+	// The year window is distinct from the day window, so it should have
+	// received its own single increment.
+	yearUser, err := store.SumQuotaCostSince(ctx, model.QuotaScopeUser, "user-1", "org-1", year)
+	if err != nil {
+		t.Fatalf("SumQuotaCostSince (user/year): %v", err)
+	}
+	if yearUser != 1_250 {
+		t.Errorf("user year total = %d, want 1250: the distinct year window must receive its own increment", yearUser)
+	}
+	yearOrg, err := store.SumQuotaCostSince(ctx, model.QuotaScopeOrg, "org-1", "org-1", year)
+	if err != nil {
+		t.Fatalf("SumQuotaCostSince (org/year): %v", err)
+	}
+	if yearOrg != 1_250 {
+		t.Errorf("org year total = %d, want 1250", yearOrg)
+	}
+
+	// The record should map to four distinct keys, not six: day=user/org,
+	// month collapses into day, year=user/org are the four unique windows.
+	keys := quotaSumCacheKeysFor(record)
+	if len(keys) != 4 {
+		t.Errorf("keys = %v, want 4 (day=user/org + year=user/org): the day and month windows must produce the same key", keys)
+	}
+}
+
+// TestUsageStore_RecordUsageAppliesOnceWhenAllWindowsCollide is the new year's
+// day variant: StartOfDay, StartOfMonth and StartOfYear all return the same
+// instant, so a record dated 1 January must increment that single key once,
+// not three times.
+func TestUsageStore_RecordUsageAppliesOnceWhenAllWindowsCollide(t *testing.T) {
+	ctx := context.Background()
+	backend := &countingUsageStore{total: 1_000}
+	store := NewUsageStore(backend, NewMemoryCache(64), time.Minute)
+
+	newYear := time.Date(2025, time.January, 1, 0, 30, 0, 0, time.UTC)
+
+	since := model.StartOfDay(newYear)
+	if _, err := store.SumQuotaCostSince(ctx, model.QuotaScopeUser, "user-1", "org-1", since); err != nil {
+		t.Fatalf("SumQuotaCostSince (user): %v", err)
+	}
+	if _, err := store.SumQuotaCostSince(ctx, model.QuotaScopeOrg, "org-1", "org-1", since); err != nil {
+		t.Fatalf("SumQuotaCostSince (org): %v", err)
+	}
+
+	record := newPAYGRecord("user-1", "org-1", 250)
+	record.SetCreatedAt(newYear)
+	if err := store.RecordUsage(ctx, record); err != nil {
+		t.Fatalf("RecordUsage: %v", err)
+	}
+
+	userTotal, err := store.SumQuotaCostSince(ctx, model.QuotaScopeUser, "user-1", "org-1", since)
+	if err != nil {
+		t.Fatalf("SumQuotaCostSince (user): %v", err)
+	}
+	if userTotal != 1_250 {
+		t.Errorf("user total on 1 January = %d, want 1250: a record dated on new year's day must be counted once per key, not three times", userTotal)
+	}
+	orgTotal, err := store.SumQuotaCostSince(ctx, model.QuotaScopeOrg, "org-1", "org-1", since)
+	if err != nil {
+		t.Fatalf("SumQuotaCostSince (org): %v", err)
+	}
+	if orgTotal != 1_250 {
+		t.Errorf("org total on 1 January = %d, want 1250", orgTotal)
+	}
+
+	// All three windows collapse into a single user/org pair.
+	keys := quotaSumCacheKeysFor(record)
+	if len(keys) != 2 {
+		t.Errorf("keys = %v, want 2 (user + org): day, month and year must produce the same key", keys)
+	}
+}
+
+// TestUsageStore_RecordUsageStillUpdatesThreeWindowsMidMonth is the positive
+// counterpart: when the three windows are distinct, each gets its own key and
+// its own increment, so the test above did not pass for the wrong reason.
+func TestUsageStore_RecordUsageStillUpdatesThreeWindowsMidMonth(t *testing.T) {
+	ctx := context.Background()
+	backend := &countingUsageStore{total: 1_000}
+	store := NewUsageStore(backend, NewMemoryCache(64), time.Minute)
+
+	midMonth := time.Date(2025, time.March, 15, 12, 0, 0, 0, time.UTC)
+
+	day := model.StartOfDay(midMonth)
+	month := model.StartOfMonth(midMonth)
+	year := model.StartOfYear(midMonth)
+	for _, since := range []time.Time{day, month, year} {
+		if _, err := store.SumQuotaCostSince(ctx, model.QuotaScopeUser, "user-1", "org-1", since); err != nil {
+			t.Fatalf("SumQuotaCostSince (user): %v", err)
+		}
+		if _, err := store.SumQuotaCostSince(ctx, model.QuotaScopeOrg, "org-1", "org-1", since); err != nil {
+			t.Fatalf("SumQuotaCostSince (org): %v", err)
+		}
+	}
+
+	record := newPAYGRecord("user-1", "org-1", 250)
+	record.SetCreatedAt(midMonth)
+	if err := store.RecordUsage(ctx, record); err != nil {
+		t.Fatalf("RecordUsage: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		since time.Time
+		want  int64
+	}{
+		{"day", day, 1_250},
+		{"month", month, 1_250},
+		{"year", year, 1_250},
+	} {
+		userTotal, err := store.SumQuotaCostSince(ctx, model.QuotaScopeUser, "user-1", "org-1", tc.since)
+		if err != nil {
+			t.Fatalf("SumQuotaCostSince (user/%s): %v", tc.name, err)
+		}
+		if userTotal != tc.want {
+			t.Errorf("user %s total = %d, want %d", tc.name, userTotal, tc.want)
+		}
+		orgTotal, err := store.SumQuotaCostSince(ctx, model.QuotaScopeOrg, "org-1", "org-1", tc.since)
+		if err != nil {
+			t.Fatalf("SumQuotaCostSince (org/%s): %v", tc.name, err)
+		}
+		if orgTotal != tc.want {
+			t.Errorf("org %s total = %d, want %d", tc.name, orgTotal, tc.want)
+		}
+	}
+
+	// Three distinct starts, two scopes (user + org) each: six keys.
+	keys := quotaSumCacheKeysFor(record)
+	if len(keys) != 6 {
+		t.Errorf("keys = %v, want 6 (three windows × user + org): the dedup must not collapse distinct windows", keys)
+	}
 }
