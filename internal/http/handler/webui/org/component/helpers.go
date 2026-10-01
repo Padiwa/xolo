@@ -211,13 +211,23 @@ func budgetFieldValue(vmodel QuotaPageVModel, scope budgetScope) string {
 	return formatBudgetField(*budget)
 }
 
-// budgetInputValue resolves the value to display in a budget input. The
-// Submitted map wins over the stored quota, so a rejected re-render keeps
-// the operator's input verbatim (otherwise the form would appear to swallow
-// the bad value and the operator would have to re-type it from memory —
-// which is the exact failure mode that issue #88 describes for 0). A
-// missing or empty submitted entry falls back to the stored value, which
-// is the right behaviour for a fresh GET (no Submitted yet).
+// budgetInputValue resolves the value to display in a budget input.
+//
+// The Submitted map, when populated by quotaFormSubmitted, carries only
+// fields the operator actually POSTed: a present key holds whatever the
+// operator typed (including the empty string for "I cleared this field
+// on purpose"), and an absent key means "I did not touch this field".
+//
+// On a re-render after a rejected submit, the operator typed at least one
+// bad value; the fields they did not touch must keep their stored budget
+// so the next save does not silently wipe them out — which was the
+// silent-data-loss regression Conclave review #2 caught (issue #88). The
+// implementation falls back to budgetFieldValue when the key is absent;
+// a present key (including the empty string) wins so the re-render echoes
+// the operator's input verbatim.
+//
+// On a fresh GET vmodel.Submitted is nil and budgetFieldValue returns the
+// stored value or "" for an unset ceiling — the unlimited default.
 func budgetInputValue(vmodel QuotaPageVModel, field string, scope budgetScope) string {
 	if vmodel.Submitted != nil {
 		if v, ok := vmodel.Submitted[field]; ok {
