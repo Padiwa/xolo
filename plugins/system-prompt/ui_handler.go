@@ -60,7 +60,7 @@ func handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	pluginName := pluginsdk.PluginNameFromContext(ctx)
 
 	if host == nil || orgID == "" {
-		slog.Error("system-prompt: SaveConfig failed", slog.Any("error", http.StatusBadRequest))
+		slog.WarnContext(ctx, "system-prompt: SaveConfig called without host or org context")
 		http.Error(w, "missing host or org context", http.StatusBadRequest)
 		return
 	}
@@ -73,7 +73,11 @@ func handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		SystemPrompt: r.FormValue("system_prompt"),
 		Append:       r.FormValue("append") == "true",
 	}
-	slog.Error("system-prompt: SystemPrompt", slog.Any("error", cfg.SystemPrompt))
+	slog.InfoContext(ctx, "system-prompt: config saved",
+		slog.String("org_id", orgID),
+		slog.Int("prompt_length", len(cfg.SystemPrompt)),
+		slog.Bool("append", cfg.Append),
+	)
 
 	b, _ := json.Marshal(cfg)
 	if err := host.SaveConfig(ctx, orgID, pluginName, string(b)); err != nil {
