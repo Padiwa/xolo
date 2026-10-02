@@ -173,8 +173,10 @@ func TestUsageStore_KeysFollowThePrincipalOnTheRecord(t *testing.T) {
 	shadow := model.NewUsageRecord("usr-shadow-app-1", "app-1", "org-1", "provider", "llm-model",
 		"fast", "", 10, 0, 10, 700, "USD", model.CostSourceComputed, "")
 
-	day := model.StartOfDay(shadow.CreatedAt())
-	keys := quotaSumCacheKeysFor(shadow)
+	// Mid-month, so that the day, the month and the year are three windows.
+	midMonth := time.Date(2026, time.September, 15, 10, 0, 0, 0, time.Local)
+	day := model.StartOfDay(midMonth)
+	keys := quotaSumCacheKeysFor(datedRecord{shadow, midMonth})
 	if len(keys) != 6 {
 		t.Errorf("keys = %v, want three organization windows and three application windows, no shadow-user windows", keys)
 	}
@@ -196,7 +198,7 @@ func TestUsageStore_KeysFollowThePrincipalOnTheRecord(t *testing.T) {
 	// directly without an auth context — feeds the organization windows only.
 	orphan := model.NewUsageRecord("", "", "org-1", "provider", "llm-model",
 		"fast", "", 10, 0, 10, 700, "USD", model.CostSourceComputed, "")
-	if keys := quotaSumCacheKeysFor(orphan); len(keys) != 3 {
+	if keys := quotaSumCacheKeysFor(datedRecord{orphan, midMonth}); len(keys) != 3 {
 		t.Errorf("keys = %v, want the three organization windows only", keys)
 	}
 }
@@ -410,4 +412,32 @@ func TestUsageStore_ConcurrentReadsAndRecords(t *testing.T) {
 	}()
 
 	wg.Wait()
+}
+
+// datedRecord is a usage record created at a chosen time.
+type datedRecord struct {
+	*model.BaseUsageRecord
+	at time.Time
+}
+
+func (r datedRecord) CreatedAt() time.Time { return r.at }
+
+// On new year's day the day, month and year windows open at the same instant:
+// a key listed once per window would apply the cost to that single entry
+// three times.
+func TestQuotaSumCacheKeysFor_WindowsOpeningTogetherShareOneKey(t *testing.T) {
+	for _, at := range []time.Time{
+		time.Date(2027, time.January, 1, 10, 0, 0, 0, time.Local),
+		time.Date(2026, time.October, 1, 10, 0, 0, 0, time.Local),
+		time.Date(2026, time.October, 2, 10, 0, 0, 0, time.Local),
+	} {
+		keys := quotaSumCacheKeysFor(datedRecord{newPAYGRecord("user-1", "org-1", 250), at})
+		seen := map[string]bool{}
+		for _, key := range keys {
+			if seen[key] {
+				t.Errorf("%s: key %q listed twice", at.Format(time.DateOnly), key)
+			}
+			seen[key] = true
+		}
+	}
 }

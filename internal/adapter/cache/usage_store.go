@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -193,11 +194,14 @@ func quotaSumCacheKeysFor(record model.UsageRecord) []string {
 	}
 
 	createdAt := record.CreatedAt()
-	starts := []time.Time{
+	// On the first of the month the day and the month open together, and on
+	// new year's day the year too: they are then one window, one entry, which
+	// must be incremented once, not once per name it goes by.
+	starts := slices.CompactFunc([]time.Time{
 		model.StartOfDay(createdAt),
 		model.StartOfMonth(createdAt),
 		model.StartOfYear(createdAt),
-	}
+	}, time.Time.Equal)
 
 	appID := record.ApplicationID()
 	userID := record.UserID()
