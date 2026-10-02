@@ -37,13 +37,14 @@ func loadPageData(r *http.Request) uiPageData {
 	if host != nil && orgID != "" {
 		var err error
 		raw, err = host.GetConfig(ctx, orgID, pluginName)
-		slog.InfoContext(ctx, "system-prompt: config loaded",
-			slog.String("org_id", orgID),
-			slog.String("plugin_name", pluginName),
-			slog.Int("raw_length", len(raw)),
-		)
 		if err != nil {
 			slog.WarnContext(ctx, "system-prompt/ui: failed to load config", slog.Any("error", err))
+		} else {
+			slog.InfoContext(ctx, "system-prompt: config loaded",
+				slog.String("org_id", orgID),
+				slog.String("plugin_name", pluginName),
+				slog.Int("raw_length", len(raw)),
+			)
 		}
 	}
 
