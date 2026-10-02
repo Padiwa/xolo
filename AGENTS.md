@@ -93,6 +93,22 @@ subdomain, no change of URL). `XOLO_MULTITENANCY_ENABLED=true` plus
 the request host; a host matching no active tenant answers 404.
 See `internal/http/middleware/tenant/`.
 
+**Mandatory parent checks:** an organization permission applies only to the
+organization resolved from the current tenant and URL slug. Before rendering,
+decrypting credentials, calling a provider, reading quotas or mutating any
+resource loaded by global ID, verify its `OrgID` against that organization;
+provider models must also match the validated provider's `ProviderID`. These
+checks apply to platform admins too. Use the organization handlers' resolvers
+in `internal/http/handler/webui/org/resource_scope.go` and return the same 404
+for missing and foreign resources (500 for technical store errors).
+
+Invitation parent resolution uses `service.InvitationResolver` in
+`internal/core/service/invitation_resolver.go`:
+it checks tenant and organization without granting permissions or validating
+expiration, recipient or remaining uses. For acceptance, repeat resolution and
+consumption checks inside the transaction that consumes the invitation using
+transaction-bound readers; an earlier resolution does not guarantee atomicity.
+
 ### Provisionning API
 
 Machine-to-machine provisioning of tenants, the organizations they own, their

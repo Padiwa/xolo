@@ -13,6 +13,7 @@ type InviteStore interface {
 	RevokeInvite(ctx context.Context, id model.InviteTokenID) error
 	DeleteInvite(ctx context.Context, id model.InviteTokenID) error
 	IncrementInviteUses(ctx context.Context, id model.InviteTokenID) error
-	// ListPendingInvitesForEmail returns non-expired, non-revoked targeted invites for an email.
-	ListPendingInvitesForEmail(ctx context.Context, email string) ([]model.InviteToken, error)
+	// ListPendingInvitesForEmail returns usable targeted invitations within a
+	// tenant, excluding inactive organizations. An empty tenant never spans tenants.
+	ListPendingInvitesForEmail(ctx context.Context, tenantID model.TenantID, email string) ([]model.InviteToken, error)
 }

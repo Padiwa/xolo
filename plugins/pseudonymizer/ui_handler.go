@@ -78,9 +78,10 @@ func (ui *pluginUI) loadPageData(r *http.Request) (uiPageData, error) {
 		Config:   cfg,
 	}
 
+	scopeID := r.Header.Get("X-Xolo-Secret-Scope-Id")
 	pd.NodeID = r.Header.Get("X-Xolo-Node-Id")
-	if host != nil && orgID != "" && pd.NodeID != "" {
-		_, found, err := host.GetSecret(ctx, orgID, pluginName, pd.NodeID, secretKeyHashHMAC)
+	if host != nil && scopeID != "" && pd.NodeID != "" {
+		_, found, err := host.GetSecret(ctx, scopeID, pluginName, pd.NodeID, secretKeyHashHMAC)
 		if err != nil {
 			slog.WarnContext(ctx, "pseudonymizer/ui: failed to check hash secret", slog.Any("error", err))
 		} else {
@@ -172,12 +173,12 @@ func (ui *pluginUI) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 
 func (ui *pluginUI) handleSaveHashKey(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	orgID := r.Header.Get("X-Xolo-Org-Id")
+	scopeID := r.Header.Get("X-Xolo-Secret-Scope-Id")
 	nodeID := r.Header.Get("X-Xolo-Node-Id")
 	host := pluginsdk.HostClientFromContext(ctx)
 	pluginName := pluginsdk.PluginNameFromContext(ctx)
 
-	if host == nil || orgID == "" {
+	if host == nil || scopeID == "" {
 		http.Error(w, "missing host or org context", http.StatusBadRequest)
 		return
 	}
@@ -198,7 +199,7 @@ func (ui *pluginUI) handleSaveHashKey(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "clé invalide : "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := host.SetSecret(ctx, orgID, pluginName, nodeID, secretKeyHashHMAC, value); err != nil {
+	if err := host.SetSecret(ctx, scopeID, pluginName, nodeID, secretKeyHashHMAC, value); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -207,16 +208,16 @@ func (ui *pluginUI) handleSaveHashKey(w http.ResponseWriter, r *http.Request) {
 
 func (ui *pluginUI) handleDeleteHashKey(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	orgID := r.Header.Get("X-Xolo-Org-Id")
+	scopeID := r.Header.Get("X-Xolo-Secret-Scope-Id")
 	nodeID := r.Header.Get("X-Xolo-Node-Id")
 	host := pluginsdk.HostClientFromContext(ctx)
 	pluginName := pluginsdk.PluginNameFromContext(ctx)
 
-	if host == nil || orgID == "" || nodeID == "" {
+	if host == nil || scopeID == "" || nodeID == "" {
 		http.Error(w, "missing host, org or node context", http.StatusBadRequest)
 		return
 	}
-	if err := host.DeleteSecret(ctx, orgID, pluginName, nodeID, secretKeyHashHMAC); err != nil {
+	if err := host.DeleteSecret(ctx, scopeID, pluginName, nodeID, secretKeyHashHMAC); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

@@ -9,37 +9,28 @@ import (
 
 type JoinPageVModel struct {
 	User       model.User
-	Invite     model.InviteToken
+	Org        model.Organization
+	RoleName   string
 	LoginURL   string
 	DeclineURL string
 }
 
-// roleLabel returns the display label for an organization role.
-func roleLabel(role string) string {
-	switch role {
-	case model.RoleOrgAdmin, model.RoleOrgOwner:
-		return "Administrateur"
-	default:
-		return "Utilisateur"
-	}
-}
-
 templ JoinPage(vmodel JoinPageVModel) {
-	@common.StandaloneLayout(common.WithTitle("Rejoindre " + vmodel.Invite.Org().Name())) {
+	@common.StandaloneLayout(common.WithTitle("Rejoindre " + vmodel.Org.Name())) {
 		@card.Card() {
 			@card.Header() {
 				@card.Title() {
-					Invitation à rejoindre { vmodel.Invite.Org().Name() }
+					Invitation à rejoindre { vmodel.Org.Name() }
 				}
 			}
 			@card.Content() {
 				<div class="space-y-4">
 					<p class="text-sm text-muted-foreground">
-						Vous avez été invité à rejoindre l'organisation <strong class="text-foreground">{ vmodel.Invite.Org().Name() }</strong>.
+						Vous avez été invité à rejoindre l'organisation <strong class="text-foreground">{ vmodel.Org.Name() }</strong>.
 					</p>
 					<div class="flex items-center gap-2.5 text-sm">
 						<span class="font-medium">Rôle :</span>
-						@common.Badge(common.ToneInfo, roleLabel(vmodel.Invite.Role()))
+						@common.Badge(common.ToneInfo, vmodel.RoleName)
 					</div>
 					if vmodel.User == nil {
 						<p class="text-sm text-muted-foreground">Vous devez vous connecter pour accepter cette invitation.</p>
@@ -61,6 +52,25 @@ templ JoinPage(vmodel JoinPageVModel) {
 						</div>
 					}
 				</div>
+			}
+		}
+	}
+}
+
+// JoinLogin intentionally receives no organization, recipient or role.
+templ JoinLogin(loginURL string) {
+	@common.StandaloneLayout(common.WithTitle("Invitation")) {
+		@card.Card() {
+			@card.Header() {
+				@card.Title() {
+					Invitation
+				}
+			}
+			@card.Content() {
+				<p class="mb-4 text-sm text-muted-foreground">Connectez-vous pour consulter cette invitation.</p>
+				@button.Button(button.Props{Href: loginURL, Class: "w-full"}) {
+					Se connecter
+				}
 			}
 		}
 	}

@@ -30,10 +30,11 @@ func (h *Handler) servePersonalPluginUI(w http.ResponseWriter, r *http.Request) 
 	}
 
 	user := httpCtx.User(ctx)
-	scopeID := ""
-	if user != nil {
-		scopeID = "~:" + string(user.ID())
+	if user == nil || httpCtx.TenantID(ctx) == "" || user.TenantID() != httpCtx.TenantID(ctx) {
+		http.NotFound(w, r)
+		return
 	}
+	scopeID := "~:" + string(user.ID())
 
 	target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", uiPort))
 	proxy := httputil.NewSingleHostReverseProxy(target)
@@ -42,10 +43,18 @@ func (h *Handler) servePersonalPluginUI(w http.ResponseWriter, r *http.Request) 
 
 	nodeID := r.URL.Query().Get("nodeId")
 
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
+	proxy.Director = nil
+	proxy.Rewrite = func(pr *httputil.ProxyRequest) {
+		pr.SetURL(target)
+		req := pr.Out
+		// Remove all client-supplied plugin context before injecting trusted values.
+		for key := range req.Header {
+			if strings.HasPrefix(strings.ToLower(key), "x-xolo-") {
+				delete(req.Header, key)
+			}
+		}
 		req.Header.Set("X-Xolo-Org-Id", scopeID)
+		req.Header.Set("X-Xolo-Secret-Scope-Id", scopeID)
 		req.Header.Set("X-Xolo-Plugin-Base-Path", pluginBasePath+"/")
 		// The user and the public URL are always set, never forwarded from
 		// the client: a plugin trusts them.

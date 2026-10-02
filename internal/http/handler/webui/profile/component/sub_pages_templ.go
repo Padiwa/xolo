@@ -21,7 +21,8 @@ import (
 
 type InvitationsPageVModel struct {
 	common.AppLayoutVModel
-	Invites []model.InviteToken
+	Invites   []model.InviteToken
+	RoleNames map[model.InviteTokenID]string
 }
 
 func InvitationsPage(vmodel InvitationsPageVModel) templ.Component {
@@ -318,7 +319,7 @@ func InvitationsPage(vmodel InvitationsPageVModel) templ.Component {
 											var templ_7745c5c3_Var16 string
 											templ_7745c5c3_Var16, templ_7745c5c3_Err = templ.JoinStringErrs(inv.Org().Name())
 											if templ_7745c5c3_Err != nil {
-												return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/sub_pages.templ`, Line: 57, Col: 30}
+												return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/sub_pages.templ`, Line: 58, Col: 30}
 											}
 											_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var16))
 											if templ_7745c5c3_Err != nil {
@@ -328,7 +329,7 @@ func InvitationsPage(vmodel InvitationsPageVModel) templ.Component {
 											var templ_7745c5c3_Var17 string
 											templ_7745c5c3_Var17, templ_7745c5c3_Err = templ.JoinStringErrs(string(inv.OrgID()))
 											if templ_7745c5c3_Err != nil {
-												return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/sub_pages.templ`, Line: 59, Col: 33}
+												return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/sub_pages.templ`, Line: 60, Col: 33}
 											}
 											_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var17))
 											if templ_7745c5c3_Err != nil {
@@ -357,7 +358,7 @@ func InvitationsPage(vmodel InvitationsPageVModel) templ.Component {
 											}()
 										}
 										ctx = templ.InitializeContext(ctx)
-										templ_7745c5c3_Err = common.Badge(common.ToneInfo, inv.Role()).Render(ctx, templ_7745c5c3_Buffer)
+										templ_7745c5c3_Err = common.Badge(common.ToneInfo, vmodel.RoleNames[inv.ID()]).Render(ctx, templ_7745c5c3_Buffer)
 										if templ_7745c5c3_Err != nil {
 											return templ_7745c5c3_Err
 										}
@@ -387,7 +388,7 @@ func InvitationsPage(vmodel InvitationsPageVModel) templ.Component {
 											var templ_7745c5c3_Var20 string
 											templ_7745c5c3_Var20, templ_7745c5c3_Err = templ.JoinStringErrs(inv.ExpiresAt().Format("02/01/2006"))
 											if templ_7745c5c3_Err != nil {
-												return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/sub_pages.templ`, Line: 67, Col: 50}
+												return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/sub_pages.templ`, Line: 68, Col: 50}
 											}
 											_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var20))
 											if templ_7745c5c3_Err != nil {

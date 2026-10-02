@@ -2,6 +2,9 @@ package secretcleanup_test
 
 import (
 	"context"
+	"fmt"
+	"github.com/stretchr/testify/require"
+	"github.com/xolo-gateway/xolo/internal/core/port"
 	"testing"
 
 	"github.com/xolo-gateway/xolo/internal/core/model"
@@ -10,6 +13,7 @@ import (
 
 type fakeSecretStore struct {
 	deletedNodes []string
+	deleted      [][3]string
 }
 
 func (s *fakeSecretStore) GetSecret(ctx context.Context, orgID, pluginName, nodeID, key string) (string, bool, error) {
@@ -24,15 +28,16 @@ func (s *fakeSecretStore) DeleteSecret(ctx context.Context, orgID, pluginName, n
 	return nil
 }
 
-func (s *fakeSecretStore) DeleteAllForNode(ctx context.Context, nodeID string) error {
+func (s *fakeSecretStore) DeleteAllForNode(ctx context.Context, scopeID, pluginName, nodeID string) error {
 	s.deletedNodes = append(s.deletedNodes, nodeID)
+	s.deleted = append(s.deleted, [3]string{scopeID, pluginName, nodeID})
 	return nil
 }
 
 func graphWithNodes(ids ...string) *model.PipelineGraph {
 	g := &model.PipelineGraph{}
 	for _, id := range ids {
-		g.Nodes = append(g.Nodes, model.PipelineNode{ID: id})
+		g.Nodes = append(g.Nodes, model.PipelineNode{ID: id, Type: model.NodeTypePlugin, Data: []byte(`{"pluginName":"test"}`)})
 	}
 	return g
 }
@@ -42,7 +47,7 @@ func TestPruneRemovedNodes_DeletesOnlyRemovedNodes(t *testing.T) {
 	oldGraph := graphWithNodes("node-1", "node-2", "node-3")
 	newGraph := graphWithNodes("node-1", "node-3")
 
-	if err := secretcleanup.PruneRemovedNodes(context.Background(), store, oldGraph, newGraph); err != nil {
+	if err := secretcleanup.PruneRemovedNodes(context.Background(), store, "org-1", oldGraph, newGraph); err != nil {
 		t.Fatalf("PruneRemovedNodes: %v", err)
 	}
 
@@ -55,7 +60,7 @@ func TestPruneRemovedNodes_NilNewGraph_PrunesAllOldNodes(t *testing.T) {
 	store := &fakeSecretStore{}
 	oldGraph := graphWithNodes("node-1", "node-2")
 
-	if err := secretcleanup.PruneRemovedNodes(context.Background(), store, oldGraph, nil); err != nil {
+	if err := secretcleanup.PruneRemovedNodes(context.Background(), store, "org-1", oldGraph, nil); err != nil {
 		t.Fatalf("PruneRemovedNodes: %v", err)
 	}
 
@@ -68,7 +73,7 @@ func TestPruneRemovedNodes_NoChange_PrunesNothing(t *testing.T) {
 	store := &fakeSecretStore{}
 	graph := graphWithNodes("node-1", "node-2")
 
-	if err := secretcleanup.PruneRemovedNodes(context.Background(), store, graph, graph); err != nil {
+	if err := secretcleanup.PruneRemovedNodes(context.Background(), store, "org-1", graph, graph); err != nil {
 		t.Fatalf("PruneRemovedNodes: %v", err)
 	}
 
@@ -80,11 +85,57 @@ func TestPruneRemovedNodes_NoChange_PrunesNothing(t *testing.T) {
 func TestPruneRemovedNodes_NilOldGraph_NoOp(t *testing.T) {
 	store := &fakeSecretStore{}
 
-	if err := secretcleanup.PruneRemovedNodes(context.Background(), store, nil, graphWithNodes("node-1")); err != nil {
+	if err := secretcleanup.PruneRemovedNodes(context.Background(), store, "org-1", nil, graphWithNodes("node-1")); err != nil {
 		t.Fatalf("PruneRemovedNodes: %v", err)
 	}
 
 	if len(store.deletedNodes) != 0 {
 		t.Errorf("expected no pruning when there is no old graph, got %v", store.deletedNodes)
 	}
+}
+
+func TestPruneRemovedNodes_PlacementChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		node       model.PipelineNode
+		wantDelete bool
+	}{
+		{"same plugin", model.PipelineNode{ID: "node", Type: model.NodeTypePlugin, Data: []byte(`{"pluginName":"test"}`)}, false},
+		{"different plugin", model.PipelineNode{ID: "node", Type: model.NodeTypePlugin, Data: []byte(`{"pluginName":"other"}`)}, true},
+		{"builtin", model.PipelineNode{ID: "node", Type: model.NodeTypeModel}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeSecretStore{}
+			old := graphWithNodes("node")
+			old.Nodes = append(old.Nodes, model.PipelineNode{ID: "builtin", Type: model.NodeTypeModel})
+			require.NoError(t, secretcleanup.PruneRemovedNodes(t.Context(), store, "~:user", old, &model.PipelineGraph{Nodes: []model.PipelineNode{tc.node}}))
+			if tc.wantDelete {
+				require.Equal(t, [][3]string{{"~:user", "test", "node"}}, store.deleted)
+			} else {
+				require.Empty(t, store.deleted)
+			}
+		})
+	}
+}
+
+func TestPruneRemovedNodes_ValidatesBothGraphsBeforeDeletion(t *testing.T) {
+	for _, raw := range []string{`{`, `null`, `{}`, `{"pluginName":" "}`, `{"pluginName":1}`} {
+		for _, badOld := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/old=%v", raw, badOld), func(t *testing.T) {
+				store := &fakeSecretStore{}
+				good := graphWithNodes("removed")
+				bad := graphWithNodes("valid-first", "malformed")
+				bad.Nodes[1].Data = []byte(raw)
+				old, next := good, bad
+				if badOld {
+					old, next = bad, good
+				}
+				require.ErrorIs(t, secretcleanup.PruneRemovedNodes(t.Context(), store, "org", old, next), port.ErrInvalid)
+				require.Empty(t, store.deleted)
+			})
+		}
+	}
+	store := &fakeSecretStore{}
+	require.ErrorIs(t, secretcleanup.PruneRemovedNodes(t.Context(), store, " ", graphWithNodes("node"), nil), port.ErrInvalid)
+	require.Empty(t, store.deleted)
 }

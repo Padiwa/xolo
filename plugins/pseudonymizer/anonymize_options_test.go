@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"github.com/stretchr/testify/require"
 	"testing"
 
 	proto "github.com/xolo-gateway/xolo/pkg/pluginsdk/proto"
@@ -100,5 +101,20 @@ func TestBuildAnonymizeOptions_HashScope(t *testing.T) {
 
 	if len(opts) != 2 {
 		t.Fatalf("expected 2 options (WithHashKey + WithHashScope), got %d", len(opts))
+	}
+}
+
+func TestBuildAnonymizeOptions_SecretScopeIsolation(t *testing.T) {
+	host := newFakeUIHost()
+	cfg := defaultConfig()
+	cfg.Strategy = "hash"
+	require.NoError(t, host.SetSecret(t.Context(), "~:user", "pseudonymizer", "node", secretKeyHashHMAC, uiHexKey))
+	for _, org := range []string{"org-a", "org-b"} {
+		_, err := buildAnonymizeOptions(t.Context(), cfg, &proto.RequestContext{OrgId: org, SecretScopeId: "~:user", NodeId: "node"}, host)
+		require.NoError(t, err)
+	}
+	for _, scope := range []string{"org-a", "~:other", ""} {
+		_, err := buildAnonymizeOptions(t.Context(), cfg, &proto.RequestContext{OrgId: "~:user", SecretScopeId: scope, NodeId: "node"}, host)
+		require.ErrorIs(t, err, errHashKeyMissing)
 	}
 }

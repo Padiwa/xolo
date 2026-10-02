@@ -106,7 +106,7 @@ message SaveConfigRequest {
 message SaveConfigResponse {}
 
 message GetSecretRequest {
-  string org_id      = 1;
+  string scope_id    = 1;
   string plugin_name = 2;
   string node_id     = 3;
   string key         = 4;
@@ -116,7 +116,7 @@ message GetSecretResponse {
   bool   found = 2;
 }
 message SetSecretRequest {
-  string org_id      = 1;
+  string scope_id    = 1;
   string plugin_name = 2;
   string node_id      = 3;
   string key          = 4;
@@ -124,7 +124,7 @@ message SetSecretRequest {
 }
 message SetSecretResponse {}
 message DeleteSecretRequest {
-  string org_id      = 1;
+  string scope_id    = 1;
   string plugin_name = 2;
   string node_id     = 3;
   string key         = 4;
@@ -171,6 +171,9 @@ message RequestContext {
   // node_id is the stable ID of this node instance within its pipeline graph.
   // Plugins use it to scope GetSecret/SetSecret calls to this specific placement.
   string node_id = 7;
+  // Owner of this graph: organization ID or "~:<userID>" for a personal graph.
+  // Configuration secrets must use this scope, independently of org_id.
+  string secret_scope_id = 8;
 }
 
 message ModelInfo {

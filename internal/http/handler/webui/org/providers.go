@@ -169,19 +169,9 @@ func (h *Handler) getEditProviderPage(w http.ResponseWriter, r *http.Request) {
 	orgSlug := r.PathValue("orgSlug")
 	providerID := r.PathValue("providerID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	org, p, err := h.resolveOrgAndProvider(ctx, orgSlug, providerID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	p, err := h.providerStore.GetProviderByID(ctx, model.ProviderID(providerID))
-	if err != nil {
-		if errors.Is(err, port.ErrNotFound) {
-			http.Error(w, "Provider not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -213,19 +203,9 @@ func (h *Handler) updateProvider(w http.ResponseWriter, r *http.Request) {
 	orgSlug := r.PathValue("orgSlug")
 	providerID := r.PathValue("providerID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	org, existing, err := h.resolveOrgAndProvider(ctx, orgSlug, providerID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	existing, err := h.providerStore.GetProviderByID(ctx, model.ProviderID(providerID))
-	if err != nil {
-		if errors.Is(err, port.ErrNotFound) {
-			http.Error(w, "Provider not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -358,6 +338,11 @@ func (h *Handler) deleteProvider(w http.ResponseWriter, r *http.Request) {
 	orgSlug := r.PathValue("orgSlug")
 	providerID := r.PathValue("providerID")
 
+	if _, _, err := h.resolveOrgAndProvider(ctx, orgSlug, providerID); err != nil {
+		writeResourceLookupError(ctx, w, err)
+		return
+	}
+
 	if err := h.providerStore.DeleteProvider(ctx, model.ProviderID(providerID)); err != nil {
 		if errors.Is(err, port.ErrNotFound) {
 			http.Error(w, "Provider not found", http.StatusNotFound)
@@ -375,10 +360,9 @@ func (h *Handler) testProvider(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	providerID := r.PathValue("providerID")
 
-	p, err := h.providerStore.GetProviderByID(ctx, model.ProviderID(providerID))
+	_, p, err := h.resolveOrgAndProvider(ctx, r.PathValue("orgSlug"), providerID)
 	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`<span class="text-destructive">Provider not found</span>`))
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -442,15 +426,9 @@ func (h *Handler) getModelsPage(w http.ResponseWriter, r *http.Request) {
 	orgSlug := r.PathValue("orgSlug")
 	providerID := r.PathValue("providerID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	org, p, err := h.resolveOrgAndProvider(ctx, orgSlug, providerID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	p, err := h.providerStore.GetProviderByID(ctx, model.ProviderID(providerID))
-	if err != nil {
-		http.Error(w, "Provider not found", http.StatusNotFound)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -498,15 +476,9 @@ func (h *Handler) getNewModelPage(w http.ResponseWriter, r *http.Request) {
 	orgSlug := r.PathValue("orgSlug")
 	providerID := r.PathValue("providerID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	org, p, err := h.resolveOrgAndProvider(ctx, orgSlug, providerID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	p, err := h.providerStore.GetProviderByID(ctx, model.ProviderID(providerID))
-	if err != nil {
-		http.Error(w, "Provider not found", http.StatusNotFound)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -842,15 +814,9 @@ func (h *Handler) createModel(w http.ResponseWriter, r *http.Request) {
 	orgSlug := r.PathValue("orgSlug")
 	providerID := r.PathValue("providerID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	org, p, err := h.resolveOrgAndProvider(ctx, orgSlug, providerID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	p, err := h.providerStore.GetProviderByID(ctx, model.ProviderID(providerID))
-	if err != nil {
-		http.Error(w, "Provider not found", http.StatusNotFound)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -914,21 +880,9 @@ func (h *Handler) getEditModelPage(w http.ResponseWriter, r *http.Request) {
 	providerID := r.PathValue("providerID")
 	modelID := r.PathValue("modelID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	org, p, m, err := h.resolveOrgAndProviderModel(ctx, orgSlug, providerID, modelID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	p, err := h.providerStore.GetProviderByID(ctx, model.ProviderID(providerID))
-	if err != nil {
-		http.Error(w, "Provider not found", http.StatusNotFound)
-		return
-	}
-
-	m, err := h.providerStore.GetLLMModelByID(ctx, model.LLMModelID(modelID))
-	if err != nil {
-		http.Error(w, "Model not found", http.StatusNotFound)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -963,29 +917,9 @@ func (h *Handler) updateModel(w http.ResponseWriter, r *http.Request) {
 	providerID := r.PathValue("providerID")
 	modelID := r.PathValue("modelID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	org, p, existing, err := h.resolveOrgAndProviderModel(ctx, orgSlug, providerID, modelID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	p, err := h.providerStore.GetProviderByID(ctx, model.ProviderID(providerID))
-	if err != nil {
-		if errors.Is(err, port.ErrNotFound) {
-			http.Error(w, "Provider not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
-
-	existing, err := h.providerStore.GetLLMModelByID(ctx, model.LLMModelID(modelID))
-	if err != nil {
-		if errors.Is(err, port.ErrNotFound) {
-			http.Error(w, "Model not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -1189,6 +1123,11 @@ func (h *Handler) deleteModel(w http.ResponseWriter, r *http.Request) {
 	orgSlug := r.PathValue("orgSlug")
 	providerID := r.PathValue("providerID")
 	modelID := r.PathValue("modelID")
+
+	if _, _, _, err := h.resolveOrgAndProviderModel(ctx, orgSlug, providerID, modelID); err != nil {
+		writeResourceLookupError(ctx, w, err)
+		return
+	}
 
 	if err := h.providerStore.DeleteLLMModel(ctx, model.LLMModelID(modelID)); err != nil {
 		if errors.Is(err, port.ErrNotFound) {

@@ -3,18 +3,21 @@ package gorm
 import (
 	"context"
 
-	"github.com/xolo-gateway/xolo/internal/core/port"
 	"github.com/pkg/errors"
 	"github.com/rs/xid"
+	"github.com/xolo-gateway/xolo/internal/core/port"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
 // GetSecret implements port.SecretStore.
-func (s *Store) GetSecret(ctx context.Context, orgID, pluginName, nodeID, key string) (string, bool, error) {
+func (s *Store) GetSecret(ctx context.Context, scopeID, pluginName, nodeID, key string) (string, bool, error) {
+	if err := port.ValidateSecretKey(scopeID, pluginName, nodeID, key); err != nil {
+		return "", false, err
+	}
 	var secret PluginNodeSecret
 	err := s.withRetry(ctx, false, func(ctx context.Context, db *gorm.DB) error {
-		if err := db.Where("node_id = ? AND key = ?", nodeID, key).First(&secret).Error; err != nil {
+		if err := db.Where("org_id = ? AND plugin_name = ? AND node_id = ? AND key = ?", scopeID, pluginName, nodeID, key).First(&secret).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil
 			}
@@ -32,34 +35,43 @@ func (s *Store) GetSecret(ctx context.Context, orgID, pluginName, nodeID, key st
 }
 
 // SetSecret implements port.SecretStore.
-func (s *Store) SetSecret(ctx context.Context, orgID, pluginName, nodeID, key, value string) error {
+func (s *Store) SetSecret(ctx context.Context, scopeID, pluginName, nodeID, key, value string) error {
+	if err := port.ValidateSecretKey(scopeID, pluginName, nodeID, key); err != nil {
+		return err
+	}
 	return s.withRetry(ctx, true, func(ctx context.Context, db *gorm.DB) error {
 		secret := &PluginNodeSecret{
 			ID:             xid.New().String(),
-			OrgID:          orgID,
+			OrgID:          scopeID,
 			PluginName:     pluginName,
 			NodeID:         nodeID,
 			Key:            key,
 			ValueEncrypted: value,
 		}
 		return errors.WithStack(db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "node_id"}, {Name: "key"}},
-			DoUpdates: clause.AssignmentColumns([]string{"value_encrypted", "org_id", "plugin_name", "updated_at"}),
+			Columns:   []clause.Column{{Name: "org_id"}, {Name: "plugin_name"}, {Name: "node_id"}, {Name: "key"}},
+			DoUpdates: clause.AssignmentColumns([]string{"value_encrypted", "updated_at"}),
 		}).Create(secret).Error)
 	})
 }
 
 // DeleteSecret implements port.SecretStore.
-func (s *Store) DeleteSecret(ctx context.Context, orgID, pluginName, nodeID, key string) error {
+func (s *Store) DeleteSecret(ctx context.Context, scopeID, pluginName, nodeID, key string) error {
+	if err := port.ValidateSecretKey(scopeID, pluginName, nodeID, key); err != nil {
+		return err
+	}
 	return s.withRetry(ctx, true, func(ctx context.Context, db *gorm.DB) error {
-		return errors.WithStack(db.Where("node_id = ? AND key = ?", nodeID, key).Delete(&PluginNodeSecret{}).Error)
+		return errors.WithStack(db.Where("org_id = ? AND plugin_name = ? AND node_id = ? AND key = ?", scopeID, pluginName, nodeID, key).Delete(&PluginNodeSecret{}).Error)
 	})
 }
 
 // DeleteAllForNode implements port.SecretStore.
-func (s *Store) DeleteAllForNode(ctx context.Context, nodeID string) error {
+func (s *Store) DeleteAllForNode(ctx context.Context, scopeID, pluginName, nodeID string) error {
+	if err := port.ValidateSecretScope(scopeID, pluginName, nodeID); err != nil {
+		return err
+	}
 	return s.withRetry(ctx, true, func(ctx context.Context, db *gorm.DB) error {
-		return errors.WithStack(db.Where("node_id = ?", nodeID).Delete(&PluginNodeSecret{}).Error)
+		return errors.WithStack(db.Where("org_id = ? AND plugin_name = ? AND node_id = ?", scopeID, pluginName, nodeID).Delete(&PluginNodeSecret{}).Error)
 	})
 }
 

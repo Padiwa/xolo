@@ -58,7 +58,7 @@ func (o *oauthClient) handleStartConnect(w http.ResponseWriter, r *http.Request)
 	pd.Host = endpoint.Host
 
 	redirectURI := strings.TrimSuffix(publicBaseURL, "/") + pd.BasePath + "callback"
-	authURL, err := o.start(ctx, userID, r.Header.Get("X-Xolo-Org-Id"), pd.NodeID, pd.Endpoint, redirectURI)
+	authURL, err := o.start(ctx, userID, pd.NodeID, pd.Endpoint, redirectURI)
 	if err != nil {
 		slog.WarnContext(ctx, "mcp-bridge/ui: could not start the authorization", slog.Any("error", err))
 		w.WriteHeader(http.StatusBadGateway)

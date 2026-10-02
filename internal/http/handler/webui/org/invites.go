@@ -3,17 +3,17 @@ package org
 import (
 	"log/slog"
 	"net/http"
-	"strconv"
-	"time"
 
 	"github.com/a-h/templ"
 	"github.com/bornholm/go-x/slogx"
+	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
+	"github.com/xolo-gateway/xolo/internal/core/service"
 	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
+	webcommon "github.com/xolo-gateway/xolo/internal/http/handler/webui/common"
 	common "github.com/xolo-gateway/xolo/internal/http/handler/webui/common/component"
 	"github.com/xolo-gateway/xolo/internal/http/handler/webui/org/component"
-	"github.com/pkg/errors"
 )
 
 func (h *Handler) getInvitesPage(w http.ResponseWriter, r *http.Request) {
@@ -23,7 +23,7 @@ func (h *Handler) getInvitesPage(w http.ResponseWriter, r *http.Request) {
 
 	org, err := h.orgFromSlug(ctx, orgSlug)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -43,11 +43,17 @@ func (h *Handler) getInvitesPage(w http.ResponseWriter, r *http.Request) {
 
 	roleNames := make(map[string]string, len(orgRoles))
 	for _, r := range orgRoles {
-		label := r.Name()
-		if r.BuiltinKind() != "" {
-			label = component.BuiltinRoleLabel(r.BuiltinKind())
+		roleNames[string(r.ID())] = r.Name()
+		if r.Builtin() {
+			switch r.BuiltinKind() {
+			case model.BuiltinKindMember:
+				roleNames[model.RoleMember] = r.Name()
+			case model.BuiltinKindAdmin:
+				roleNames[model.RoleOrgAdmin] = r.Name()
+			case model.BuiltinKindOwner:
+				roleNames[model.RoleOrgOwner] = r.Name()
+			}
 		}
-		roleNames[string(r.ID())] = label
 	}
 
 	baseURL := httpCtx.BaseURL(ctx)
@@ -83,7 +89,7 @@ func (h *Handler) getNewInvitePage(w http.ResponseWriter, r *http.Request) {
 
 	org, err := h.orgFromSlug(ctx, orgSlug)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -121,7 +127,7 @@ func (h *Handler) createInvite(w http.ResponseWriter, r *http.Request) {
 
 	org, err := h.orgFromSlug(ctx, orgSlug)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -130,37 +136,12 @@ func (h *Handler) createInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	role := r.FormValue("role")
-	if role == "" {
-		role = model.RoleMember
-	}
-
-	var inviteeEmail *string
-	if email := r.FormValue("invitee_email"); email != "" {
-		inviteeEmail = &email
-	}
-
-	var expiresAt *time.Time
-	if exp := r.FormValue("expires_at"); exp != "" {
-		t, err := time.Parse("2006-01-02", exp)
-		if err == nil {
-			expiresAt = &t
-		}
-	}
-
-	var maxUses *int
-	if mu := r.FormValue("max_uses"); mu != "" {
-		n, err := strconv.Atoi(mu)
-		if err == nil && n > 0 {
-			maxUses = &n
-		}
-	}
-
-	invite := model.NewInviteToken(org.ID(), role, inviteeEmail, expiresAt, maxUses, user.ID())
-
-	if err := h.inviteStore.CreateInvite(ctx, invite); err != nil {
-		slog.ErrorContext(ctx, "could not create invite", slogx.Error(err))
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+	invite, err := h.invitationService.Create(ctx, httpCtx.TenantID(ctx), org.ID(), user.ID(), service.CreateInvitationInput{
+		Role: r.FormValue("role"), Email: r.FormValue("invitee_email"),
+		ExpiresAt: r.FormValue("expires_at"), MaxUses: r.FormValue("max_uses"),
+	})
+	if err != nil {
+		webcommon.WriteInvitationError(w, r, err)
 		return
 	}
 
@@ -174,6 +155,11 @@ func (h *Handler) deleteInvite(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	orgSlug := r.PathValue("orgSlug")
 	inviteID := r.PathValue("inviteID")
+
+	if _, _, err := h.resolveOrgAndInvite(ctx, orgSlug, inviteID); err != nil {
+		writeResourceLookupError(ctx, w, err)
+		return
+	}
 
 	if err := h.inviteStore.DeleteInvite(ctx, model.InviteTokenID(inviteID)); err != nil {
 		if errors.Is(err, port.ErrNotFound) {
@@ -192,6 +178,11 @@ func (h *Handler) revokeInvite(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	orgSlug := r.PathValue("orgSlug")
 	inviteID := r.PathValue("inviteID")
+
+	if _, _, err := h.resolveOrgAndInvite(ctx, orgSlug, inviteID); err != nil {
+		writeResourceLookupError(ctx, w, err)
+		return
+	}
 
 	if err := h.inviteStore.RevokeInvite(ctx, model.InviteTokenID(inviteID)); err != nil {
 		if errors.Is(err, port.ErrNotFound) {

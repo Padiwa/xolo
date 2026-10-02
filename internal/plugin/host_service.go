@@ -20,7 +20,7 @@ import (
 // per-node config lives in the pipeline graph (PluginNodeData.Config).
 //
 // GetSecret/SetSecret/DeleteSecret are a separate, persisted channel scoped
-// per node instance (orgID, pluginName, nodeID, key), used by plugins to
+// per node instance (scopeID, pluginName, nodeID, key), used by plugins to
 // store sensitive values (e.g. an MCP server auth token) that must never
 // appear in the pipeline graph's visible JSON.
 type XoloHostService struct {
@@ -216,36 +216,60 @@ func (s *XoloHostService) ListModels(ctx context.Context, req *proto.ListModelsF
 	return &proto.ListModelsForOrgResponse{Models: protoModels}, nil
 }
 
-// GetSecret returns the decrypted secret value for (orgID, pluginName, nodeID, key).
+// logSecretFailure records on the host the cause that the plugin never sees.
+// It identifies the secret by its owner and key only: never log the value or
+// its ciphertext.
+func logSecretFailure(ctx context.Context, operation string, err error, scopeID, pluginName, nodeID, key string) {
+	slog.ErrorContext(ctx, "host service: secret operation failed",
+		slog.String("operation", operation),
+		slog.String("scope", scopeID),
+		slog.String("plugin", pluginName),
+		slog.String("node", nodeID),
+		slog.String("key", key),
+		slog.Any("error", err),
+	)
+}
+
+// GetSecret returns the decrypted secret value for (scopeID, pluginName, nodeID, key).
 func (s *XoloHostService) GetSecret(ctx context.Context, req *proto.GetSecretRequest) (*proto.GetSecretResponse, error) {
+	if err := port.ValidateSecretKey(req.GetScopeId(), req.GetPluginName(), req.GetNodeId(), req.GetKey()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "scope, plugin, node and key are required")
+	}
 	if s.secretStore == nil {
 		return &proto.GetSecretResponse{Found: false}, nil
 	}
-	encrypted, found, err := s.secretStore.GetSecret(ctx, req.OrgId, req.PluginName, req.NodeId, req.Key)
+	encrypted, found, err := s.secretStore.GetSecret(ctx, req.ScopeId, req.PluginName, req.NodeId, req.Key)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "get secret: %v", err)
+		logSecretFailure(ctx, "get", err, req.ScopeId, req.PluginName, req.NodeId, req.Key)
+		return nil, status.Error(codes.Internal, "secret operation failed")
 	}
 	if !found {
 		return &proto.GetSecretResponse{Found: false}, nil
 	}
 	value, err := crypto.Decrypt(s.secretKey, encrypted)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "decrypt secret: %v", err)
+		logSecretFailure(ctx, "decrypt", err, req.ScopeId, req.PluginName, req.NodeId, req.Key)
+		return nil, status.Error(codes.Internal, "secret operation failed")
 	}
 	return &proto.GetSecretResponse{Value: value, Found: true}, nil
 }
 
-// SetSecret encrypts and persists value for (orgID, pluginName, nodeID, key).
+// SetSecret encrypts and persists value for (scopeID, pluginName, nodeID, key).
 func (s *XoloHostService) SetSecret(ctx context.Context, req *proto.SetSecretRequest) (*proto.SetSecretResponse, error) {
+	if err := port.ValidateSecretKey(req.GetScopeId(), req.GetPluginName(), req.GetNodeId(), req.GetKey()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "scope, plugin, node and key are required")
+	}
 	if s.secretStore == nil {
 		return nil, status.Error(codes.Unavailable, "secret store not configured")
 	}
 	encrypted, err := crypto.Encrypt(s.secretKey, req.Value)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "encrypt secret: %v", err)
+		logSecretFailure(ctx, "encrypt", err, req.ScopeId, req.PluginName, req.NodeId, req.Key)
+		return nil, status.Error(codes.Internal, "secret operation failed")
 	}
-	if err := s.secretStore.SetSecret(ctx, req.OrgId, req.PluginName, req.NodeId, req.Key, encrypted); err != nil {
-		return nil, status.Errorf(codes.Internal, "set secret: %v", err)
+	if err := s.secretStore.SetSecret(ctx, req.ScopeId, req.PluginName, req.NodeId, req.Key, encrypted); err != nil {
+		logSecretFailure(ctx, "set", err, req.ScopeId, req.PluginName, req.NodeId, req.Key)
+		return nil, status.Error(codes.Internal, "secret operation failed")
 	}
 	return &proto.SetSecretResponse{}, nil
 }
@@ -290,13 +314,17 @@ func (s *XoloHostService) EmitEvent(ctx context.Context, req *proto.EmitEventReq
 	return &proto.EmitEventResponse{}, nil
 }
 
-// DeleteSecret removes the secret for (orgID, pluginName, nodeID, key).
+// DeleteSecret removes the secret for (scopeID, pluginName, nodeID, key).
 func (s *XoloHostService) DeleteSecret(ctx context.Context, req *proto.DeleteSecretRequest) (*proto.DeleteSecretResponse, error) {
+	if err := port.ValidateSecretKey(req.GetScopeId(), req.GetPluginName(), req.GetNodeId(), req.GetKey()); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "scope, plugin, node and key are required")
+	}
 	if s.secretStore == nil {
 		return &proto.DeleteSecretResponse{}, nil
 	}
-	if err := s.secretStore.DeleteSecret(ctx, req.OrgId, req.PluginName, req.NodeId, req.Key); err != nil {
-		return nil, status.Errorf(codes.Internal, "delete secret: %v", err)
+	if err := s.secretStore.DeleteSecret(ctx, req.ScopeId, req.PluginName, req.NodeId, req.Key); err != nil {
+		logSecretFailure(ctx, "delete", err, req.ScopeId, req.PluginName, req.NodeId, req.Key)
+		return nil, status.Error(codes.Internal, "secret operation failed")
 	}
 	return &proto.DeleteSecretResponse{}, nil
 }

@@ -87,7 +87,7 @@ func scenarioPluginNodeSecretStore_DeleteAllForNode(t *testing.T, store *xologor
 		t.Fatalf("SetSecret: %v", err)
 	}
 
-	if err := store.DeleteAllForNode(ctx, "node-1"); err != nil {
+	if err := store.DeleteAllForNode(ctx, "org-1", "mcp-bridge", "node-1"); err != nil {
 		t.Fatalf("DeleteAllForNode: %v", err)
 	}
 

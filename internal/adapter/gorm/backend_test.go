@@ -3,6 +3,7 @@ package gorm_test
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -60,10 +61,14 @@ func newTestStore(t *testing.T) *xologorm.Store {
 func sqliteBackend() backend {
 	newDB := func(t *testing.T) *gormpkg.DB {
 		t.Helper()
-		db, err := gormpkg.Open(gormlite.Open(":memory:"), &gormpkg.Config{})
+		// A file-backed WAL database is shared by all pooled connections. Plain
+		// :memory: silently creates a different database for each connection and
+		// cannot exercise invitation snapshot conflicts or concurrent writers.
+		db, err := gormpkg.Open(gormlite.Open("file:"+filepath.Join(t.TempDir(), "store.sqlite")+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(1000)"), &gormpkg.Config{})
 		if err != nil {
 			t.Fatalf("open db: %v", err)
 		}
+		t.Cleanup(func() { closeDB(t, db) })
 		return db
 	}
 	return backend{

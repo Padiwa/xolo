@@ -22,6 +22,7 @@ type pluginManagerIface interface {
 type Handler struct {
 	mux                 *http.ServeMux
 	inviteStore         port.InviteStore
+	invitationService   *service.InvitationService
 	quotaService        *service.QuotaService
 	usageStore          port.UsageStore
 	userStore           port.UserStore
@@ -53,6 +54,7 @@ func NewHandler(
 	personalVMStore port.PersonalVirtualModelStore,
 	usageStore port.UsageStore,
 	inviteStore port.InviteStore,
+	invitationService *service.InvitationService,
 	applicationStore port.ApplicationStore,
 	quotaStore port.QuotaStore,
 	quotaService *service.QuotaService,
@@ -72,6 +74,7 @@ func NewHandler(
 	h := &Handler{
 		mux:                 http.NewServeMux(),
 		inviteStore:         inviteStore,
+		invitationService:   invitationService,
 		quotaService:        quotaService,
 		usageStore:          usageStore,
 		userStore:           userStore,
@@ -91,18 +94,18 @@ func NewHandler(
 
 	mount(h.mux, "/", isActive(http.HandlerFunc(h.getHomePage)))
 	mount(h.mux, "/no-org", isActive(http.HandlerFunc(h.getNoOrgPage)))
-	h.mux.Handle("POST /no-org/invitations/{tokenID}/decline", isActive(http.HandlerFunc(h.declineInvitation)))
+	h.mux.Handle("POST /no-org/invitations/{tokenID}/decline", http.HandlerFunc(h.declineInvitation))
 	mount(h.mux, "/switcher", isActive(http.HandlerFunc(h.getSwitcherFragment)))
 	mount(h.mux, "/usage", isActive(http.HandlerFunc(h.getDashboardPage)))
 	mount(h.mux, "/events", isActive(http.HandlerFunc(h.getPersonalEventsRedirect)))
 	hasModelAccess := authz.Middleware(http.HandlerFunc(h.getForbiddenPage), h.canAccessModelsPage())
 	mount(h.mux, "/models", isActive(hasModelAccess(http.HandlerFunc(h.getModelsPage))))
-	mount(h.mux, "/profile/", isActive(profile.NewHandler(userStore, orgStore, inviteStore, personalVMStore, secretStore, pluginManager)))
+	mount(h.mux, "/profile/", isActive(profile.NewHandler(userStore, orgStore, inviteStore, invitationService, personalVMStore, secretStore, pluginManager)))
 	mount(h.mux, "/admin/", isActive(admin.NewHandler(userStore, orgStore, roleStore, usageStore, taskRunner, exchangeRateService, pluginManager)))
-	mount(h.mux, "/orgs/", isActive(org.NewHandler(orgStore, roleStore, providerStore, virtualModelStore, middlewareStore, usageStore, inviteStore, userStore, applicationStore, exchangeRateService, quotaStore, secretStore, secretKey, pluginManager, subscriptionMonitor, eventStore, alertStore, alertIncidentStore, eventSettingsStore, eventsMaxPerOrg, eventsDefaultPerOrg)))
+	mount(h.mux, "/orgs/", isActive(org.NewHandler(orgStore, roleStore, providerStore, virtualModelStore, middlewareStore, usageStore, inviteStore, invitationService, userStore, applicationStore, exchangeRateService, quotaStore, secretStore, secretKey, pluginManager, subscriptionMonitor, eventStore, alertStore, alertIncidentStore, eventSettingsStore, eventsMaxPerOrg, eventsDefaultPerOrg)))
 
 	// Public join flow — no isActive wrapper (unauthenticated users get a sign-in prompt)
-	h.mux.Handle("/join/", http.StripPrefix("/join", join.NewHandler(orgStore, roleStore, inviteStore)))
+	h.mux.Handle("/join/", http.StripPrefix("/join", join.NewHandler(invitationService)))
 
 	return h
 }

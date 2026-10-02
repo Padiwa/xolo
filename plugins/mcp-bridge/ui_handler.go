@@ -34,6 +34,7 @@ type uiPageData struct {
 func loadPageData(r *http.Request) (uiPageData, error) {
 	ctx := r.Context()
 	orgID := r.Header.Get("X-Xolo-Org-Id")
+	scopeID := r.Header.Get("X-Xolo-Secret-Scope-Id")
 	nodeID := r.Header.Get("X-Xolo-Node-Id")
 	basePath := r.Header.Get("X-Xolo-Plugin-Base-Path")
 	if basePath == "" {
@@ -52,7 +53,7 @@ func loadPageData(r *http.Request) (uiPageData, error) {
 			slog.WarnContext(ctx, "mcp-bridge/ui: failed to load config", slog.Any("error", err))
 		}
 		if nodeID != "" {
-			_, found, err := host.GetSecret(ctx, orgID, pluginName, nodeID, secretKeyAuthValue)
+			_, found, err := host.GetSecret(ctx, scopeID, pluginName, nodeID, secretKeyAuthValue)
 			if err != nil {
 				slog.WarnContext(ctx, "mcp-bridge/ui: failed to check auth secret", slog.Any("error", err))
 			}
@@ -87,6 +88,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 func handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	orgID := r.Header.Get("X-Xolo-Org-Id")
+	scopeID := r.Header.Get("X-Xolo-Secret-Scope-Id")
 	nodeID := r.Header.Get("X-Xolo-Node-Id")
 	host := pluginsdk.HostClientFromContext(ctx)
 	pluginName := pluginsdk.PluginNameFromContext(ctx)
@@ -143,7 +145,7 @@ func handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "missing node context", http.StatusBadRequest)
 			return
 		}
-		if err := host.SetSecret(ctx, orgID, pluginName, nodeID, secretKeyAuthValue, authValue); err != nil {
+		if err := host.SetSecret(ctx, scopeID, pluginName, nodeID, secretKeyAuthValue, authValue); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

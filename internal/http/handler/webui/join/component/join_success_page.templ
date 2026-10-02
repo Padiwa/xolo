@@ -8,10 +8,12 @@ import (
 )
 
 type JoinSuccessVModel struct {
-	User    model.User
-	OrgName string
-	OrgSlug string
-	Role    string
+	User          model.User
+	OrgName       string
+	OrgSlug       string
+	RoleName      string
+	AlreadyMember bool
+	Destination   string
 }
 
 templ JoinSuccess(vmodel JoinSuccessVModel) {
@@ -24,15 +26,16 @@ templ JoinSuccess(vmodel JoinSuccessVModel) {
 			}
 			@card.Content() {
 				<div class="space-y-4">
-					<p class="text-sm text-muted-foreground">Vous avez rejoint l'organisation <strong class="text-foreground">{ vmodel.OrgName }</strong>.</p>
-					if vmodel.Role == model.RoleOrgAdmin || vmodel.Role == model.RoleOrgOwner {
-						@button.Button(button.Props{Href: "/orgs/" + vmodel.OrgSlug + "/usage", Class: "w-full"}) {
-							Accéder à l'organisation
-						}
+					if vmodel.AlreadyMember {
+						<p class="text-sm text-muted-foreground">Vous êtes déjà membre de l'organisation <strong class="text-foreground">{ vmodel.OrgName }</strong>. Vos rôles sont conservés.</p>
 					} else {
-						@button.Button(button.Props{Href: "/usage", Class: "w-full"}) {
-							Accéder à mon espace
-						}
+						<p class="text-sm text-muted-foreground">Vous avez rejoint l'organisation <strong class="text-foreground">{ vmodel.OrgName }</strong>.</p>
+					}
+					if vmodel.RoleName != "" {
+						<p class="text-sm">Rôle : { vmodel.RoleName }</p>
+					}
+					@button.Button(button.Props{Href: vmodel.Destination, Class: "w-full"}) {
+						Continuer
 					}
 				</div>
 			}

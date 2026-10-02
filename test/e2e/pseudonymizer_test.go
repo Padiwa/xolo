@@ -107,3 +107,31 @@ func TestPseudonymizer_HashWithoutKey_FailsClosed(t *testing.T) {
 		t.Errorf("event severity = %q, want error", evt.Severity())
 	}
 }
+
+func TestPseudonymizer_PersonalHMACScope(t *testing.T) {
+	before := len(env.provider.Requests())
+	result := chat(t, tokenAlice, "~/e2e-personal-hash", "Bonjour, je m'appelle Jean Dupont.")
+	if result.Status != 200 {
+		t.Fatalf("personal HMAC: status=%d body=%s", result.Status, result.Body)
+	}
+	requests := env.provider.Requests()
+	if len(requests) != before+1 {
+		t.Fatalf("provider calls=%d, want 1", len(requests)-before)
+	}
+	if strings.Contains(requests[len(requests)-1].Raw, "Jean Dupont") {
+		t.Fatal("personal data reached provider")
+	}
+	// Another user's identically named graph and node cannot use Alice's key.
+	before = len(requests)
+	result = chat(t, tokenCarol, "~/e2e-personal-hash", "Bonjour, je m'appelle Jean Dupont.")
+	if result.Status != 403 || !strings.Contains(result.Body, "clé HMAC") {
+		t.Fatalf("other user's graph: status=%d body=%s", result.Status, result.Body)
+	}
+	result = chat(t, tokenAlice, modelHashStrategy, "Bonjour, je m'appelle Jean Dupont.")
+	if result.Status != 403 || !strings.Contains(result.Body, "clé HMAC") {
+		t.Fatalf("org graph: status=%d body=%s", result.Status, result.Body)
+	}
+	if len(env.provider.Requests()) != before {
+		t.Fatal("missing keys must block before provider")
+	}
+}

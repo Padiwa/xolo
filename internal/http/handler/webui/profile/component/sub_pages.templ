@@ -13,7 +13,8 @@ import (
 
 type InvitationsPageVModel struct {
 	common.AppLayoutVModel
-	Invites []model.InviteToken
+	Invites   []model.InviteToken
+	RoleNames map[model.InviteTokenID]string
 }
 
 templ InvitationsPage(vmodel InvitationsPageVModel) {
@@ -60,7 +61,7 @@ templ InvitationsPage(vmodel InvitationsPageVModel) {
 											}
 										}
 										@table.Cell() {
-											@common.Badge(common.ToneInfo, inv.Role())
+											@common.Badge(common.ToneInfo, vmodel.RoleNames[inv.ID()])
 										}
 										@table.Cell(table.CellProps{Class: "text-muted-foreground"}) {
 											if inv.ExpiresAt() != nil {

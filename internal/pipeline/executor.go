@@ -11,10 +11,12 @@ import (
 
 // ExecutionContext carries per-request metadata through the pipeline engine.
 type ExecutionContext struct {
-	OrgID       string
-	UserID      string
-	TokenID     string
-	DisplayName string
+	// SecretScopeID is the graph owner, independent of the org used for models and quotas.
+	SecretScopeID string
+	OrgID         string
+	UserID        string
+	TokenID       string
+	DisplayName   string
 	// BodyJSON is the raw JSON of the LLM request body. It is the single source
 	// of truth for "the incoming request" inside the pipeline engine: the
 	// generator node's "request" output is seeded from it, and it is exposed
@@ -74,6 +76,8 @@ type UsedModelReporter interface {
 
 // ForwardResult is the output of a node's Forward execution.
 type ForwardResult struct {
+	// PluginContext retains the graph owner and node metadata for the backward pass.
+	PluginContext *proto.RequestContext
 	// ModelOutcome, when set by a terminal node, reports after the call which
 	// model actually answered.
 	ModelOutcome UsedModelReporter
@@ -112,7 +116,8 @@ type ForwardResult struct {
 
 // BackwardInput is what a node's Backward execution is given.
 type BackwardInput struct {
-	Node model.PipelineNode
+	PluginContext *proto.RequestContext
+	Node          model.PipelineNode
 	// NodeState is the blob Forward returned for the same node in the same
 	// execution.
 	NodeState []byte

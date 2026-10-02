@@ -178,29 +178,9 @@ func (h *Handler) getEditVirtualModelPage(w http.ResponseWriter, r *http.Request
 	orgSlug := r.PathValue("orgSlug")
 	modelID := r.PathValue("modelID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	org, vm, err := h.resolveOrgAndVirtualModel(ctx, orgSlug, modelID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	vm, err := h.virtualModelStore.GetVirtualModelByID(ctx, model.VirtualModelID(modelID))
-	if err != nil {
-		if errors.Is(err, port.ErrNotFound) {
-			http.NotFound(w, r)
-			return
-		}
-		slog.ErrorContext(ctx, "could not get virtual model", slog.Any("error", err))
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
-
-	// The store loads by ID only, so a {modelID} belonging to another org is
-	// resolvable through this route. Treat the mismatch as a 404 rather than
-	// surfacing a model that does not belong to the org the request came in
-	// for. Mirrors the personal handler's user-ownership check.
-	if vm.OrgID() != org.ID() {
-		http.NotFound(w, r)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -234,26 +214,9 @@ func (h *Handler) updateVirtualModel(w http.ResponseWriter, r *http.Request) {
 	orgSlug := r.PathValue("orgSlug")
 	modelID := r.PathValue("modelID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	org, vm, err := h.resolveOrgAndVirtualModel(ctx, orgSlug, modelID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	vm, err := h.virtualModelStore.GetVirtualModelByID(ctx, model.VirtualModelID(modelID))
-	if err != nil {
-		if errors.Is(err, port.ErrNotFound) {
-			http.NotFound(w, r)
-			return
-		}
-		slog.ErrorContext(ctx, "could not get virtual model", slog.Any("error", err))
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
-
-	// See getEditVirtualModelPage — reject cross-org access through this route.
-	if vm.OrgID() != org.ID() {
-		http.NotFound(w, r)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -330,26 +293,9 @@ func (h *Handler) deleteVirtualModel(w http.ResponseWriter, r *http.Request) {
 	orgSlug := r.PathValue("orgSlug")
 	modelID := r.PathValue("modelID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	_, vm, err := h.resolveOrgAndVirtualModel(ctx, orgSlug, modelID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	vm, err := h.virtualModelStore.GetVirtualModelByID(ctx, model.VirtualModelID(modelID))
-	if err != nil {
-		if errors.Is(err, port.ErrNotFound) {
-			http.NotFound(w, r)
-			return
-		}
-		slog.ErrorContext(ctx, "could not get virtual model", slog.Any("error", err))
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
-
-	// See getEditVirtualModelPage — reject cross-org access through this route.
-	if vm.OrgID() != org.ID() {
-		http.NotFound(w, r)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -363,7 +309,7 @@ func (h *Handler) deleteVirtualModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := secretcleanup.PruneRemovedNodes(ctx, h.secretStore, vm.Graph(), nil); err != nil {
+	if err := secretcleanup.PruneRemovedNodes(ctx, h.secretStore, string(vm.OrgID()), vm.Graph(), nil); err != nil {
 		slog.ErrorContext(ctx, "could not prune secrets for deleted virtual model", slog.Any("error", err))
 	}
 
@@ -376,26 +322,9 @@ func (h *Handler) getPipelineEditorPage(w http.ResponseWriter, r *http.Request) 
 	orgSlug := r.PathValue("orgSlug")
 	modelID := r.PathValue("modelID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	org, vm, err := h.resolveOrgAndVirtualModel(ctx, orgSlug, modelID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	vm, err := h.virtualModelStore.GetVirtualModelByID(ctx, model.VirtualModelID(modelID))
-	if err != nil {
-		if errors.Is(err, port.ErrNotFound) {
-			http.NotFound(w, r)
-			return
-		}
-		slog.ErrorContext(ctx, "could not get virtual model", slog.Any("error", err))
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
-
-	// See getEditVirtualModelPage — reject cross-org access through this route.
-	if vm.OrgID() != org.ID() {
-		http.NotFound(w, r)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 

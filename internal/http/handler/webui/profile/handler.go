@@ -10,8 +10,10 @@ import (
 	"github.com/bornholm/go-x/slogx"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
+	"github.com/xolo-gateway/xolo/internal/core/service"
 	"github.com/xolo-gateway/xolo/internal/crypto"
 	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
+	webcommon "github.com/xolo-gateway/xolo/internal/http/handler/webui/common"
 	common "github.com/xolo-gateway/xolo/internal/http/handler/webui/common/component"
 	"github.com/xolo-gateway/xolo/internal/http/handler/webui/profile/component"
 	"github.com/xolo-gateway/xolo/internal/http/middleware/authz"
@@ -22,13 +24,14 @@ type pluginManagerIface interface {
 }
 
 type Handler struct {
-	mux             *http.ServeMux
-	userStore       port.UserStore
-	orgStore        port.OrgStore
-	inviteStore     port.InviteStore
-	personalVMStore port.PersonalVirtualModelStore
-	secretStore     port.SecretStore
-	pluginManager   pluginManagerIface
+	mux               *http.ServeMux
+	userStore         port.UserStore
+	orgStore          port.OrgStore
+	inviteStore       port.InviteStore
+	invitationService *service.InvitationService
+	personalVMStore   port.PersonalVirtualModelStore
+	secretStore       port.SecretStore
+	pluginManager     pluginManagerIface
 }
 
 // ServeHTTP implements http.Handler.
@@ -36,15 +39,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
-func NewHandler(userStore port.UserStore, orgStore port.OrgStore, inviteStore port.InviteStore, personalVMStore port.PersonalVirtualModelStore, secretStore port.SecretStore, pluginManager pluginManagerIface) *Handler {
+func NewHandler(userStore port.UserStore, orgStore port.OrgStore, inviteStore port.InviteStore, invitationService *service.InvitationService, personalVMStore port.PersonalVirtualModelStore, secretStore port.SecretStore, pluginManager pluginManagerIface) *Handler {
 	h := &Handler{
-		mux:             http.NewServeMux(),
-		userStore:       userStore,
-		orgStore:        orgStore,
-		inviteStore:     inviteStore,
-		personalVMStore: personalVMStore,
-		secretStore:     secretStore,
-		pluginManager:   pluginManager,
+		mux:               http.NewServeMux(),
+		userStore:         userStore,
+		orgStore:          orgStore,
+		inviteStore:       inviteStore,
+		invitationService: invitationService,
+		personalVMStore:   personalVMStore,
+		secretStore:       secretStore,
+		pluginManager:     pluginManager,
 	}
 
 	// Require authentication for all profile routes
@@ -247,15 +251,21 @@ func (h *Handler) getInvitationsPage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := httpCtx.User(ctx)
 
-	invites, err := h.inviteStore.ListPendingInvitesForEmail(ctx, user.Email())
+	invites, err := h.inviteStore.ListPendingInvitesForEmail(ctx, httpCtx.TenantID(ctx), user.Email())
 	if err != nil {
 		slog.ErrorContext(ctx, "could not fetch invitations", slogx.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
+	invites, names, err := webcommon.PrepareInvitationList(ctx, h.invitationService, httpCtx.TenantID(ctx), user.ID(), invites)
+	if err != nil {
+		webcommon.WriteInvitationError(w, r, err)
+		return
+	}
 	vmodel := component.InvitationsPageVModel{
-		Invites: invites,
+		RoleNames: names,
+		Invites:   invites,
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
 			SelectedItem: "profile",

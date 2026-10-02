@@ -19,6 +19,10 @@ import (
 func (h *Handler) getPersonalModelsPage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := httpCtx.User(ctx)
+	if user == nil || httpCtx.TenantID(ctx) == "" || user.TenantID() != httpCtx.TenantID(ctx) {
+		http.NotFound(w, r)
+		return
+	}
 
 	vms, err := h.personalVMStore.ListPersonalVirtualModels(ctx, user.ID())
 	if err != nil {
@@ -69,6 +73,10 @@ func selectedPersonalModel(vms []model.PersonalVirtualModel, id string) model.Pe
 func (h *Handler) getNewPersonalModelPage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := httpCtx.User(ctx)
+	if user == nil || httpCtx.TenantID(ctx) == "" || user.TenantID() != httpCtx.TenantID(ctx) {
+		http.NotFound(w, r)
+		return
+	}
 
 	vmodel := component.PersonalModelFormVModel{
 		IsNew: true,
@@ -90,6 +98,10 @@ func (h *Handler) getNewPersonalModelPage(w http.ResponseWriter, r *http.Request
 func (h *Handler) createPersonalModel(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := httpCtx.User(ctx)
+	if user == nil || httpCtx.TenantID(ctx) == "" || user.TenantID() != httpCtx.TenantID(ctx) {
+		http.NotFound(w, r)
+		return
+	}
 
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Invalid form", http.StatusBadRequest)
@@ -143,6 +155,10 @@ func (h *Handler) createPersonalModel(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) getEditPersonalModelPage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := httpCtx.User(ctx)
+	if user == nil || httpCtx.TenantID(ctx) == "" || user.TenantID() != httpCtx.TenantID(ctx) {
+		http.NotFound(w, r)
+		return
+	}
 	vmID := r.PathValue("vmID")
 
 	vm, err := h.personalVMStore.GetPersonalVirtualModelByID(ctx, model.PersonalVirtualModelID(vmID))
@@ -185,6 +201,10 @@ func (h *Handler) getEditPersonalModelPage(w http.ResponseWriter, r *http.Reques
 func (h *Handler) updatePersonalModel(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := httpCtx.User(ctx)
+	if user == nil || httpCtx.TenantID(ctx) == "" || user.TenantID() != httpCtx.TenantID(ctx) {
+		http.NotFound(w, r)
+		return
+	}
 	vmID := r.PathValue("vmID")
 
 	vm, err := h.personalVMStore.GetPersonalVirtualModelByID(ctx, model.PersonalVirtualModelID(vmID))
@@ -276,6 +296,10 @@ func (h *Handler) updatePersonalModel(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) deletePersonalModel(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := httpCtx.User(ctx)
+	if user == nil || httpCtx.TenantID(ctx) == "" || user.TenantID() != httpCtx.TenantID(ctx) {
+		http.NotFound(w, r)
+		return
+	}
 	vmID := r.PathValue("vmID")
 
 	vm, err := h.personalVMStore.GetPersonalVirtualModelByID(ctx, model.PersonalVirtualModelID(vmID))
@@ -300,7 +324,7 @@ func (h *Handler) deletePersonalModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := secretcleanup.PruneRemovedNodes(ctx, h.secretStore, vm.Graph(), nil); err != nil {
+	if err := secretcleanup.PruneRemovedNodes(ctx, h.secretStore, "~:"+string(user.ID()), vm.Graph(), nil); err != nil {
 		slog.ErrorContext(ctx, "could not prune secrets for deleted personal virtual model", slogx.Error(err))
 	}
 
@@ -310,6 +334,10 @@ func (h *Handler) deletePersonalModel(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) getPersonalPipelineEditorPage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := httpCtx.User(ctx)
+	if user == nil || httpCtx.TenantID(ctx) == "" || user.TenantID() != httpCtx.TenantID(ctx) {
+		http.NotFound(w, r)
+		return
+	}
 	vmID := r.PathValue("vmID")
 
 	vm, err := h.personalVMStore.GetPersonalVirtualModelByID(ctx, model.PersonalVirtualModelID(vmID))

@@ -10,6 +10,7 @@ import (
 	"github.com/bornholm/go-x/slogx"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
+	"github.com/xolo-gateway/xolo/internal/http/handler/webui/common"
 	"github.com/xolo-gateway/xolo/internal/http/handler/webui/profile/component"
 	"github.com/xolo-gateway/xolo/internal/http/middleware/authz"
 )
@@ -28,7 +29,7 @@ func (h *Handler) getNoOrgPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch pending invitations for the user's email
-	invites, err := h.inviteStore.ListPendingInvitesForEmail(ctx, user.Email())
+	invites, err := h.inviteStore.ListPendingInvitesForEmail(ctx, httpCtx.TenantID(ctx), user.Email())
 	if err != nil {
 		slog.ErrorContext(ctx, "could not fetch invitations", slogx.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -44,7 +45,13 @@ func (h *Handler) getNoOrgPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	invites, names, err := common.PrepareInvitationList(ctx, h.invitationService, httpCtx.TenantID(ctx), user.ID(), invites)
+	if err != nil {
+		common.WriteInvitationError(w, r, err)
+		return
+	}
 	vmodel := component.NoOrgPageVModel{
+		RoleNames:   names,
 		User:        user,
 		Invites:     invites,
 		DeclinedIDs: declinedIDs,
@@ -64,19 +71,17 @@ func (h *Handler) declineInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	invite, err := h.inviteStore.GetInviteByID(ctx, model.InviteTokenID(tokenID))
-	if err != nil {
-		// Invite not found or already gone — redirect silently.
-		http.Redirect(w, r, baseURL.JoinPath("/no-org").String(), http.StatusSeeOther)
+	user := httpCtx.User(ctx)
+	if user == nil {
+		http.Redirect(w, r, "/auth/oidc/login", http.StatusSeeOther)
 		return
 	}
-
-	// Targeted invites are deleted when declined; open invites just get a cookie.
-	if invite.InviteeEmail() != nil {
-		if err := h.inviteStore.DeleteInvite(ctx, invite.ID()); err != nil {
-			slog.WarnContext(ctx, "could not delete targeted invite after decline", slogx.Error(err))
-		}
-	} else {
+	open, err := h.invitationService.Decline(ctx, httpCtx.TenantID(ctx), model.InviteTokenID(tokenID), user.ID())
+	if err != nil {
+		common.WriteInvitationError(w, r, err)
+		return
+	}
+	if open {
 		cookieName := fmt.Sprintf("declined_invite_%s", tokenID)
 		http.SetCookie(w, &http.Cookie{
 			Name:   cookieName,

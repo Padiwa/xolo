@@ -10,6 +10,7 @@ import (
 type NoOrgPageVModel struct {
 	User        model.User
 	Invites     []model.InviteToken
+	RoleNames   map[model.InviteTokenID]string
 	DeclinedIDs []string
 	// IsAdmin marks a platform administrator: they are not stuck here, the
 	// console is theirs and it is where an organisation gets created.
@@ -33,16 +34,6 @@ func noOrgDescription(isAdmin bool) string {
 	}
 
 	return "Xolo s'utilise depuis une organisation : c'est elle qui porte les fournisseurs, les modèles et le budget. Demandez à un administrateur de vous y inviter."
-}
-
-// inviteRoleLabel returns the display label for an organization role.
-func inviteRoleLabel(role string) string {
-	switch role {
-	case model.RoleOrgAdmin, model.RoleOrgOwner:
-		return "Administrateur"
-	default:
-		return "Utilisateur"
-	}
 }
 
 // NoOrgPage is the first screen a freshly provisioned account lands on: either
@@ -99,7 +90,7 @@ templ NoOrgPage(vmodel NoOrgPageVModel) {
 										{ string(inv.OrgID()) }
 									}
 								</span>
-								@common.Badge(common.ToneInfo, inviteRoleLabel(inv.Role()))
+								@common.Badge(common.ToneInfo, vmodel.RoleNames[inv.ID()])
 							</div>
 							<div class="flex flex-wrap gap-2">
 								@button.Button(button.Props{

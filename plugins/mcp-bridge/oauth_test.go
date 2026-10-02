@@ -201,10 +201,11 @@ func newOAuthPlugin(t *testing.T) (*Plugin, http.Handler, *fakeHostClient) {
 
 func oauthRequestContext(endpoint, userID string) *proto.RequestContext {
 	return &proto.RequestContext{
-		OrgId:      "org-1",
-		NodeId:     "node-1",
-		UserId:     userID,
-		ConfigJson: `{"endpoint":"` + endpoint + `","authMode":"oauth","publicBaseURL":"https://xolo.example.net"}`,
+		OrgId:         "org-1",
+		SecretScopeId: "org-1",
+		NodeId:        "node-1",
+		UserId:        userID,
+		ConfigJson:    `{"endpoint":"` + endpoint + `","authMode":"oauth","publicBaseURL":"https://xolo.example.net"}`,
 	}
 }
 
@@ -224,7 +225,7 @@ func toolNames(t *testing.T, p *Plugin, reqCtx *proto.RequestContext) []string {
 func TestPlugin_OAuth_ConnectThenCall(t *testing.T) {
 	as := newFakeAuthServer(t)
 	endpoint := as.URL + "/mcp"
-	p, ui, _ := newOAuthPlugin(t)
+	p, ui, hc := newOAuthPlugin(t)
 	reqCtx := oauthRequestContext(endpoint, "user-1")
 
 	if names := toolNames(t, p, reqCtx); len(names) != 1 || names[0] != connectToolName {
@@ -239,6 +240,13 @@ func TestPlugin_OAuth_ConnectThenCall(t *testing.T) {
 	}
 
 	authorize(t, p, ui, "user-1", "node-1", endpoint)
+	if _, found, _ := hc.GetSecret(t.Context(), "~:user-1", "mcp-bridge", "node-1", oauthSecretKey("user-1")); !found {
+		t.Fatal("authorization must belong to the personal profile")
+	}
+	if _, found, _ := hc.GetSecret(t.Context(), "org-1", "mcp-bridge", "node-1", oauthSecretKey("user-1")); found {
+		t.Fatal("authorization leaked into organization scope")
+	}
+	reqCtx.OrgId, reqCtx.SecretScopeId = "org-2", "org-2"
 
 	if names := toolNames(t, p, reqCtx); len(names) != 1 || names[0] != "echo" {
 		t.Fatalf("expected the server tools once authorized, got %v", names)
@@ -267,15 +275,16 @@ func TestPlugin_OAuth_RefreshRotatesTheToken(t *testing.T) {
 
 	expire := func() {
 		var token oauthToken
-		json.Unmarshal([]byte(hc.secrets["node-1:"+oauthSecretKey("user-1")]), &token)
+		json.Unmarshal([]byte(hc.secrets[[4]string{"~:user-1", "mcp-bridge", "node-1", oauthSecretKey("user-1")}]), &token)
 		token.Expiry = time.Now().Add(-time.Minute)
 		data, _ := json.Marshal(token)
-		hc.secrets["node-1:"+oauthSecretKey("user-1")] = string(data)
+		hc.secrets[[4]string{"~:user-1", "mcp-bridge", "node-1", oauthSecretKey("user-1")}] = string(data)
 	}
 
 	// Two refreshes in a row: the second one must present the rotated
 	// refresh token, or the server revokes the authorization.
 	for i := range 2 {
+		reqCtx.OrgId, reqCtx.SecretScopeId = fmt.Sprintf("org-%d", i), fmt.Sprintf("org-%d", i)
 		expire()
 		if names := toolNames(t, p, reqCtx); len(names) != 1 || names[0] != "echo" {
 			t.Fatalf("refresh %d: expected the server tools, got %v", i, names)
@@ -329,5 +338,60 @@ func TestPlugin_OAuth_ConnectRejectsInvalidLinks(t *testing.T) {
 		if rec := uiRequest(t, ui, http.MethodGet, target, "user-1", nil); rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: expected 400, got %d", target, rec.Code)
 		}
+	}
+}
+
+func TestPlugin_OAuth_NoLegacyScopeFallback(t *testing.T) {
+	p, _, hc := newOAuthPlugin(t)
+	endpoint := "https://mcp.example.test/mcp"
+	token := &oauthToken{Endpoint: endpoint, AccessToken: "legacy", Expiry: time.Now().Add(time.Hour)}
+	data, err := json.Marshal(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hc.SetSecret(t.Context(), "org-1", "mcp-bridge", "node-1", oauthSecretKey("user-1"), string(data)); err != nil {
+		t.Fatal(err)
+	}
+	if names := toolNames(t, p, oauthRequestContext(endpoint, "user-1")); len(names) != 1 || names[0] != connectToolName {
+		t.Fatalf("unexpected legacy token fallback: %v", names)
+	}
+}
+
+func TestPlugin_OAuth_ConcurrentRefresh(t *testing.T) {
+	as := newFakeAuthServer(t)
+	endpoint := as.URL + "/mcp"
+	p, ui, hc := newOAuthPlugin(t)
+	authorize(t, p, ui, "user-1", "node-1", endpoint)
+	raw, found, err := hc.GetSecret(t.Context(), "~:user-1", "mcp-bridge", "node-1", oauthSecretKey("user-1"))
+	if err != nil || !found {
+		t.Fatalf("token not found: %v", err)
+	}
+	var token oauthToken
+	if err := json.Unmarshal([]byte(raw), &token); err != nil {
+		t.Fatal(err)
+	}
+	token.Expiry = time.Now().Add(-time.Minute)
+	if err := saveToken(t.Context(), hc, "mcp-bridge", "node-1", "user-1", &token); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for range 8 {
+		wg.Go(func() {
+			_, err := p.oauthClient().accessToken(t.Context(), hc, "mcp-bridge", "node-1", "user-1", endpoint)
+			errs <- err
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.revoked || len(as.used) != 1 {
+		t.Fatalf("refresh must rotate exactly once, rotations=%d revoked=%v", len(as.used), as.revoked)
 	}
 }

@@ -7,11 +7,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
 	"github.com/xolo-gateway/xolo/internal/core/rbac"
 	"github.com/xolo-gateway/xolo/internal/core/secretcleanup"
-	"github.com/pkg/errors"
 )
 
 // pipelineEntityResponse is the JSON shape returned for any PipelineEntity
@@ -69,7 +69,7 @@ func (h *Handler) serveGetEntity(w http.ResponseWriter, r *http.Request, res pip
 		return
 	}
 
-	if allowed, err := h.hasPermission(ctx, e.OrgID(), res.readPerm); err != nil {
+	if allowed, err := h.hasPermission(r, e.OrgID(), res.readPerm); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	} else if !allowed {
@@ -95,7 +95,7 @@ func (h *Handler) serveUpdateEntity(w http.ResponseWriter, r *http.Request, res 
 		return
 	}
 
-	if allowed, err := h.hasPermission(ctx, e.OrgID(), res.writePerm); err != nil {
+	if allowed, err := h.hasPermission(r, e.OrgID(), res.writePerm); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	} else if !allowed {
@@ -122,7 +122,7 @@ func (h *Handler) serveUpdateEntity(w http.ResponseWriter, r *http.Request, res 
 		return
 	}
 
-	if err := secretcleanup.PruneRemovedNodes(ctx, h.secretStore, oldGraph, req.Graph); err != nil {
+	if err := secretcleanup.PruneRemovedNodes(ctx, h.secretStore, string(e.OrgID()), oldGraph, req.Graph); err != nil {
 		slog.ErrorContext(ctx, "could not prune secrets for removed pipeline nodes", slog.Any("error", err))
 	}
 

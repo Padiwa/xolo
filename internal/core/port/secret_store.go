@@ -1,9 +1,13 @@
 package port
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"strings"
+)
 
-// SecretStore persists opaque key/value secrets scoped to a single plugin
-// node instance within a pipeline graph (identified by nodeID). Values are
+// SecretStore persists opaque values under (scopeID, pluginName, nodeID, key).
+// Node IDs alone are not globally unique. Values are
 // stored verbatim; callers (e.g. XoloHostService) are responsible for
 // encrypting before SetSecret and decrypting after GetSecret, the same way
 // Provider.APIKey is encrypted/decrypted by its callers rather than by the
@@ -11,12 +15,31 @@ import "context"
 // plugins, so sensitive node configuration (e.g. an MCP server auth token)
 // never has to be stored in the pipeline graph's visible JSON.
 type SecretStore interface {
-	GetSecret(ctx context.Context, orgID, pluginName, nodeID, key string) (value string, found bool, err error)
-	SetSecret(ctx context.Context, orgID, pluginName, nodeID, key, value string) error
-	DeleteSecret(ctx context.Context, orgID, pluginName, nodeID, key string) error
-	// DeleteAllForNode removes every secret stored for nodeID, regardless of
-	// key. Node IDs are unique per pipeline node instance across the whole
-	// system, so this is the only scoping needed when a node (or the virtual
-	// model it belongs to) is deleted.
-	DeleteAllForNode(ctx context.Context, nodeID string) error
+	GetSecret(ctx context.Context, scopeID, pluginName, nodeID, key string) (value string, found bool, err error)
+	SetSecret(ctx context.Context, scopeID, pluginName, nodeID, key, value string) error
+	DeleteSecret(ctx context.Context, scopeID, pluginName, nodeID, key string) error
+	// DeleteAllForNode removes keys only for this scope, plugin and node.
+	DeleteAllForNode(ctx context.Context, scopeID, pluginName, nodeID string) error
+}
+
+// ValidateSecretScope rejects missing components without normalizing identifiers.
+// scopeID is an organization ID or "~:<userID>" for a personal profile.
+func ValidateSecretScope(scopeID, pluginName, nodeID string) error {
+	for i, value := range []string{scopeID, pluginName, nodeID} {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("secret %s is required: %w", []string{"scope", "plugin", "node"}[i], ErrInvalid)
+		}
+	}
+	return nil
+}
+
+// ValidateSecretKey validates the full isolation key. Empty secret values are valid.
+func ValidateSecretKey(scopeID, pluginName, nodeID, key string) error {
+	if err := ValidateSecretScope(scopeID, pluginName, nodeID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(key) == "" {
+		return fmt.Errorf("secret key is required: %w", ErrInvalid)
+	}
+	return nil
 }

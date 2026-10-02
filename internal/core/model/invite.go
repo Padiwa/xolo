@@ -1,15 +1,20 @@
 package model
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"time"
-
-	"github.com/rs/xid"
 )
 
 type InviteTokenID string
 
 func NewInviteTokenID() InviteTokenID {
-	return InviteTokenID(xid.New().String())
+	var token [32]byte
+	// crypto/rand.Read fills the buffer and fails closed if entropy is unavailable.
+	if _, err := rand.Read(token[:]); err != nil {
+		panic(err)
+	}
+	return InviteTokenID(base64.RawURLEncoding.EncodeToString(token[:]))
 }
 
 // InviteToken allows new users to join an organization.
@@ -46,17 +51,17 @@ type BaseInviteToken struct {
 	org             Organization
 }
 
-func (t *BaseInviteToken) ID() InviteTokenID          { return t.id }
-func (t *BaseInviteToken) OrgID() OrgID               { return t.orgID }
-func (t *BaseInviteToken) Role() string                { return t.role }
-func (t *BaseInviteToken) InviteeEmail() *string       { return t.inviteeEmail }
-func (t *BaseInviteToken) ExpiresAt() *time.Time       { return t.expiresAt }
-func (t *BaseInviteToken) MaxUses() *int               { return t.maxUses }
-func (t *BaseInviteToken) UsesCount() int              { return t.usesCount }
-func (t *BaseInviteToken) CreatedByUserID() UserID     { return t.createdByUserID }
-func (t *BaseInviteToken) RevokedAt() *time.Time       { return t.revokedAt }
-func (t *BaseInviteToken) CreatedAt() time.Time        { return t.createdAt }
-func (t *BaseInviteToken) Org() Organization           { return t.org }
+func (t *BaseInviteToken) ID() InviteTokenID       { return t.id }
+func (t *BaseInviteToken) OrgID() OrgID            { return t.orgID }
+func (t *BaseInviteToken) Role() string            { return t.role }
+func (t *BaseInviteToken) InviteeEmail() *string   { return t.inviteeEmail }
+func (t *BaseInviteToken) ExpiresAt() *time.Time   { return t.expiresAt }
+func (t *BaseInviteToken) MaxUses() *int           { return t.maxUses }
+func (t *BaseInviteToken) UsesCount() int          { return t.usesCount }
+func (t *BaseInviteToken) CreatedByUserID() UserID { return t.createdByUserID }
+func (t *BaseInviteToken) RevokedAt() *time.Time   { return t.revokedAt }
+func (t *BaseInviteToken) CreatedAt() time.Time    { return t.createdAt }
+func (t *BaseInviteToken) Org() Organization       { return t.org }
 
 var _ InviteToken = &BaseInviteToken{}
 
@@ -79,7 +84,7 @@ func IsInviteValid(t InviteToken) bool {
 	if t.RevokedAt() != nil {
 		return false
 	}
-	if t.ExpiresAt() != nil && time.Now().After(*t.ExpiresAt()) {
+	if t.ExpiresAt() != nil && !time.Now().Before(*t.ExpiresAt()) {
 		return false
 	}
 	if t.MaxUses() != nil && t.UsesCount() >= *t.MaxUses() {

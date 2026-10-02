@@ -134,29 +134,9 @@ func (h *Handler) getEditMiddlewarePage(w http.ResponseWriter, r *http.Request) 
 	orgSlug := r.PathValue("orgSlug")
 	middlewareID := r.PathValue("middlewareID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	org, mw, err := h.resolveOrgAndMiddleware(ctx, orgSlug, middlewareID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	mw, err := h.middlewareStore.GetMiddlewareByID(ctx, model.MiddlewareID(middlewareID))
-	if err != nil {
-		if errors.Is(err, port.ErrNotFound) {
-			http.NotFound(w, r)
-			return
-		}
-		slog.ErrorContext(ctx, "could not get middleware", slog.Any("error", err))
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
-
-	// The store loads by ID only, so a {middlewareID} belonging to another org is
-	// resolvable through this route. Treat the mismatch as a 404 rather than
-	// surfacing a middleware that does not belong to the org the request came in
-	// for. Mirrors getEditVirtualModelPage's ownership check.
-	if mw.OrgID() != org.ID() {
-		http.NotFound(w, r)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -210,26 +190,9 @@ func (h *Handler) updateMiddleware(w http.ResponseWriter, r *http.Request) {
 	orgSlug := r.PathValue("orgSlug")
 	middlewareID := r.PathValue("middlewareID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	_, mw, err := h.resolveOrgAndMiddleware(ctx, orgSlug, middlewareID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	mw, err := h.middlewareStore.GetMiddlewareByID(ctx, model.MiddlewareID(middlewareID))
-	if err != nil {
-		if errors.Is(err, port.ErrNotFound) {
-			http.NotFound(w, r)
-			return
-		}
-		slog.ErrorContext(ctx, "could not get middleware", slog.Any("error", err))
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
-
-	// See getEditMiddlewarePage — reject cross-org access through this route.
-	if mw.OrgID() != org.ID() {
-		http.NotFound(w, r)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -282,26 +245,9 @@ func (h *Handler) toggleMiddleware(w http.ResponseWriter, r *http.Request) {
 	orgSlug := r.PathValue("orgSlug")
 	middlewareID := r.PathValue("middlewareID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	_, mw, err := h.resolveOrgAndMiddleware(ctx, orgSlug, middlewareID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	mw, err := h.middlewareStore.GetMiddlewareByID(ctx, model.MiddlewareID(middlewareID))
-	if err != nil {
-		if errors.Is(err, port.ErrNotFound) {
-			http.NotFound(w, r)
-			return
-		}
-		slog.ErrorContext(ctx, "could not get middleware", slog.Any("error", err))
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
-
-	// See getEditMiddlewarePage — reject cross-org access through this route.
-	if mw.OrgID() != org.ID() {
-		http.NotFound(w, r)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -333,26 +279,9 @@ func (h *Handler) deleteMiddleware(w http.ResponseWriter, r *http.Request) {
 	orgSlug := r.PathValue("orgSlug")
 	middlewareID := r.PathValue("middlewareID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	_, mw, err := h.resolveOrgAndMiddleware(ctx, orgSlug, middlewareID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	mw, err := h.middlewareStore.GetMiddlewareByID(ctx, model.MiddlewareID(middlewareID))
-	if err != nil {
-		if errors.Is(err, port.ErrNotFound) {
-			http.NotFound(w, r)
-			return
-		}
-		slog.ErrorContext(ctx, "could not get middleware", slog.Any("error", err))
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
-
-	// See getEditMiddlewarePage — reject cross-org access through this route.
-	if mw.OrgID() != org.ID() {
-		http.NotFound(w, r)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -366,7 +295,7 @@ func (h *Handler) deleteMiddleware(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := secretcleanup.PruneRemovedNodes(ctx, h.secretStore, mw.Graph(), nil); err != nil {
+	if err := secretcleanup.PruneRemovedNodes(ctx, h.secretStore, string(mw.OrgID()), mw.Graph(), nil); err != nil {
 		slog.ErrorContext(ctx, "could not prune secrets for deleted middleware", slog.Any("error", err))
 	}
 
@@ -379,25 +308,9 @@ func (h *Handler) getMiddlewarePipelineEditorPage(w http.ResponseWriter, r *http
 	orgSlug := r.PathValue("orgSlug")
 	middlewareID := r.PathValue("middlewareID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	org, mw, err := h.resolveOrgAndMiddleware(ctx, orgSlug, middlewareID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	mw, err := h.middlewareStore.GetMiddlewareByID(ctx, model.MiddlewareID(middlewareID))
-	if err != nil {
-		if errors.Is(err, port.ErrNotFound) {
-			http.NotFound(w, r)
-			return
-		}
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-		return
-	}
-
-	// See getEditMiddlewarePage — reject cross-org access through this route.
-	if mw.OrgID() != org.ID() {
-		http.NotFound(w, r)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 

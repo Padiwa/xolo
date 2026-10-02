@@ -57,3 +57,17 @@ communicates with Xolo only through the gRPC interface defined here may be
 distributed under any license, including a proprietary one: see
 [LICENSE-EXCEPTION](../../LICENSE-EXCEPTION) at the repository root for the
 exact scope of that permission and its limits.
+
+## Secret scopes
+
+Use `RequestContext.SecretScopeId` for node configuration secrets and pass the
+full `(scopeID, pluginName, nodeID, key)` tuple to the host client. The scope is
+an organization ID or `~:<userID>` for a personal graph. `OrgId` remains the
+organization used for model resolution, quotas and events; it is independent
+of the graph owner. Plugin UIs receive `X-Xolo-Secret-Scope-Id` from the server.
+Per-user MCP OAuth authorizations always use `~:<userID>` and `oauth:<userID>`,
+including while running organization graphs. There is no fallback scope.
+
+Rebuild and ship the host and all plugins together when upgrading this contract
+(`scope_id` in secret RPCs and `secret_scope_id` in `RequestContext`).
+The handshake protocol is version 2; version 1 binaries are rejected.

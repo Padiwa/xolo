@@ -7,11 +7,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
 	"github.com/xolo-gateway/xolo/internal/core/secretcleanup"
 	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
-	"github.com/pkg/errors"
 )
 
 // ─── Request / response shapes ───────────────────────────────────────────────
@@ -35,6 +35,10 @@ func (h *Handler) handleListPersonalVMs(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	if httpCtx.TenantID(ctx) == "" || user.TenantID() != httpCtx.TenantID(ctx) {
+		http.NotFound(w, r)
+		return
+	}
 
 	vms, err := h.personalVMStore.ListPersonalVirtualModels(ctx, user.ID())
 	if err != nil {
@@ -56,6 +60,10 @@ func (h *Handler) handleCreatePersonalVM(w http.ResponseWriter, r *http.Request)
 	user := httpCtx.User(ctx)
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if httpCtx.TenantID(ctx) == "" || user.TenantID() != httpCtx.TenantID(ctx) {
+		http.NotFound(w, r)
 		return
 	}
 
@@ -95,6 +103,10 @@ func (h *Handler) handleGetPersonalVM(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	if httpCtx.TenantID(ctx) == "" || user.TenantID() != httpCtx.TenantID(ctx) {
+		http.NotFound(w, r)
+		return
+	}
 
 	vmID := model.PersonalVirtualModelID(r.PathValue("vmID"))
 	vm, err := h.personalVMStore.GetPersonalVirtualModelByID(ctx, vmID)
@@ -123,6 +135,10 @@ func (h *Handler) handleUpdatePersonalVM(w http.ResponseWriter, r *http.Request)
 	user := httpCtx.User(ctx)
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if httpCtx.TenantID(ctx) == "" || user.TenantID() != httpCtx.TenantID(ctx) {
+		http.NotFound(w, r)
 		return
 	}
 
@@ -173,7 +189,7 @@ func (h *Handler) handleUpdatePersonalVM(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := secretcleanup.PruneRemovedNodes(ctx, h.secretStore, oldGraph, req.Graph); err != nil {
+	if err := secretcleanup.PruneRemovedNodes(ctx, h.secretStore, "~:"+string(user.ID()), oldGraph, req.Graph); err != nil {
 		slog.ErrorContext(ctx, "could not prune secrets for removed pipeline nodes", slog.Any("error", err))
 	}
 
@@ -187,6 +203,10 @@ func (h *Handler) handleDeletePersonalVM(w http.ResponseWriter, r *http.Request)
 	user := httpCtx.User(ctx)
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if httpCtx.TenantID(ctx) == "" || user.TenantID() != httpCtx.TenantID(ctx) {
+		http.NotFound(w, r)
 		return
 	}
 
@@ -211,7 +231,7 @@ func (h *Handler) handleDeletePersonalVM(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := secretcleanup.PruneRemovedNodes(ctx, h.secretStore, vm.Graph(), nil); err != nil {
+	if err := secretcleanup.PruneRemovedNodes(ctx, h.secretStore, "~:"+string(user.ID()), vm.Graph(), nil); err != nil {
 		slog.ErrorContext(ctx, "could not prune secrets for deleted personal virtual model", slog.Any("error", err))
 	}
 
@@ -225,6 +245,10 @@ func (h *Handler) handleExportPersonalVM(w http.ResponseWriter, r *http.Request)
 	user := httpCtx.User(ctx)
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if httpCtx.TenantID(ctx) == "" || user.TenantID() != httpCtx.TenantID(ctx) {
+		http.NotFound(w, r)
 		return
 	}
 
@@ -265,6 +289,10 @@ func (h *Handler) handleImportPersonalVM(w http.ResponseWriter, r *http.Request)
 	user := httpCtx.User(ctx)
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if httpCtx.TenantID(ctx) == "" || user.TenantID() != httpCtx.TenantID(ctx) {
+		http.NotFound(w, r)
 		return
 	}
 

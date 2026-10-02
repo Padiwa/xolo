@@ -17,13 +17,13 @@ type HostClient interface {
 	SaveConfig(ctx context.Context, orgID, pluginName, configJSON string) error
 	// ListModels returns all enabled LLM models available for the given org.
 	ListModels(ctx context.Context, orgID string) ([]*proto.ModelInfo, error)
-	// GetSecret returns the value stored for (orgID, pluginName, nodeID, key),
+	// GetSecret returns the value stored for (scopeID, pluginName, nodeID, key),
 	// and whether it was found.
-	GetSecret(ctx context.Context, orgID, pluginName, nodeID, key string) (string, bool, error)
-	// SetSecret persists value for (orgID, pluginName, nodeID, key).
-	SetSecret(ctx context.Context, orgID, pluginName, nodeID, key, value string) error
-	// DeleteSecret removes the value stored for (orgID, pluginName, nodeID, key).
-	DeleteSecret(ctx context.Context, orgID, pluginName, nodeID, key string) error
+	GetSecret(ctx context.Context, scopeID, pluginName, nodeID, key string) (string, bool, error)
+	// SetSecret persists value for (scopeID, pluginName, nodeID, key).
+	SetSecret(ctx context.Context, scopeID, pluginName, nodeID, key, value string) error
+	// DeleteSecret removes the value stored for (scopeID, pluginName, nodeID, key).
+	DeleteSecret(ctx context.Context, scopeID, pluginName, nodeID, key string) error
 	// EmitEvent records an event in Xolo's event system. The host forces the
 	// event source to the plugin name and namespaces the type under
 	// "plugin.<name>.". orgID/userID may be empty for platform-global events.
@@ -88,9 +88,9 @@ func (c *grpcHostClient) ListModels(ctx context.Context, orgID string) ([]*proto
 	return resp.Models, nil
 }
 
-func (c *grpcHostClient) GetSecret(ctx context.Context, orgID, pluginName, nodeID, key string) (string, bool, error) {
+func (c *grpcHostClient) GetSecret(ctx context.Context, scopeID, pluginName, nodeID, key string) (string, bool, error) {
 	resp, err := c.client.GetSecret(ctx, &proto.GetSecretRequest{
-		OrgId:      orgID,
+		ScopeId:    scopeID,
 		PluginName: pluginName,
 		NodeId:     nodeID,
 		Key:        key,
@@ -101,9 +101,9 @@ func (c *grpcHostClient) GetSecret(ctx context.Context, orgID, pluginName, nodeI
 	return resp.Value, resp.Found, nil
 }
 
-func (c *grpcHostClient) SetSecret(ctx context.Context, orgID, pluginName, nodeID, key, value string) error {
+func (c *grpcHostClient) SetSecret(ctx context.Context, scopeID, pluginName, nodeID, key, value string) error {
 	_, err := c.client.SetSecret(ctx, &proto.SetSecretRequest{
-		OrgId:      orgID,
+		ScopeId:    scopeID,
 		PluginName: pluginName,
 		NodeId:     nodeID,
 		Key:        key,
@@ -131,9 +131,9 @@ func (c *grpcHostClient) EmitEvent(ctx context.Context, event Event) error {
 	return nil
 }
 
-func (c *grpcHostClient) DeleteSecret(ctx context.Context, orgID, pluginName, nodeID, key string) error {
+func (c *grpcHostClient) DeleteSecret(ctx context.Context, scopeID, pluginName, nodeID, key string) error {
 	_, err := c.client.DeleteSecret(ctx, &proto.DeleteSecretRequest{
-		OrgId:      orgID,
+		ScopeId:    scopeID,
 		PluginName: pluginName,
 		NodeId:     nodeID,
 		Key:        key,

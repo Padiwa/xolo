@@ -78,7 +78,7 @@ func (h *Handler) handleListVirtualModels(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if allowed, err := h.hasPermission(ctx, org.ID(), rbac.PermVirtualModelsRead); err != nil {
+	if allowed, err := h.hasPermission(r, org.ID(), rbac.PermVirtualModelsRead); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	} else if !allowed {
@@ -115,7 +115,7 @@ func (h *Handler) handleCreateVirtualModel(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if allowed, err := h.hasPermission(ctx, org.ID(), rbac.PermVirtualModelsWrite); err != nil {
+	if allowed, err := h.hasPermission(r, org.ID(), rbac.PermVirtualModelsWrite); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	} else if !allowed {
@@ -174,7 +174,7 @@ func (h *Handler) handleDeleteVirtualModel(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if allowed, err := h.hasPermission(ctx, vm.OrgID(), rbac.PermVirtualModelsWrite); err != nil {
+	if allowed, err := h.hasPermission(r, vm.OrgID(), rbac.PermVirtualModelsWrite); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	} else if !allowed {
@@ -191,7 +191,7 @@ func (h *Handler) handleDeleteVirtualModel(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if err := secretcleanup.PruneRemovedNodes(ctx, h.secretStore, vm.Graph(), nil); err != nil {
+	if err := secretcleanup.PruneRemovedNodes(ctx, h.secretStore, string(vm.OrgID()), vm.Graph(), nil); err != nil {
 		slog.ErrorContext(ctx, "could not prune secrets for deleted virtual model", slog.Any("error", err))
 	}
 
@@ -337,11 +337,11 @@ func (h *Handler) handlePipelineNodeTypes(w http.ResponseWriter, r *http.Request
 			ConfigSchema: `{"type":"object","properties":{"timezone":{"type":"string","title":"Fuseau horaire (IANA)","description":"Ex. Europe/Paris. UTC par défaut."}}}`,
 		},
 		nodeTypeDescriptor{
-			Type:        model.NodeTypeTrace,
-			Label:       "Trace",
-			Description: "Enregistre les valeurs connectées dans un événement Xolo (type pipeline.trace) pour observer le pipeline en production. Les ports d'entrée se déclarent dans la configuration.",
-			InputPorts:  []*proto.PortDescriptor{},
-			OutputPorts: []*proto.PortDescriptor{},
+			Type:         model.NodeTypeTrace,
+			Label:        "Trace",
+			Description:  "Enregistre les valeurs connectées dans un événement Xolo (type pipeline.trace) pour observer le pipeline en production. Les ports d'entrée se déclarent dans la configuration.",
+			InputPorts:   []*proto.PortDescriptor{},
+			OutputPorts:  []*proto.PortDescriptor{},
 			ConfigSchema: `{"type":"object","properties":{"severity":{"type":"string","title":"Sévérité","enum":["info","warning","error"],"default":"info"},"inputs":{"type":"array","title":"Ports d'entrée","items":{"type":"object","properties":{"name":{"type":"string","title":"Nom"},"portType":{"type":"string","title":"Type","enum":["string","number","boolean","request","response"]}},"required":["name"]}}}}`,
 		},
 		nodeTypeDescriptor{
@@ -411,7 +411,7 @@ func (h *Handler) handleExportVirtualModel(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if allowed, err := h.hasPermission(ctx, vm.OrgID(), rbac.PermVirtualModelsRead); err != nil {
+	if allowed, err := h.hasPermission(r, vm.OrgID(), rbac.PermVirtualModelsRead); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	} else if !allowed {
@@ -450,7 +450,7 @@ func (h *Handler) handleImportVirtualModel(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if allowed, err := h.hasPermission(ctx, org.ID(), rbac.PermVirtualModelsWrite); err != nil {
+	if allowed, err := h.hasPermission(r, org.ID(), rbac.PermVirtualModelsWrite); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	} else if !allowed {

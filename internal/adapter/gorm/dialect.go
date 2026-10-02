@@ -39,14 +39,10 @@ var retryablePGCodes = map[string]struct{}{
 // failure (a busy/locked SQLite database, a serialization conflict or deadlock
 // on PostgreSQL) that warrants replaying the whole transaction.
 func isRetryableError(err error) bool {
-	var sqliteErr *sqlite3.Error
-	if errors.As(err, &sqliteErr) {
-		switch sqliteErr.Code() {
-		case sqlite3.BUSY, sqlite3.LOCKED:
-			return true
-		default:
-			return false
-		}
+	// The driver may return ErrorCode or ExtendedErrorCode directly (not just
+	// *sqlite3.Error), notably for BUSY_SNAPSHOT during a read-to-write upgrade.
+	if errors.Is(err, sqlite3.BUSY) || errors.Is(err, sqlite3.LOCKED) {
+		return true
 	}
 
 	var pgErr *pgconn.PgError

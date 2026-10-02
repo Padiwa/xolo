@@ -11,13 +11,13 @@ import (
 
 	"github.com/bornholm/genai/llm"
 	genaiProxy "github.com/bornholm/genai/proxy"
+	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
 	"github.com/xolo-gateway/xolo/internal/core/rbac"
 	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
 	"github.com/xolo-gateway/xolo/internal/pipeline"
 	proto "github.com/xolo-gateway/xolo/pkg/pluginsdk/proto"
-	"github.com/pkg/errors"
 )
 
 const metaPipelineExecution = "pipeline.execution"
@@ -366,6 +366,7 @@ func (a *PipelineHookAdapter) buildMiddlewareEC(ctx context.Context, req *genaiP
 	orgID := org.ID()
 	return pipeline.ExecutionContext{
 		OrgID:           string(orgID),
+		SecretScopeID:   string(orgID),
 		UserID:          userID,
 		DisplayName:     displayName,
 		TokenID:         AuthTokenIDFromMeta(req.Metadata),
@@ -609,7 +610,12 @@ func (a *PipelineHookAdapter) buildEC(ctx context.Context, req *genaiProxy.Proxy
 		protoVMs = buildProtoVMs(ctx, a.virtualModelStore, orgID)
 	}
 
+	scopeID := string(vm.OrgID())
+	if personal, ok := vm.(*personalVMAdapter); ok {
+		scopeID = "~:" + string(personal.pvm.UserID())
+	}
 	return pipeline.ExecutionContext{
+		SecretScopeID:   scopeID,
 		OrgID:           string(orgID),
 		UserID:          userID,
 		DisplayName:     displayName,

@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
-	"github.com/pkg/errors"
 	"gorm.io/gorm"
 )
 
@@ -86,20 +86,39 @@ func (s *Store) DeleteInvite(ctx context.Context, id model.InviteTokenID) error 
 // IncrementInviteUses implements port.InviteStore.
 func (s *Store) IncrementInviteUses(ctx context.Context, id model.InviteTokenID) error {
 	return s.withRetry(ctx, true, func(ctx context.Context, db *gorm.DB) error {
-		return errors.WithStack(db.Model(&InviteToken{}).
-			Where("id = ?", string(id)).
-			UpdateColumn("uses_count", gorm.Expr("uses_count + 1")).Error)
+		result := db.Model(&InviteToken{}).
+			Where("id = ? AND revoked_at IS NULL", string(id)).
+			Scopes(unexpiredInvitations(time.Now())).
+			Where("max_uses IS NULL OR uses_count < max_uses").
+			Where("invitee_email IS NULL OR uses_count = 0").
+			UpdateColumn("uses_count", gorm.Expr("uses_count + 1"))
+		if result.Error != nil {
+			return errors.WithStack(result.Error)
+		}
+		if result.RowsAffected != 1 {
+			return port.ErrInvalid
+		}
+		return nil
 	})
 }
 
-// ListPendingInvitesForEmail implements port.InviteStore.
-func (s *Store) ListPendingInvitesForEmail(ctx context.Context, email string) ([]model.InviteToken, error) {
+// ListPendingInvitesForEmail implements port.InviteStore. The recipient is
+// matched case-insensitively, like the acceptance check; SQLite's LOWER() only
+// folds ASCII, so a non-ASCII letter still has to match the case it was stored in.
+func (s *Store) ListPendingInvitesForEmail(ctx context.Context, tenantID model.TenantID, email string) ([]model.InviteToken, error) {
+	if tenantID == "" {
+		return nil, port.ErrInvalid
+	}
 	var tokens []*InviteToken
 	now := time.Now()
 	err := s.withRetry(ctx, false, func(ctx context.Context, db *gorm.DB) error {
 		return errors.WithStack(db.Preload("Org").
-			Where("invitee_email = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)", email, now).
-			Order("created_at DESC").
+			Joins("JOIN organizations ON organizations.id = invite_tokens.org_id").
+			Where("organizations.tenant_id = ? AND organizations.active <> 0", string(tenantID)).
+			Where("LOWER(invite_tokens.invitee_email) = LOWER(?) AND invite_tokens.revoked_at IS NULL", email).
+			Scopes(unexpiredInvitations(now)).
+			Where("(invite_tokens.max_uses IS NULL OR invite_tokens.uses_count < invite_tokens.max_uses) AND invite_tokens.uses_count = 0").
+			Order("invite_tokens.created_at DESC").
 			Find(&tokens).Error)
 	})
 	if err != nil {
@@ -113,3 +132,14 @@ func (s *Store) ListPendingInvitesForEmail(ctx context.Context, email string) ([
 }
 
 var _ port.InviteStore = &Store{}
+
+// SQLite stores RFC3339 text, whose offsets and fractional seconds cannot be
+// compared lexically. Compare instants for legacy rows as well as new UTC dates.
+func unexpiredInvitations(now time.Time) func(*gorm.DB) *gorm.DB {
+	return func(db *gorm.DB) *gorm.DB {
+		if isSQLite(db) {
+			return db.Where("invite_tokens.expires_at IS NULL OR julianday(invite_tokens.expires_at) > julianday(?)", now)
+		}
+		return db.Where("invite_tokens.expires_at IS NULL OR invite_tokens.expires_at > ?", now)
+	}
+}

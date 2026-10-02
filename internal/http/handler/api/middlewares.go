@@ -144,7 +144,7 @@ func (h *Handler) handleUpdateMiddlewareSettings(w http.ResponseWriter, r *http.
 		return
 	}
 
-	if allowed, err := h.hasPermission(ctx, mw.OrgID(), rbac.PermMiddlewaresWrite); err != nil {
+	if allowed, err := h.hasPermission(r, mw.OrgID(), rbac.PermMiddlewaresWrite); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	} else if !allowed {
@@ -222,7 +222,7 @@ func (h *Handler) handleDeleteMiddleware(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if allowed, err := h.hasPermission(ctx, mw.OrgID(), rbac.PermMiddlewaresWrite); err != nil {
+	if allowed, err := h.hasPermission(r, mw.OrgID(), rbac.PermMiddlewaresWrite); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	} else if !allowed {
@@ -235,7 +235,7 @@ func (h *Handler) handleDeleteMiddleware(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := secretcleanup.PruneRemovedNodes(ctx, h.secretStore, mw.Graph(), nil); err != nil {
+	if err := secretcleanup.PruneRemovedNodes(ctx, h.secretStore, string(mw.OrgID()), mw.Graph(), nil); err != nil {
 		slog.ErrorContext(ctx, "could not prune secrets for deleted middleware", slog.Any("error", err))
 	}
 
@@ -257,7 +257,7 @@ func (h *Handler) orgForPerm(w http.ResponseWriter, r *http.Request, perm rbac.P
 		return nil, false
 	}
 
-	if allowed, err := h.hasPermission(ctx, org.ID(), perm); err != nil {
+	if allowed, err := h.hasPermission(r, org.ID(), perm); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return nil, false
 	} else if !allowed {

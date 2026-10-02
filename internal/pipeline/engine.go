@@ -8,6 +8,7 @@ import (
 	"github.com/bornholm/genai/llm"
 	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/core/model"
+	proto "github.com/xolo-gateway/xolo/pkg/pluginsdk/proto"
 )
 
 // Engine executes pipeline graphs.
@@ -46,8 +47,9 @@ type ForwardExecution struct {
 
 // ExecutedNode pairs a node with the opaque state returned by its Forward call.
 type ExecutedNode struct {
-	Node      model.PipelineNode
-	NodeState []byte
+	PluginContext *proto.RequestContext
+	Node          model.PipelineNode
+	NodeState     []byte
 	// NoResponseRewrite records that this node declared, during its forward
 	// pass, that it will not rewrite the response for this execution.
 	NoResponseRewrite bool
@@ -108,7 +110,7 @@ func (e *Engine) RunForward(ctx context.Context, graph *model.PipelineGraph, ec 
 		// Splice the executed nodes of any nested pipeline before this node's own
 		// entry, so the backward pass covers them (in reverse) too.
 		executed = append(executed, result.NestedExecutedNodes...)
-		executed = append(executed, ExecutedNode{Node: *node, NodeState: result.NodeState, NoResponseRewrite: result.NoResponseRewrite})
+		executed = append(executed, ExecutedNode{PluginContext: result.PluginContext, Node: *node, NodeState: result.NodeState, NoResponseRewrite: result.NoResponseRewrite})
 
 		// Store output values in the value context.
 		for port, val := range result.OutputValues {
@@ -225,6 +227,7 @@ func (e *Engine) RunBackwardWithToolCalls(
 		result, err := ex.Backward(ctx, BackwardInput{
 			Node:            en.Node,
 			NodeState:       en.NodeState,
+			PluginContext:   en.PluginContext,
 			Model:           modelForBackward,
 			ResponseContent: current,
 			ToolCallsJSON:   currentToolCalls,

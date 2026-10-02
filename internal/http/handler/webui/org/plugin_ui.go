@@ -8,9 +8,9 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/core/port"
 	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
-	"github.com/pkg/errors"
 )
 
 // servePluginUI reverse-proxies requests to a plugin's embedded HTTP server.
@@ -31,7 +31,16 @@ func (h *Handler) servePluginUI(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	orgSlug := r.PathValue("orgSlug")
 	pluginName := r.PathValue("pluginName")
+	user := httpCtx.User(ctx)
+	if user == nil || httpCtx.TenantID(ctx) == "" || user.TenantID() != httpCtx.TenantID(ctx) {
+		http.NotFound(w, r)
+		return
+	}
 
+	if h.pluginManager == nil {
+		http.NotFound(w, r)
+		return
+	}
 	uiPort := h.pluginManager.HTTPPort(pluginName)
 	if uiPort == 0 {
 		http.NotFound(w, r)
@@ -58,11 +67,19 @@ func (h *Handler) servePluginUI(w http.ResponseWriter, r *http.Request) {
 	pluginBasePath := fmt.Sprintf("/orgs/%s/plugins/%s/ui", orgSlug, pluginName)
 	nodeID := r.URL.Query().Get("nodeId")
 
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
+	proxy.Director = nil
+	proxy.Rewrite = func(pr *httputil.ProxyRequest) {
+		pr.SetURL(target)
+		req := pr.Out
+		// Remove all client-supplied plugin context before injecting trusted values.
+		for key := range req.Header {
+			if strings.HasPrefix(strings.ToLower(key), "x-xolo-") {
+				delete(req.Header, key)
+			}
+		}
 		// Inject org context so the plugin can identify which org is making the request.
 		req.Header.Set("X-Xolo-Org-Id", string(org.ID()))
+		req.Header.Set("X-Xolo-Secret-Scope-Id", string(org.ID()))
 		// Inject the mount base path so the plugin can build correct relative/absolute URLs.
 		req.Header.Set("X-Xolo-Plugin-Base-Path", pluginBasePath+"/")
 		// The user and the public URL are always set, never forwarded from the

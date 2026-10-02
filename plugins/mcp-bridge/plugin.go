@@ -80,13 +80,13 @@ func (p *Plugin) connect(ctx context.Context, reqCtx *proto.RequestContext) (*mc
 		if hc == nil {
 			return nil, cfg, errors.WithStack(ErrNotAuthorized)
 		}
-		token, err := p.oauthClient().accessToken(ctx, hc, "mcp-bridge", reqCtx.GetOrgId(), reqCtx.GetNodeId(), reqCtx.GetUserId(), cfg.Endpoint)
+		token, err := p.oauthClient().accessToken(ctx, hc, "mcp-bridge", reqCtx.GetNodeId(), reqCtx.GetUserId(), cfg.Endpoint)
 		if err != nil {
 			return nil, cfg, err
 		}
 		authHeaderName, authValue = "Authorization", "Bearer "+token
 	} else if hc := p.getHostClient(); hc != nil {
-		v, found, err := hc.GetSecret(ctx, reqCtx.GetOrgId(), "mcp-bridge", reqCtx.GetNodeId(), secretKeyAuthValue)
+		v, found, err := hc.GetSecret(ctx, reqCtx.GetSecretScopeId(), "mcp-bridge", reqCtx.GetNodeId(), secretKeyAuthValue)
 		if err != nil {
 			return nil, Config{}, errors.Wrap(err, "get auth secret")
 		}

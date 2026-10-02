@@ -168,6 +168,11 @@ func TestUpgradeFromExistingDatabase(t *testing.T) {
 	if err := db.Table("usage_records").AutoMigrate(&legacyUsageRecord{}); err != nil {
 		t.Fatalf("migrate legacy usage_records: %v", err)
 	}
+	// These tables existed before the quota migrations. Keep the partial
+	// fixture valid for the later invitation and secret migrations as well.
+	if err := db.AutoMigrate(&Membership{}, &InviteToken{}, &PluginNodeSecret{}); err != nil {
+		t.Fatalf("migrate existing invitation tables: %v", err)
+	}
 	if err := db.Exec("CREATE TABLE migrations (id VARCHAR(255) PRIMARY KEY)").Error; err != nil {
 		t.Fatalf("create migrations table: %v", err)
 	}
@@ -272,6 +277,11 @@ func TestUpgradeReplaysApplicationBackfill(t *testing.T) {
 
 	if err := db.Table("usage_records").AutoMigrate(&legacyUsageRecord{}); err != nil {
 		t.Fatalf("migrate legacy usage_records: %v", err)
+	}
+	// These tables existed before the quota migrations. Keep the partial
+	// fixture valid for the later invitation and secret migrations as well.
+	if err := db.AutoMigrate(&Membership{}, &InviteToken{}, &PluginNodeSecret{}); err != nil {
+		t.Fatalf("migrate existing invitation tables: %v", err)
 	}
 	// quota_usages must already exist: on a real production instance it was
 	// created by migration 202609170002 (which is marked applied here, so it

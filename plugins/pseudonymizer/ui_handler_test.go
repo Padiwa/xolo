@@ -13,12 +13,12 @@ import (
 
 // fakeUIHost implémente pluginsdk.HostClient avec un store en mémoire.
 type fakeUIHost struct {
-	secrets map[string]string
+	secrets map[[4]string]string
 	emit    pluginsdk.Event
 }
 
 func newFakeUIHost() *fakeUIHost {
-	return &fakeUIHost{secrets: map[string]string{}}
+	return &fakeUIHost{secrets: map[[4]string]string{}}
 }
 
 func (h *fakeUIHost) GetConfig(_ context.Context, _, _ string) (string, error) {
@@ -28,16 +28,16 @@ func (h *fakeUIHost) SaveConfig(_ context.Context, _, _, _ string) error { retur
 func (h *fakeUIHost) ListModels(_ context.Context, _ string) ([]*proto.ModelInfo, error) {
 	return nil, nil
 }
-func (h *fakeUIHost) GetSecret(_ context.Context, _, _, nodeID, key string) (string, bool, error) {
-	v, ok := h.secrets[nodeID+":"+key]
+func (h *fakeUIHost) GetSecret(_ context.Context, scopeID, pluginName, nodeID, key string) (string, bool, error) {
+	v, ok := h.secrets[[4]string{scopeID, pluginName, nodeID, key}]
 	return v, ok, nil
 }
-func (h *fakeUIHost) SetSecret(_ context.Context, _, _, nodeID, key, value string) error {
-	h.secrets[nodeID+":"+key] = value
+func (h *fakeUIHost) SetSecret(_ context.Context, scopeID, pluginName, nodeID, key, value string) error {
+	h.secrets[[4]string{scopeID, pluginName, nodeID, key}] = value
 	return nil
 }
-func (h *fakeUIHost) DeleteSecret(_ context.Context, _, _, nodeID, key string) error {
-	delete(h.secrets, nodeID+":"+key)
+func (h *fakeUIHost) DeleteSecret(_ context.Context, scopeID, pluginName, nodeID, key string) error {
+	delete(h.secrets, [4]string{scopeID, pluginName, nodeID, key})
 	return nil
 }
 func (h *fakeUIHost) EmitEvent(_ context.Context, e pluginsdk.Event) error {
@@ -64,6 +64,7 @@ func uiRequest(method, target, body, orgID, nodeID string, host pluginsdk.HostCl
 	}
 	if orgID != "" {
 		r.Header.Set("X-Xolo-Org-Id", orgID)
+		r.Header.Set("X-Xolo-Secret-Scope-Id", orgID)
 	}
 	if nodeID != "" {
 		r.Header.Set("X-Xolo-Node-Id", nodeID)
@@ -85,7 +86,7 @@ func TestHandleSaveHashKey_Success(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("expected redirect, got %d (%s)", rec.Code, rec.Body.String())
 	}
-	if got := host.secrets["node-1:hash_key"]; got != uiHexKey {
+	if got := host.secrets[[4]string{"org-1", "pseudonymizer", "node-1", "hash_key"}]; got != uiHexKey {
 		t.Errorf("expected stored secret %q, got %q", uiHexKey, got)
 	}
 }
@@ -102,7 +103,7 @@ func TestHandleSaveHashKey_Invalid(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (%s)", rec.Code, rec.Body.String())
 	}
-	if _, ok := host.secrets["node-1:hash_key"]; ok {
+	if _, ok := host.secrets[[4]string{"org-1", "pseudonymizer", "node-1", "hash_key"}]; ok {
 		t.Errorf("invalid key should not be stored")
 	}
 }
@@ -212,7 +213,7 @@ func TestConfigFromForm_UncheckedBoxesAndClearedNumbers(t *testing.T) {
 
 func TestHandleDeleteHashKey(t *testing.T) {
 	host := newFakeUIHost()
-	host.secrets["node-1:hash_key"] = uiHexKey
+	host.secrets[[4]string{"org-1", "pseudonymizer", "node-1", "hash_key"}] = uiHexKey
 	handler := newUIHandler(&Plugin{})
 
 	req := uiRequest(http.MethodPost, "/api/secrets/hash_key/delete",
@@ -223,7 +224,7 @@ func TestHandleDeleteHashKey(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("expected redirect, got %d (%s)", rec.Code, rec.Body.String())
 	}
-	if _, ok := host.secrets["node-1:hash_key"]; ok {
+	if _, ok := host.secrets[[4]string{"org-1", "pseudonymizer", "node-1", "hash_key"}]; ok {
 		t.Errorf("expected secret to be deleted")
 	}
 }

@@ -127,19 +127,9 @@ func (h *Handler) getMemberQuotaPage(w http.ResponseWriter, r *http.Request) {
 	orgSlug := r.PathValue("orgSlug")
 	membershipID := r.PathValue("membershipID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	org, membership, err := h.resolveOrgAndMembership(ctx, orgSlug, membershipID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	membership, err := h.orgStore.GetMembership(ctx, model.MembershipID(membershipID))
-	if err != nil {
-		if errors.Is(err, port.ErrNotFound) {
-			http.Error(w, "Membership not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 
@@ -209,19 +199,9 @@ func (h *Handler) saveMemberQuota(w http.ResponseWriter, r *http.Request) {
 	orgSlug := r.PathValue("orgSlug")
 	membershipID := r.PathValue("membershipID")
 
-	org, err := h.orgFromSlug(ctx, orgSlug)
+	org, membership, err := h.resolveOrgAndMembership(ctx, orgSlug, membershipID)
 	if err != nil {
-		http.Error(w, "Organization not found", http.StatusNotFound)
-		return
-	}
-
-	membership, err := h.orgStore.GetMembership(ctx, model.MembershipID(membershipID))
-	if err != nil {
-		if errors.Is(err, port.ErrNotFound) {
-			http.Error(w, "Membership not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		writeResourceLookupError(ctx, w, err)
 		return
 	}
 

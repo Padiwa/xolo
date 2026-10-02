@@ -43,12 +43,13 @@ func (e *PluginExecutor) Forward(ctx context.Context, node model.PipelineNode, i
 	}
 
 	reqCtx := &proto.RequestContext{
-		OrgId:       ec.OrgID,
-		UserId:      ec.UserID,
-		TokenId:     ec.TokenID,
-		DisplayName: ec.DisplayName,
-		ConfigJson:  configJSON,
-		NodeId:      node.ID,
+		SecretScopeId: ec.SecretScopeID,
+		OrgId:         ec.OrgID,
+		UserId:        ec.UserID,
+		TokenId:       ec.TokenID,
+		DisplayName:   ec.DisplayName,
+		ConfigJson:    configJSON,
+		NodeId:        node.ID,
 	}
 
 	inputsJSON := InputsJSON(inputs)
@@ -59,19 +60,22 @@ func (e *PluginExecutor) Forward(ctx context.Context, node model.PipelineNode, i
 		ec.ToolInspectors.Register(&pluginToolInspector{client: client, reqCtx: reqCtx})
 	}
 
-	// Dispatch based on capability.
-	if hasCapability(desc, proto.PluginDescriptor_PRE_REQUEST) {
-		return e.forwardPreRequest(ctx, client, reqCtx, node, inputs, inputsJSON, ec)
+	// Dispatch based on capability and keep this node's scope for PostResponse.
+	var result *ForwardResult
+	switch {
+	case hasCapability(desc, proto.PluginDescriptor_PRE_REQUEST):
+		result, err = e.forwardPreRequest(ctx, client, reqCtx, node, inputs, inputsJSON, ec)
+	case hasCapability(desc, proto.PluginDescriptor_RESOLVE_MODEL):
+		result, err = e.forwardResolveModel(ctx, client, reqCtx, node, inputs, inputsJSON, ec)
+	case hasCapability(desc, proto.PluginDescriptor_TOOL_PROVIDER):
+		result, err = e.forwardToolProvider(ctx, client, reqCtx, node, inputs, ec)
+	default:
+		result = &ForwardResult{OutputValues: inputs}
 	}
-	if hasCapability(desc, proto.PluginDescriptor_RESOLVE_MODEL) {
-		return e.forwardResolveModel(ctx, client, reqCtx, node, inputs, inputsJSON, ec)
+	if result != nil {
+		result.PluginContext = reqCtx
 	}
-	if hasCapability(desc, proto.PluginDescriptor_TOOL_PROVIDER) {
-		return e.forwardToolProvider(ctx, client, reqCtx, node, inputs, ec)
-	}
-
-	// No relevant capability: pass through.
-	return &ForwardResult{OutputValues: inputs}, nil
+	return result, err
 }
 
 // forwardToolProvider handles nodes whose plugin declares the TOOL_PROVIDER
@@ -266,6 +270,7 @@ func (e *PluginExecutor) Backward(ctx context.Context, in BackwardInput) (*Backw
 	}
 
 	out, err := client.PostResponse(ctx, &proto.PostResponseInput{
+		Ctx:                   in.PluginContext,
 		Model:                 in.Model,
 		PromptTokens:          prompt,
 		CompletionTokens:      completion,

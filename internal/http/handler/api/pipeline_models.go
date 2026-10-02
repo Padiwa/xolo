@@ -37,7 +37,7 @@ func (h *Handler) handlePipelineModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	if allowed, err := h.hasPermission(ctx, org.ID(), rbac.PermVirtualModelsRead); err != nil {
+	if allowed, err := h.hasPermission(r, org.ID(), rbac.PermVirtualModelsRead); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	} else if !allowed {

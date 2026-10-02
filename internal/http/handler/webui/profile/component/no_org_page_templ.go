@@ -18,6 +18,7 @@ import (
 type NoOrgPageVModel struct {
 	User        model.User
 	Invites     []model.InviteToken
+	RoleNames   map[model.InviteTokenID]string
 	DeclinedIDs []string
 	// IsAdmin marks a platform administrator: they are not stuck here, the
 	// console is theirs and it is where an organisation gets created.
@@ -41,16 +42,6 @@ func noOrgDescription(isAdmin bool) string {
 	}
 
 	return "Xolo s'utilise depuis une organisation : c'est elle qui porte les fournisseurs, les modèles et le budget. Demandez à un administrateur de vous y inviter."
-}
-
-// inviteRoleLabel returns the display label for an organization role.
-func inviteRoleLabel(role string) string {
-	switch role {
-	case model.RoleOrgAdmin, model.RoleOrgOwner:
-		return "Administrateur"
-	default:
-		return "Utilisateur"
-	}
 }
 
 // NoOrgPage is the first screen a freshly provisioned account lands on: either
@@ -213,7 +204,7 @@ func NoOrgPage(vmodel NoOrgPageVModel) templ.Component {
 								var templ_7745c5c3_Var8 string
 								templ_7745c5c3_Var8, templ_7745c5c3_Err = templ.JoinStringErrs(inv.Org().Name())
 								if templ_7745c5c3_Err != nil {
-									return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/no_org_page.templ`, Line: 97, Col: 28}
+									return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/no_org_page.templ`, Line: 88, Col: 28}
 								}
 								_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var8))
 								if templ_7745c5c3_Err != nil {
@@ -223,7 +214,7 @@ func NoOrgPage(vmodel NoOrgPageVModel) templ.Component {
 								var templ_7745c5c3_Var9 string
 								templ_7745c5c3_Var9, templ_7745c5c3_Err = templ.JoinStringErrs(string(inv.OrgID()))
 								if templ_7745c5c3_Err != nil {
-									return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/no_org_page.templ`, Line: 99, Col: 31}
+									return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/no_org_page.templ`, Line: 90, Col: 31}
 								}
 								_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var9))
 								if templ_7745c5c3_Err != nil {
@@ -234,7 +225,7 @@ func NoOrgPage(vmodel NoOrgPageVModel) templ.Component {
 							if templ_7745c5c3_Err != nil {
 								return templ_7745c5c3_Err
 							}
-							templ_7745c5c3_Err = common.Badge(common.ToneInfo, inviteRoleLabel(inv.Role())).Render(ctx, templ_7745c5c3_Buffer)
+							templ_7745c5c3_Err = common.Badge(common.ToneInfo, vmodel.RoleNames[inv.ID()]).Render(ctx, templ_7745c5c3_Buffer)
 							if templ_7745c5c3_Err != nil {
 								return templ_7745c5c3_Err
 							}
@@ -275,7 +266,7 @@ func NoOrgPage(vmodel NoOrgPageVModel) templ.Component {
 							var templ_7745c5c3_Var11 templ.SafeURL
 							templ_7745c5c3_Var11, templ_7745c5c3_Err = templ.JoinURLErrs(common.BaseURL(ctx, common.WithPath("/no-org/invitations/", string(inv.ID()), "/decline")))
 							if templ_7745c5c3_Err != nil {
-								return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/no_org_page.templ`, Line: 112, Col: 127}
+								return templ.Error{Err: templ_7745c5c3_Err, FileName: `internal/http/handler/webui/profile/component/no_org_page.templ`, Line: 103, Col: 127}
 							}
 							_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var11))
 							if templ_7745c5c3_Err != nil {

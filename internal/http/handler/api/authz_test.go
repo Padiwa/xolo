@@ -9,8 +9,8 @@ import (
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
 	"github.com/xolo-gateway/xolo/internal/core/rbac"
-	"github.com/xolo-gateway/xolo/internal/http/handler/api"
 	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
+	"github.com/xolo-gateway/xolo/internal/http/handler/api"
 )
 
 // emptyPermissionResolver stands in for the resolver installed by the
@@ -75,10 +75,11 @@ func (s *fakeVirtualModelStore) DeleteVirtualModel(ctx context.Context, id model
 // belonged to the model's owning org, so any authenticated user could
 // forge a DELETE for a vmID belonging to an org they have no access to.
 func TestHandleDeleteVirtualModel_RejectsCrossOrgRequest(t *testing.T) {
-	orgA := model.NewOrganization(testTenantID, "org-a", "Org A", "")
-	orgB := model.NewOrganization(testTenantID, "org-b", "Org B", "")
+	tenant := model.NewTenant("tenant", "Tenant", "")
+	orgA := model.NewOrganization(tenant.ID(), "org-a", "Org A", "")
+	orgB := model.NewOrganization(tenant.ID(), "org-b", "Org B", "")
 
-	attacker := model.NewUser(testTenantID, "test", "attacker", "attacker@example.com", "Attacker", true, "user")
+	attacker := model.NewUser(tenant.ID(), "test", "attacker", "attacker@example.com", "Attacker", true, "user")
 
 	orgStore := &fakeOrgStore{
 		orgsBySlug: map[string]model.Organization{
@@ -103,7 +104,7 @@ func TestHandleDeleteVirtualModel_RejectsCrossOrgRequest(t *testing.T) {
 	req := httptest.NewRequest(http.MethodDelete, "/api/orgs/org-a/virtual-models/"+string(victimVM.ID()), nil)
 	req.SetPathValue("orgSlug", "org-a")
 	req.SetPathValue("vmID", string(victimVM.ID()))
-	ctx := httpCtx.SetUser(req.Context(), attacker)
+	ctx := httpCtx.SetUser(httpCtx.SetTenant(req.Context(), tenant), attacker)
 	ctx = httpCtx.SetPermissionResolver(ctx, emptyPermissionResolver)
 	req = req.WithContext(ctx)
 

@@ -12,6 +12,7 @@ import (
 
 	gormadapter "github.com/xolo-gateway/xolo/internal/adapter/gorm"
 	"github.com/xolo-gateway/xolo/internal/core/model"
+	"github.com/xolo-gateway/xolo/internal/crypto"
 )
 
 // Plugins built from the working tree and served to the server under test.
@@ -200,7 +201,10 @@ func prepareDatabase(dsn, providerURL string) error {
 	if err := createMiddlewares(db); err != nil {
 		return err
 	}
-	return createVirtualModels(db)
+	if err := createVirtualModels(db); err != nil {
+		return err
+	}
+	return createPersonalHashModels(db)
 }
 
 // createAnthropicProvider clones the seeded OpenAI provider (whose API key is
@@ -561,4 +565,25 @@ func timeRestrictedGraph(open bool) *graph {
 		edge("gen.request", "hours.request").
 		edge("hours.request", "llm.request").
 		edge("llm.response", "out.response")
+}
+
+// Personal graphs reuse the organization middleware's node ID. Only Alice's
+// profile has an HMAC key; neither Carol nor the org graph may fall back to it.
+func createPersonalHashModels(db *gorm.DB) error {
+	g := newGraph().generator("gen").
+		plugin("pseudo", "pseudonymizer", `{"language":"fr","strategy":"hash"}`).
+		modelNode("llm", modelFast).sink("out").
+		edge("gen.request", "pseudo.request").edge("pseudo.request", "llm.request").edge("llm.response", "out.response")
+	now := time.Now()
+	for _, user := range []string{"usr-alice", "usr-carol"} {
+		vm := &gormadapter.PersonalVirtualModel{ID: "pvm-e2e-hash-" + user, UserID: user, Name: "e2e-personal-hash", GraphJSON: g.json(), CreatedAt: now, UpdatedAt: now}
+		if err := db.Create(vm).Error; err != nil {
+			return err
+		}
+	}
+	encrypted, err := crypto.Encrypt(seedSecretKey, strings.Repeat("ab", 32))
+	if err != nil {
+		return err
+	}
+	return db.Create(&gormadapter.PluginNodeSecret{ID: "secret-e2e-personal-hash", OrgID: "~:usr-alice", PluginName: "pseudonymizer", NodeID: "pseudo", Key: "hash_key", ValueEncrypted: encrypted, CreatedAt: now, UpdatedAt: now}).Error
 }

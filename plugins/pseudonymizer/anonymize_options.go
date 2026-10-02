@@ -15,7 +15,7 @@ const secretKeyHashHMAC = "hash_key"
 // pluginsdk.HostClient la satisfait ; la signature d'interface permet de
 // stubber facilement le host dans les tests unitaires.
 type hashKeyLoader interface {
-	GetSecret(ctx context.Context, orgID, pluginName, nodeID, key string) (string, bool, error)
+	GetSecret(ctx context.Context, scopeID, pluginName, nodeID, key string) (string, bool, error)
 }
 
 // errHashKeyMissing signale une stratégie hash sans clé HMAC exploitable. La
@@ -51,7 +51,7 @@ func buildAnonymizeOptions(
 		if host == nil {
 			return nil, fmt.Errorf("%w : store de secrets indisponible", errHashKeyMissing)
 		}
-		raw, found, err := host.GetSecret(ctx, reqCtx.GetOrgId(), "pseudonymizer", reqCtx.GetNodeId(), secretKeyHashHMAC)
+		raw, found, err := host.GetSecret(ctx, reqCtx.GetSecretScopeId(), "pseudonymizer", reqCtx.GetNodeId(), secretKeyHashHMAC)
 		if err != nil {
 			return nil, fmt.Errorf("%w : lecture du store de secrets : %v", errHashKeyMissing, err)
 		}

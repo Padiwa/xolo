@@ -6,6 +6,7 @@ import (
 	"github.com/xolo-gateway/xolo/internal/core/port"
 	"github.com/xolo-gateway/xolo/internal/core/rbac"
 	"github.com/xolo-gateway/xolo/internal/core/service"
+	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
 	"github.com/xolo-gateway/xolo/internal/http/middleware/authz"
 	proto "github.com/xolo-gateway/xolo/pkg/pluginsdk/proto"
 )
@@ -25,6 +26,7 @@ type Handler struct {
 	middlewareStore     port.MiddlewareStore
 	usageStore          port.UsageStore
 	inviteStore         port.InviteStore
+	invitationService   *service.InvitationService
 	userStore           port.UserStore
 	applicationStore    port.ApplicationStore
 	quotaStore          port.QuotaStore
@@ -54,6 +56,7 @@ func NewHandler(
 	middlewareStore port.MiddlewareStore,
 	usageStore port.UsageStore,
 	inviteStore port.InviteStore,
+	invitationService *service.InvitationService,
 	userStore port.UserStore,
 	applicationStore port.ApplicationStore,
 	exchangeRateService *service.ExchangeRateService,
@@ -78,6 +81,7 @@ func NewHandler(
 		middlewareStore:     middlewareStore,
 		usageStore:          usageStore,
 		inviteStore:         inviteStore,
+		invitationService:   invitationService,
 		userStore:           userStore,
 		applicationStore:    applicationStore,
 		quotaStore:          quotaStore,
@@ -100,12 +104,17 @@ func NewHandler(
 		return func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				orgSlug := r.PathValue("orgSlug")
-				authz.Middleware(
-					http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						http.Error(w, "Forbidden", http.StatusForbidden)
-					}),
-					h.hasPermission(orgSlug, perm),
-				)(next).ServeHTTP(w, r)
+				ctx := r.Context()
+				allowed, err := authz.Assert(ctx, httpCtx.User(ctx), h.hasPermission(orgSlug, perm))
+				if err != nil {
+					writeResourceLookupError(ctx, w, err)
+					return
+				}
+				if !allowed {
+					http.Error(w, "Forbidden", http.StatusForbidden)
+					return
+				}
+				next.ServeHTTP(w, r)
 			})
 		}
 	}

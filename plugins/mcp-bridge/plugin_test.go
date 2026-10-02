@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -12,11 +13,12 @@ import (
 )
 
 type fakeHostClient struct {
-	secrets map[string]string
+	mu      sync.Mutex
+	secrets map[[4]string]string
 }
 
 func newFakeHostClient() *fakeHostClient {
-	return &fakeHostClient{secrets: map[string]string{}}
+	return &fakeHostClient{secrets: map[[4]string]string{}}
 }
 
 func (c *fakeHostClient) GetConfig(_ context.Context, _, _ string) (string, error) { return "{}", nil }
@@ -25,18 +27,24 @@ func (c *fakeHostClient) ListModels(_ context.Context, _ string) ([]*proto.Model
 	return nil, nil
 }
 
-func (c *fakeHostClient) GetSecret(_ context.Context, _, _, nodeID, key string) (string, bool, error) {
-	v, ok := c.secrets[nodeID+":"+key]
+func (c *fakeHostClient) GetSecret(_ context.Context, scopeID, pluginName, nodeID, key string) (string, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v, ok := c.secrets[[4]string{scopeID, pluginName, nodeID, key}]
 	return v, ok, nil
 }
 
-func (c *fakeHostClient) SetSecret(_ context.Context, _, _, nodeID, key, value string) error {
-	c.secrets[nodeID+":"+key] = value
+func (c *fakeHostClient) SetSecret(_ context.Context, scopeID, pluginName, nodeID, key, value string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.secrets[[4]string{scopeID, pluginName, nodeID, key}] = value
 	return nil
 }
 
-func (c *fakeHostClient) DeleteSecret(_ context.Context, _, _, nodeID, key string) error {
-	delete(c.secrets, nodeID+":"+key)
+func (c *fakeHostClient) DeleteSecret(_ context.Context, scopeID, pluginName, nodeID, key string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.secrets, [4]string{scopeID, pluginName, nodeID, key})
 	return nil
 }
 
@@ -86,9 +94,10 @@ func TestPlugin_ListToolsAndCallTool_UsesStoredSecret(t *testing.T) {
 	p.SetHostClient(hc)
 
 	reqCtx := &proto.RequestContext{
-		OrgId:      "org-1",
-		NodeId:     "node-1",
-		ConfigJson: `{"endpoint":"` + srv.URL + `/mcp","authHeaderName":"Authorization"}`,
+		OrgId:         "org-1",
+		SecretScopeId: "org-1",
+		NodeId:        "node-1",
+		ConfigJson:    `{"endpoint":"` + srv.URL + `/mcp","authHeaderName":"Authorization"}`,
 	}
 
 	listOut, err := p.ListTools(context.Background(), &proto.ListToolsInput{Ctx: reqCtx})
@@ -128,9 +137,10 @@ func TestPlugin_ListTools_WrongSecret_Fails(t *testing.T) {
 	p.SetHostClient(hc)
 
 	reqCtx := &proto.RequestContext{
-		OrgId:      "org-1",
-		NodeId:     "node-1",
-		ConfigJson: `{"endpoint":"` + srv.URL + `/mcp","authHeaderName":"Authorization"}`,
+		OrgId:         "org-1",
+		SecretScopeId: "org-1",
+		NodeId:        "node-1",
+		ConfigJson:    `{"endpoint":"` + srv.URL + `/mcp","authHeaderName":"Authorization"}`,
 	}
 
 	if _, err := p.ListTools(context.Background(), &proto.ListToolsInput{Ctx: reqCtx}); err == nil {

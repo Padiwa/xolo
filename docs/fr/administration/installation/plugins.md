@@ -413,7 +413,9 @@ The `RequestContext` struct is passed to every capability method:
 
 | Field            | Type     | Description                              |
 | ---------------- | -------- | ---------------------------------------- |
-| `OrgId`          | `string` | Organisation ID                          |
+| `OrgId`          | `string` | Organisation used for model resolution, quotas and events |
+| `SecretScopeId`  | `string` | Graph owner: organisation ID or `~:<userID>` for a personal graph |
+| `NodeId`         | `string` | Plugin node placement ID |
 | `UserId`         | `string` | User ID                                  |
 | `TokenId`        | `string` | API token ID used for the request        |
 | `DisplayName`    | `string` | User display name                        |
@@ -502,6 +504,47 @@ Available host methods:
 | `SetSecret`    | Store a per-node encrypted secret                    |
 | `DeleteSecret` | Remove a per-node encrypted secret                   |
 | `EmitEvent`    | Record an event in Xolo's event system (see below)   |
+
+## Isolation des secrets et mise à niveau
+
+Les RPC `GetSecret`, `SetSecret` et `DeleteSecret` prennent `scope_id`,
+`plugin_name`, `node_id` et `key`. Leur clé d'isolation est le quadruplet complet ;
+aucune lecture ne cherche dans un autre périmètre. Les identifiants vides ou
+composés uniquement d'espaces sont refusés (`InvalidArgument`), sans normalisation.
+Une valeur secrète vide reste autorisée.
+
+Pour la configuration d'un nœud, utiliser `RequestContext.SecretScopeId`, qui suit
+le propriétaire du graphe lors des appels imbriqués, et `RequestContext.NodeId`.
+`OrgId` reste le contexte de résolution des modèles, des quotas et des événements.
+Les interfaces de plugins reçoivent le périmètre dans l'en-tête
+`X-Xolo-Secret-Scope-Id`, injecté par le serveur. Les jetons OAuth de `mcp-bridge`
+appartiennent toujours au profil `~:<userID>`, sous la clé `oauth:<userID>`, même
+lorsque le modèle exécuté appartient à une organisation. Supprimer un graphe
+d'organisation ne révoque donc pas les autorisations OAuth personnelles.
+
+Avant cette mise à niveau :
+
+1. Arrêter toutes les instances qui écrivent dans la base, puis sauvegarder la
+   base et conserver la clé de chiffrement existante.
+2. Reconstruire et livrer ensemble le serveur, le SDK et tous les plugins. Cette
+   évolution utilise le protocole de plugin version 2 ; les anciens binaires sont
+   refusés au démarrage.
+3. Démarrer une seule instance pour appliquer la migration `202609300003`, avant
+   de réouvrir les écritures. La migration vérifie les identifiants invalides et
+   les doublons, crée l'unicité `(org_id, plugin_name, node_id, key)`, puis supprime
+   l'ancien index `(node_id, key)` dans une transaction. La colonne SQL `org_id`
+   conserve son nom et contient aussi les périmètres personnels.
+4. Si les contrôles échouent, examiner les lignes identifiées dans le diagnostic
+   et résoudre manuellement l'incohérence avant de redémarrer. La migration ne
+   fusionne ni ne réattribue les lignes ; elle conserve leurs identifiants,
+   propriétaires, dates et contenus chiffrés. Son rollback automatique est refusé,
+   car l'ancienne unicité peut ne plus être rétablie sans perte de données.
+
+Les secrets historiquement écrasés ne sont pas récupérables par cette migration.
+Les autorisations OAuth qui avaient été enregistrées sous un périmètre
+d'organisation doivent être renouvelées depuis le profil : aucun repli de lecture
+ne les récupère. Les plugins installés restent des composants de confiance ; ce
+correctif ne constitue pas une autorisation des RPC face à un binaire malveillant.
 
 ## Emitting Events
 

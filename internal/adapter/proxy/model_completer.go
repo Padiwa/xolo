@@ -24,6 +24,7 @@ func (a *PipelineHookAdapter) Complete(ctx context.Context, req plugin.ModelComp
 	}
 
 	ec := pipeline.ExecutionContext{
+		SecretScopeID:   string(req.OrgID),
 		OrgID:           string(req.OrgID),
 		UserID:          string(req.UserID),
 		VisitedVMs:      map[model.VirtualModelID]struct{}{},

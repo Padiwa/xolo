@@ -69,7 +69,7 @@ type oauthClient struct {
 
 	mu      sync.Mutex
 	pending map[string]*pendingAuthorization
-	locks   map[string]*sync.Mutex
+	locks   map[[4]string]*sync.Mutex
 }
 
 func newOAuthClient() *oauthClient {
@@ -79,7 +79,7 @@ func newOAuthClient() *oauthClient {
 			return pluginsdk.HostClientFromContext(ctx), pluginsdk.PluginNameFromContext(ctx)
 		},
 		pending: map[string]*pendingAuthorization{},
-		locks:   map[string]*sync.Mutex{},
+		locks:   map[[4]string]*sync.Mutex{},
 	}
 }
 
@@ -87,7 +87,6 @@ func newOAuthClient() *oauthClient {
 // come back from the authorization server.
 type pendingAuthorization struct {
 	userID   string
-	orgID    string
 	nodeID   string
 	verifier string
 	token    oauthToken
@@ -99,7 +98,7 @@ type pendingAuthorization struct {
 // pendingTTL bounds how long the user may take to authorize.
 const pendingTTL = 15 * time.Minute
 
-func (c *oauthClient) lock(key string) *sync.Mutex {
+func (c *oauthClient) lock(key [4]string) *sync.Mutex {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	l, ok := c.locks[key]
@@ -166,7 +165,10 @@ func (c *oauthClient) discover(ctx context.Context, endpoint string) (*oauthex.A
 
 // start registers Xolo as a client of the authorization server and returns
 // the URL the user must open to authorize.
-func (c *oauthClient) start(ctx context.Context, userID, orgID, nodeID, endpoint, redirectURI string) (string, error) {
+func (c *oauthClient) start(ctx context.Context, userID, nodeID, endpoint, redirectURI string) (string, error) {
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(nodeID) == "" {
+		return "", errors.WithStack(ErrNotAuthorized)
+	}
 	asm, resource, err := c.discover(ctx, endpoint)
 	if err != nil {
 		return "", err
@@ -205,7 +207,7 @@ func (c *oauthClient) start(ctx context.Context, userID, orgID, nodeID, endpoint
 		}
 	}
 	c.pending[state] = &pendingAuthorization{
-		userID: userID, orgID: orgID, nodeID: nodeID, verifier: verifier, config: config, resource: resource, created: time.Now(),
+		userID: userID, nodeID: nodeID, verifier: verifier, config: config, resource: resource, created: time.Now(),
 		token: oauthToken{Endpoint: endpoint, TokenURL: asm.TokenEndpoint, ClientID: registered.ClientID, ClientSecret: registered.ClientSecret, AuthStyle: oauth2.AuthStyleInParams},
 	}
 	c.mu.Unlock()
@@ -236,18 +238,18 @@ func (c *oauthClient) complete(ctx context.Context, host pluginsdk.HostClient, p
 	}
 	stored := pending.token
 	stored.AccessToken, stored.RefreshToken, stored.Expiry = token.AccessToken, token.RefreshToken, token.Expiry
-	if err := saveToken(ctx, host, pluginName, pending.orgID, pending.nodeID, userID, &stored); err != nil {
+	if err := saveToken(ctx, host, pluginName, pending.nodeID, userID, &stored); err != nil {
 		return nil, err
 	}
 	return pending, nil
 }
 
-func saveToken(ctx context.Context, host pluginsdk.HostClient, pluginName, orgID, nodeID, userID string, token *oauthToken) error {
+func saveToken(ctx context.Context, host pluginsdk.HostClient, pluginName, nodeID, userID string, token *oauthToken) error {
 	data, err := json.Marshal(token)
 	if err != nil {
 		return errors.WithStack(err)
 	}
-	return errors.WithStack(host.SetSecret(ctx, orgID, pluginName, nodeID, oauthSecretKey(userID), string(data)))
+	return errors.WithStack(host.SetSecret(ctx, "~:"+userID, pluginName, nodeID, oauthSecretKey(userID), string(data)))
 }
 
 // ErrNotAuthorized reports a user who has not authorized the MCP server
@@ -256,15 +258,15 @@ var ErrNotAuthorized = errors.New("the user has not authorized this MCP server")
 
 // accessToken returns a valid access token of the user for the endpoint,
 // refreshing and storing it when it expired.
-func (c *oauthClient) accessToken(ctx context.Context, host pluginsdk.HostClient, pluginName, orgID, nodeID, userID, endpoint string) (string, error) {
-	if userID == "" {
+func (c *oauthClient) accessToken(ctx context.Context, host pluginsdk.HostClient, pluginName, nodeID, userID, endpoint string) (string, error) {
+	if strings.TrimSpace(userID) == "" {
 		return "", errors.WithStack(ErrNotAuthorized)
 	}
-	l := c.lock(nodeID + ":" + userID)
+	l := c.lock([4]string{"~:" + userID, pluginName, nodeID, oauthSecretKey(userID)})
 	l.Lock()
 	defer l.Unlock()
 
-	raw, found, err := host.GetSecret(ctx, orgID, pluginName, nodeID, oauthSecretKey(userID))
+	raw, found, err := host.GetSecret(ctx, "~:"+userID, pluginName, nodeID, oauthSecretKey(userID))
 	if err != nil {
 		return "", errors.WithStack(err)
 	}
@@ -294,7 +296,7 @@ func (c *oauthClient) accessToken(ctx context.Context, host pluginsdk.HostClient
 	if refreshed.RefreshToken != "" {
 		token.RefreshToken = refreshed.RefreshToken
 	}
-	if err := saveToken(ctx, host, pluginName, orgID, nodeID, userID, &token); err != nil {
+	if err := saveToken(ctx, host, pluginName, nodeID, userID, &token); err != nil {
 		return "", err
 	}
 	return token.AccessToken, nil

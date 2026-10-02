@@ -7,6 +7,7 @@ import (
 
 	"github.com/bornholm/genai/llm"
 	genaiProxy "github.com/bornholm/genai/proxy"
+	"github.com/stretchr/testify/require"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/pipeline"
 )
@@ -300,5 +301,23 @@ func TestGeneratorExecutor_RequestPortCarriesBodyJSON(t *testing.T) {
 	got, _ := out.OutputValues["request"].(string)
 	if got != string(body) {
 		t.Fatalf("generator request output = %q, want %q", got, string(body))
+	}
+}
+
+func TestBuildEC_SecretScopeFollowsGraphOwner(t *testing.T) {
+	adapter := newAdapterForBuildEC()
+	personal := model.NewPersonalVirtualModel("owner", "personal", "")
+	org := model.NewOrganization("tenant", "org", "Org", "")
+	vm := model.NewVirtualModel(org.ID(), "virtual", "")
+	req := &genaiProxy.ProxyRequest{}
+	for _, orgID := range []string{"org-a", "org-b"} {
+		ctx := context.WithValue(t.Context(), contextKeyOrgID, orgID)
+		ec := adapter.buildEC(ctx, req, nil, &personalVMAdapter{pvm: personal})
+		require.Equal(t, "~:owner", ec.SecretScopeID)
+		require.Equal(t, orgID, ec.OrgID)
+		ec = adapter.buildEC(ctx, req, org, vm)
+		require.Equal(t, string(org.ID()), ec.SecretScopeID)
+		ec = adapter.buildMiddlewareEC(ctx, req, org)
+		require.Equal(t, string(org.ID()), ec.SecretScopeID)
 	}
 }

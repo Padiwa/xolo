@@ -196,12 +196,12 @@ type OrgUsagePageVModel struct {
 	// Subscription providers plan consumption
 	SubscriptionProviders []SubscriptionProviderUsage
 	// Chart/quota fields
-	OrgQuota            model.Quota // may be nil if no quota defined
-	DailyCost           int64       // today's org cost in org currency (microcents)
-	MonthlyCost         int64       // this month's org cost in org currency (microcents)
-	YearlyCost          int64       // this year's org cost in org currency (microcents)
-	Currency            string      // org currency
-	ChartPerDay         []ChartDataPoint
+	OrgQuota    model.Quota // may be nil if no quota defined
+	DailyCost   int64       // today's org cost in org currency (microcents)
+	MonthlyCost int64       // this month's org cost in org currency (microcents)
+	YearlyCost  int64       // this year's org cost in org currency (microcents)
+	Currency    string      // org currency
+	ChartPerDay []ChartDataPoint
 	// ChartCoveredPerDay is the value of the requests covered by a subscription,
 	// stacked on ChartPerDay bar for bar.
 	ChartCoveredPerDay  []ChartDataPoint
@@ -273,27 +273,15 @@ type RoleFormVModel struct {
 	SelectedMode map[string]bool // "kind\x00id" -> checked
 }
 
-// roleLabel returns the display label for an organization role (legacy builtin strings).
-func roleLabel(role string) string {
-	switch role {
-	case model.RoleOrgOwner:
-		return "Propriétaire"
-	case model.RoleOrgAdmin:
-		return "Administrateur"
-	default:
-		return "Utilisateur"
-	}
-}
-
-// roleLabelFromMap resolves a role display name from the preloaded RoleNames map,
-// falling back to roleLabel for legacy builtin strings.
+// roleLabelFromMap uses only roles resolved in the invitation's organization,
+// including explicitly mapped legacy builtin codes.
 func roleLabelFromMap(names map[string]string, roleID string) string {
 	if names != nil {
 		if name, ok := names[roleID]; ok {
 			return name
 		}
 	}
-	return roleLabel(roleID)
+	return "Rôle indisponible"
 }
 
 // BuiltinRoleLabel returns the French label for a builtin role kind.

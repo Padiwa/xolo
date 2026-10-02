@@ -12,6 +12,10 @@ import (
 
 type Store struct {
 	getDatabase func(ctx context.Context) (*gorm.DB, error)
+	// Invitation callbacks own the transaction and the retry boundary: on a
+	// store bound by WithInvitationTransaction, withRetry runs fn exactly once
+	// on that transaction and never opens its own.
+	invitationTx bool
 }
 
 // withRetry runs fn, replaying it with an exponential backoff while the
@@ -20,6 +24,12 @@ func (s *Store) withRetry(ctx context.Context, withTx bool, fn func(ctx context.
 	db, err := s.getDatabase(ctx)
 	if err != nil {
 		return errors.WithStack(err)
+	}
+	if s.invitationTx {
+		// db is already the invitation transaction: withTx is ignored and a
+		// failure goes back to WithInvitationTransaction, which replays the
+		// whole callback.
+		return fn(ctx, db.WithContext(ctx))
 	}
 
 	backoff := 500 * time.Millisecond

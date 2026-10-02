@@ -6,9 +6,9 @@ import (
 	"strings"
 
 	"github.com/bornholm/genai/llm"
+	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
-	"github.com/pkg/errors"
 )
 
 // ModelResolver resolves a qualified proxy name (e.g. "org/gpt-4o") to an
@@ -52,6 +52,7 @@ func (e *ModelExecutor) Forward(ctx context.Context, node model.PipelineNode, in
 				return nil, errors.Errorf("middleware %q has no pipeline configured", next.Name())
 			}
 			childEC := ec
+			childEC.SecretScopeID = string(next.OrgID())
 			childEC.PendingMiddlewares = ec.PendingMiddlewares[1:]
 			sub, err := e.engine.RunForward(ctx, next.Graph(), childEC)
 			if err != nil {
@@ -110,6 +111,7 @@ func (e *ModelExecutor) resolveByName(ctx context.Context, proxyName string, ec 
 			childEC := ec
 			childEC.VisitedVMs = copyVisitedVMs(ec.VisitedVMs)
 			childEC.VisitedVMs[pvmKey] = struct{}{}
+			childEC.SecretScopeID = "~:" + string(pvm.UserID())
 			// Leaving the middleware chain: the VM resolves its own models.
 			childEC.ForcePassthrough = false
 
@@ -136,6 +138,7 @@ func (e *ModelExecutor) resolveByName(ctx context.Context, proxyName string, ec 
 			childEC := ec
 			childEC.VisitedVMs = copyVisitedVMs(ec.VisitedVMs)
 			childEC.VisitedVMs[vmID] = struct{}{}
+			childEC.SecretScopeID = string(vm.OrgID())
 			// Leaving the middleware chain: the VM resolves its own models.
 			childEC.ForcePassthrough = false
 
