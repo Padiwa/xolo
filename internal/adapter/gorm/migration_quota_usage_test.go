@@ -170,7 +170,7 @@ func TestUpgradeFromExistingDatabase(t *testing.T) {
 	}
 	// These tables existed before the quota migrations. Keep the partial
 	// fixture valid for the later invitation and secret migrations as well.
-	if err := db.AutoMigrate(&Membership{}, &InviteToken{}, &PluginNodeSecret{}); err != nil {
+	if err := db.AutoMigrate(&Tenant{}, &Organization{}, &User{}, &Membership{}, &InviteToken{}, &PluginNodeSecret{}); err != nil {
 		t.Fatalf("migrate existing invitation tables: %v", err)
 	}
 	if err := db.Exec("CREATE TABLE migrations (id VARCHAR(255) PRIMARY KEY)").Error; err != nil {
@@ -201,7 +201,8 @@ func TestUpgradeFromExistingDatabase(t *testing.T) {
 		}
 	}
 
-	if _, err := createGetDatabase(db)(context.Background()); err != nil {
+	store := NewStore(db)
+	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatalf("run migrations: %v", err)
 	}
 
@@ -248,7 +249,6 @@ func TestUpgradeFromExistingDatabase(t *testing.T) {
 	}
 
 	// A record written after the upgrade keeps adding to the same counters.
-	store := &Store{getDatabase: createGetDatabase(db)}
 	record := model.NewUsageRecord("user-a", "", "org-1", "p", "m",
 		"fast", "", 10, 0, 10, 300, "USD", model.CostSourceComputed, "")
 	if err := store.RecordUsage(context.Background(), record); err != nil {
@@ -280,7 +280,7 @@ func TestUpgradeReplaysApplicationBackfill(t *testing.T) {
 	}
 	// These tables existed before the quota migrations. Keep the partial
 	// fixture valid for the later invitation and secret migrations as well.
-	if err := db.AutoMigrate(&Membership{}, &InviteToken{}, &PluginNodeSecret{}); err != nil {
+	if err := db.AutoMigrate(&Tenant{}, &Organization{}, &User{}, &Membership{}, &InviteToken{}, &PluginNodeSecret{}); err != nil {
 		t.Fatalf("migrate existing invitation tables: %v", err)
 	}
 	// quota_usages must already exist: on a real production instance it was
@@ -323,7 +323,8 @@ func TestUpgradeReplaysApplicationBackfill(t *testing.T) {
 		}
 	}
 
-	if _, err := createGetDatabase(db)(context.Background()); err != nil {
+	store := NewStore(db)
+	if err := store.Migrate(context.Background()); err != nil {
 		t.Fatalf("run migrations: %v", err)
 	}
 

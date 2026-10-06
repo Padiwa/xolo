@@ -12,6 +12,9 @@ import (
 
 // CreateOrg implements port.OrgStore.
 func (s *Store) CreateOrg(ctx context.Context, org model.Organization) error {
+	if _, err := model.ParseOrgID(string(org.ID())); err != nil {
+		return port.ErrInvalid
+	}
 	return s.withRetry(ctx, true, func(ctx context.Context, db *gorm.DB) error {
 		if err := db.Create(fromOrganization(org)).Error; err != nil {
 			if isUniqueViolation(err, "organizations", "slug") {
@@ -97,6 +100,9 @@ func (s *Store) ListOrgs(ctx context.Context, opts port.ListOrgsOptions) ([]mode
 
 // SaveOrg implements port.OrgStore.
 func (s *Store) SaveOrg(ctx context.Context, org model.Organization) error {
+	if _, err := model.ParseOrgID(string(org.ID())); err != nil {
+		return port.ErrInvalid
+	}
 	return s.withRetry(ctx, true, func(ctx context.Context, db *gorm.DB) error {
 		return errors.WithStack(db.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "id"}},

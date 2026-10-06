@@ -109,6 +109,9 @@ func (s *Store) GetUserByIdentity(ctx context.Context, tenantID model.TenantID, 
 
 // SaveUser implements port.UserStore.
 func (s *Store) SaveUser(ctx context.Context, user model.User) error {
+	if _, err := model.ParseUserID(string(user.ID())); err != nil {
+		return port.ErrInvalid
+	}
 	err := s.withRetry(ctx, true, func(ctx context.Context, db *gorm.DB) error {
 		gormUser := fromUser(user)
 

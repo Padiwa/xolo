@@ -14,8 +14,13 @@ var getGormStoreFromConfig = createFromConfigOnce(func(ctx context.Context, conf
 		return nil, errors.WithStack(err)
 	}
 
-	store := gormAdapter.NewStore(db)
-	if err := store.Migrate(ctx); err != nil {
+	store := gormAdapter.NewStore(db, gormAdapter.WithAutoMigrate(conf.Storage.AutoMigrate))
+	if conf.Storage.AutoMigrate {
+		err = store.Migrate(ctx)
+	} else {
+		err = store.CheckSchema(ctx)
+	}
+	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 

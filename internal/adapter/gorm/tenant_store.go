@@ -12,6 +12,9 @@ import (
 
 // CreateTenant implements port.TenantStore.
 func (s *Store) CreateTenant(ctx context.Context, tenant model.Tenant) error {
+	if _, err := model.ParseTenantID(string(tenant.ID())); err != nil {
+		return port.ErrInvalid
+	}
 	return s.withRetry(ctx, true, func(ctx context.Context, db *gorm.DB) error {
 		if err := db.Create(fromTenant(tenant)).Error; err != nil {
 			if isUniqueViolation(err, "tenants", "slug") {
@@ -93,6 +96,9 @@ func (s *Store) ListTenants(ctx context.Context, opts port.ListTenantsOptions) (
 
 // SaveTenant implements port.TenantStore.
 func (s *Store) SaveTenant(ctx context.Context, tenant model.Tenant) error {
+	if _, err := model.ParseTenantID(string(tenant.ID())); err != nil {
+		return port.ErrInvalid
+	}
 	return s.withRetry(ctx, true, func(ctx context.Context, db *gorm.DB) error {
 		return errors.WithStack(db.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "id"}},

@@ -11,9 +11,10 @@ import (
 )
 
 type Store struct {
-	getDatabase func(ctx context.Context) (*gorm.DB, error)
+	getDatabase        func(ctx context.Context) (*gorm.DB, error)
+	initializeDatabase func(context.Context, bool) (*gorm.DB, error)
 	// Invitation callbacks own the transaction and the retry boundary: on a
-	// store bound by WithInvitationTransaction, withRetry runs fn exactly once
+	// transaction-bound store, withRetry runs fn exactly once
 	// on that transaction and never opens its own.
 	invitationTx bool
 }
@@ -71,17 +72,44 @@ func (s *Store) withRetry(ctx context.Context, withTx bool, fn func(ctx context.
 	}
 }
 
-func NewStore(db *gorm.DB) *Store {
+type StoreOption func(*storeOptions)
+type storeOptions struct{ autoMigrate bool }
+
+// WithAutoMigrate controls implicit schema changes; explicit Migrate still works.
+func WithAutoMigrate(enabled bool) StoreOption {
+	return func(opts *storeOptions) { opts.autoMigrate = enabled }
+}
+
+func NewStore(db *gorm.DB, options ...StoreOption) *Store {
+	opts := storeOptions{autoMigrate: true}
+	for _, option := range options {
+		option(&opts)
+	}
+	initialize := createDatabaseInitializer(db)
 	return &Store{
-		getDatabase: createGetDatabase(db),
+		initializeDatabase: initialize,
+		getDatabase:        func(ctx context.Context) (*gorm.DB, error) { return initialize(ctx, opts.autoMigrate) },
 	}
 }
 
-// Migrate applies all pending schema migrations. NewStore still migrates
-// lazily on the first store operation, while application setup can call this
-// method to guarantee the schema is ready before starting background work.
+// Migrate explicitly applies pending migrations, independently of WithAutoMigrate.
+// A successful migration is cached for this store; failures can be retried.
+// Application setup calls CheckSchema instead when automatic migration is disabled.
 func (s *Store) Migrate(ctx context.Context) error {
-	_, err := s.getDatabase(ctx)
+	if s.invitationTx {
+		return errors.New("cannot migrate schema within an invitation transaction")
+	}
+	_, err := s.initializeDatabase(ctx, true)
+	return errors.WithStack(err)
+}
+
+// CheckSchema validates migration history without changing the database.
+// A successful check is cached independently of Migrate; failures can be retried.
+func (s *Store) CheckSchema(ctx context.Context) error {
+	if s.invitationTx {
+		return errors.New("cannot check schema within an invitation transaction")
+	}
+	_, err := s.initializeDatabase(ctx, false)
 	return errors.WithStack(err)
 }
 

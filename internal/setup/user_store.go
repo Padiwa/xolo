@@ -4,13 +4,15 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/adapter/cache"
 	"github.com/xolo-gateway/xolo/internal/config"
 	"github.com/xolo-gateway/xolo/internal/core/port"
-	"github.com/pkg/errors"
 )
 
-var getUserStoreFromConfig = createFromConfigOnce(func(ctx context.Context, conf *config.Config) (port.UserStore, error) {
+var getUserStoreFromConfig = createFromConfigOnce(createUserStoreFromConfig)
+
+func createUserStoreFromConfig(ctx context.Context, conf *config.Config) (port.UserStore, error) {
 	var (
 		store port.UserStore
 		err   error
@@ -27,4 +29,4 @@ var getUserStoreFromConfig = createFromConfigOnce(func(ctx context.Context, conf
 	}
 
 	return store, nil
-})
+}

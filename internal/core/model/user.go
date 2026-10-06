@@ -3,6 +3,7 @@ package model
 import (
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/xid"
 )
 
@@ -17,7 +18,7 @@ const (
 type UserID string
 
 func NewUserID() UserID {
-	return UserID(xid.New().String())
+	return UserID(uuid.NewString())
 }
 
 type User interface {
@@ -261,3 +262,6 @@ func NewUserPreferences(setters ...BaseUserPreferencesSetter) *BaseUserPreferenc
 }
 
 var _ UserPreferences = &BaseUserPreferences{}
+
+// SetID accepts a validated external UUID; callers should use ParseUserID first.
+func (u *BaseUser) SetID(id UserID) { u.id = id }
