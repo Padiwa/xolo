@@ -13,23 +13,32 @@ import (
 	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
 )
 
-// emit records a lifecycle event for a user-initiated store mutation. It is a
-// no-op when there is no acting user in context (system seeding, migrations,
-// tests…), which keeps automated operations out of the event stream and lets us
-// attribute the event to the acting user.
+// emit attributes local events to an authenticated user or an explicit provisioning actor.
 func emit(ctx context.Context, emitter port.EventEmitter, orgID model.OrgID, severity model.EventSeverity, typ, message string, attrs map[string]string) {
 	if emitter == nil {
 		return
 	}
 	user := httpCtx.User(ctx)
-	if user == nil {
+	actor := model.ActorFromContext(ctx)
+	if user == nil && actor.RequestID == "" {
 		return
 	}
 	if attrs == nil {
 		attrs = map[string]string{}
 	}
-	attrs["actor"] = user.DisplayName()
-	attrs["actor_id"] = string(user.ID())
+	// actor_uri and request_id record the transport origin; actor and actor_id
+	// name who acted, an authenticated user taking precedence over the URI.
+	if actor.RequestID != "" {
+		attrs["actor_uri"] = actor.URI
+		attrs["request_id"] = actor.RequestID
+	}
+	if user != nil {
+		attrs["actor"] = user.DisplayName()
+		attrs["actor_id"] = string(user.ID())
+	} else {
+		attrs["actor"] = actor.URI
+		attrs["actor_id"] = string(actor.UserID)
+	}
 
 	emitter.Emit(ctx, model.NewEvent(model.EventSourcePlatform, typ,
 		model.WithEventOrg(orgID),

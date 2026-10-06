@@ -15,7 +15,7 @@ func (h *Handler) handleListRoles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	roles, err := h.provisioning.ListRoles(ctx, org.ID())
+	roles, err := h.provisioning.ListRoles(ctx, org.TenantID(), org.ID())
 	if err != nil {
 		writeServiceError(ctx, w, err, "organization not found")
 		return
@@ -45,7 +45,7 @@ func (h *Handler) handleCreateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	role, err := h.provisioning.CreateRole(ctx, org.ID(), service.RoleParams{
+	role, err := h.provisioning.CreateRole(ctx, org.TenantID(), org.ID(), service.RoleParams{
 		Name:        payload.Name,
 		Description: payload.Description,
 		Permissions: payload.Permissions,
@@ -68,7 +68,7 @@ func (h *Handler) handleGetRole(w http.ResponseWriter, r *http.Request) {
 	}
 
 	role, err := h.provisioning.GetRole(ctx,
-		org.ID(),
+		org.TenantID(), org.ID(),
 		model.RoleID(r.PathValue("roleID")),
 	)
 	if err != nil {
@@ -92,7 +92,7 @@ func (h *Handler) handleUpdateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	role, err := h.provisioning.UpdateRole(ctx,
+	role, err := h.provisioning.UpdateRole(ctx, org.TenantID(),
 		org.ID(),
 		model.RoleID(r.PathValue("roleID")),
 		service.RoleParams{
@@ -118,7 +118,7 @@ func (h *Handler) handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := h.provisioning.DeleteRole(ctx,
+	err := h.provisioning.DeleteRole(ctx, org.TenantID(),
 		org.ID(),
 		model.RoleID(r.PathValue("roleID")),
 	)
