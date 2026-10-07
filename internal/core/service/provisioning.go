@@ -26,6 +26,8 @@ type ProvisioningService struct {
 	orgStore     port.ProvisioningOrgStore
 	userStore    port.ProvisioningUserStore
 	roleStore    port.ProvisioningRoleStore
+	// domainStore is only available within a provisioning transaction.
+	domainStore port.DomainStore
 
 	// multiTenant reports whether the instance may hold more than one tenant.
 	// When false, the API serves the single default tenant but refuses to
@@ -704,6 +706,12 @@ func (s *ProvisioningService) applyUserFields(ctx context.Context, user model.Us
 		return user, nil
 	}
 
+	// Provisioning never acts on platform-wide privileges: an administrator's
+	// profile stays under the instance operators' control.
+	if isPlatformAdmin(user) {
+		return nil, errors.WithStack(port.ErrPlatformAdminProtected)
+	}
+
 	if err := s.userStore.SaveUser(ctx, updated); err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -1159,17 +1167,17 @@ func (s *ProvisioningService) assertNotLastOwner(ctx context.Context, orgID mode
 	}
 
 	if IsLastOwner(members, membershipID) {
-		return errors.Wrap(port.ErrNotAllowed, "an organization must keep at least one owner")
+		return errors.Wrap(port.ErrLastOwner, "an organization must keep at least one owner")
 	}
 
 	return nil
 }
 
-// IsLastOwner reports whether the excluded membership is the only one holding a
-// builtin owner role among the given members.
+// IsLastOwner reports whether the excluded membership is the only active one
+// holding a builtin owner role among the given members.
 func IsLastOwner(members []model.Membership, exclude model.MembershipID) bool {
 	for _, member := range members {
-		if member.ID() == exclude {
+		if member.ID() == exclude || member.Status() == model.StatusSuspended {
 			continue
 		}
 		if hasOwnerRole(member.Roles()) {
@@ -1263,6 +1271,7 @@ func (s *ProvisioningService) transaction(ctx context.Context, fn func(*Provisio
 		bound.orgStore = tx
 		bound.userStore = tx
 		bound.roleStore = tx
+		bound.domainStore = tx
 		return fn(&bound)
 	})
 }
