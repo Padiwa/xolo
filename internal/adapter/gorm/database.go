@@ -554,5 +554,12 @@ func schemaMigrations(artifact *RecoveryArtifact) []*gormigrate.Migration {
 				return errors.New("common API migration cannot be rolled back: domains and suspended memberships would be lost")
 			},
 		},
+		{
+			ID:      inviteEmailMigrationID,
+			Migrate: migrateNormalizeInviteeEmails,
+			// The original case is not kept anywhere, and the normalized form is
+			// what every reader expects.
+			Rollback: func(*gorm.DB) error { return nil },
+		},
 	}
 }

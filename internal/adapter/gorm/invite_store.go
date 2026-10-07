@@ -102,12 +102,18 @@ func (s *Store) IncrementInviteUses(ctx context.Context, id model.InviteTokenID)
 	})
 }
 
-// ListPendingInvitesForEmail implements port.InviteStore. The recipient is
-// matched case-insensitively, like the acceptance check; SQLite's LOWER() only
-// folds ASCII, so a non-ASCII letter still has to match the case it was stored in.
+// ListPendingInvitesForEmail implements port.InviteStore. Invitee addresses are
+// stored normalized (model.NormalizeEmail, with migration 202610070002 for older
+// rows), so normalizing the parameter is enough for a plain equality, which
+// keeps the invitee_email index usable on this sign-in path.
 func (s *Store) ListPendingInvitesForEmail(ctx context.Context, tenantID model.TenantID, email string) ([]model.InviteToken, error) {
 	if tenantID == "" {
 		return nil, port.ErrInvalid
+	}
+	email = model.NormalizeEmail(email)
+	// A blank address names nobody, even an account that has none.
+	if email == "" {
+		return nil, nil
 	}
 	var tokens []*InviteToken
 	now := time.Now()
@@ -115,7 +121,7 @@ func (s *Store) ListPendingInvitesForEmail(ctx context.Context, tenantID model.T
 		return errors.WithStack(db.Preload("Org").
 			Joins("JOIN organizations ON organizations.id = invite_tokens.org_id").
 			Where("organizations.tenant_id = ? AND organizations.active <> 0", string(tenantID)).
-			Where("LOWER(invite_tokens.invitee_email) = LOWER(?) AND invite_tokens.revoked_at IS NULL", email).
+			Where("invite_tokens.invitee_email = ? AND invite_tokens.revoked_at IS NULL", email).
 			Scopes(unexpiredInvitations(now)).
 			Where("(invite_tokens.max_uses IS NULL OR invite_tokens.uses_count < invite_tokens.max_uses) AND invite_tokens.uses_count = 0").
 			Order("invite_tokens.created_at DESC").

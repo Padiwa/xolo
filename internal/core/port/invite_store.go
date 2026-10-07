@@ -14,6 +14,7 @@ type InviteStore interface {
 	DeleteInvite(ctx context.Context, id model.InviteTokenID) error
 	IncrementInviteUses(ctx context.Context, id model.InviteTokenID) error
 	// ListPendingInvitesForEmail returns usable targeted invitations within a
-	// tenant, excluding inactive organizations. An empty tenant never spans tenants.
+	// tenant, excluding inactive organizations. An empty tenant never spans
+	// tenants, and a blank address matches nothing.
 	ListPendingInvitesForEmail(ctx context.Context, tenantID model.TenantID, email string) ([]model.InviteToken, error)
 }

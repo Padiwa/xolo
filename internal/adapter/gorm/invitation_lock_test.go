@@ -34,7 +34,15 @@ func TestInvitationParentLocksAndSnapshotRetry(t *testing.T) {
 		for _, parent := range []string{"organization", "user", "role", "invitation"} {
 			t.Run(parent, func(t *testing.T) {
 				f := newInvitationFixture(t, store)
-				inv := f.invite(t, true, "", nil, nil)
+				// Deactivating the user only invalidates an open invitation: its
+				// targeted recipient may accept while inactive. An open acceptance
+				// keeps the invitation, so it emits no deletion event.
+				targeted := parent != "user"
+				inv := f.invite(t, targeted, "", nil, nil)
+				wantEvents := 3
+				if !targeted {
+					wantEvents = 2
+				}
 				var inserted atomic.Int32
 				txs := invitationTxWrapper{store, func(tx port.InvitationTx) port.InvitationTx {
 					return beforeInvitationInsert{tx, func() {
@@ -84,7 +92,7 @@ func TestInvitationParentLocksAndSnapshotRetry(t *testing.T) {
 				if db.Dialector.Name() == "postgres" {
 					require.NoError(t, err)
 					require.NotNil(t, result)
-					require.Len(t, f.recorder.snapshot(), 3)
+					require.Len(t, f.recorder.snapshot(), wantEvents)
 				} else {
 					require.True(t, errors.Is(err, port.ErrInvalid) || errors.Is(err, port.ErrNotAllowed), "%v", err)
 					require.Nil(t, result)

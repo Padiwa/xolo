@@ -49,8 +49,8 @@ func WithReservedEmails(emails ...string) ProvisioningServiceOptionFunc {
 	return func(s *ProvisioningService) {
 		s.reservedEmails = make([]string, 0, len(emails))
 		for _, email := range emails {
-			if trimmed := strings.TrimSpace(email); trimmed != "" {
-				s.reservedEmails = append(s.reservedEmails, strings.ToLower(trimmed))
+			if normalized := model.NormalizeEmail(email); normalized != "" {
+				s.reservedEmails = append(s.reservedEmails, normalized)
 			}
 		}
 	}
@@ -251,7 +251,7 @@ func (s *ProvisioningService) assertEmailAllowed(email *string) error {
 		return nil
 	}
 
-	normalized := strings.ToLower(strings.TrimSpace(*email))
+	normalized := model.NormalizeEmail(*email)
 	if slices.Contains(s.reservedEmails, normalized) {
 		return errors.Wrapf(port.ErrInvalid, "email %q is reserved for the instance administrators", normalized)
 	}

@@ -3,6 +3,7 @@ package model
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"strings"
 	"time"
 )
 
@@ -65,7 +66,22 @@ func (t *BaseInviteToken) Org() Organization       { return t.org }
 
 var _ InviteToken = &BaseInviteToken{}
 
+// NormalizeEmail is the form invitee addresses are stored in, and the one both
+// sides go through whenever Xolo compares an identity's address with an
+// invitation or DefaultAdmins. The case an administrator types and the one an
+// identity provider returns rarely agree, and a claim may carry stray whitespace.
+func NormalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// NewInviteToken normalizes the invitee address. A blank one stays targeted and
+// matches nobody: only a nil address makes an open invitation.
 func NewInviteToken(orgID OrgID, role string, inviteeEmail *string, expiresAt *time.Time, maxUses *int, createdByUserID UserID) *BaseInviteToken {
+	if inviteeEmail != nil {
+		normalized := NormalizeEmail(*inviteeEmail)
+		inviteeEmail = &normalized
+	}
+
 	return &BaseInviteToken{
 		id:              NewInviteTokenID(),
 		orgID:           orgID,

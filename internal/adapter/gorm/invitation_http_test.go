@@ -18,6 +18,8 @@ import (
 	"github.com/xolo-gateway/xolo/internal/core/service"
 	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
 	"github.com/xolo-gateway/xolo/internal/http/handler/webui"
+	"github.com/xolo-gateway/xolo/internal/http/middleware/authn"
+	"github.com/xolo-gateway/xolo/internal/http/middleware/bridge"
 	"github.com/xolo-gateway/xolo/internal/http/middleware/memberships"
 )
 
@@ -87,7 +89,9 @@ func TestInvitationHTTPIsolation(t *testing.T) {
 							past := time.Now().Add(-time.Hour)
 							expires = &past
 						}
-						inv := f.invite(t, true, role, expires, ptr(1))
+						// An inactive recipient may still act on a targeted invitation
+						// (TestInvitationHTTPInactiveInvitee): only an open one is refused.
+						inv := f.invite(t, scenario != "inactive user", role, expires, ptr(1))
 						id := inv.ID()
 						if scenario == "revoked" {
 							require.NoError(t, store.RevokeInvite(f.ctx, id))
@@ -182,6 +186,79 @@ func TestInvitationHTTPJoinAndDecline(t *testing.T) {
 		require.NotContains(t, response.Body.String(), f.org.Name())
 	})
 }
+
+// With AUTO_CREATE_USERS=false and ACTIVE_BY_DEFAULT=false, a targeted
+// invitation lets the bridge create the account, inactive. The recipient must
+// still be able to see, accept and decline it: it is the reason the account
+// exists. An open invitation names nobody and keeps requiring an active account.
+func TestInvitationHTTPInactiveInvitee(t *testing.T) {
+	eachBackend(t, func(t *testing.T, store *xologorm.Store) {
+		f := newInvitationFixture(t, store)
+		handler := bridge.Middleware(store, store, nil, bridge.Options{AutoCreateUsers: false, ActiveByDefault: false})(invitationHTTPHandler(f))
+		// The claim differs from the invitation by case and stray whitespace:
+		// the bridge exemption and the invitation service must agree on it.
+		identity := &authn.User{Provider: "test", Subject: "newcomer", Email: " Newcomer@Example.test ", DisplayName: "Newcomer"}
+		request := func(method, path string) *httptest.ResponseRecorder {
+			r := httptest.NewRequest(method, path, nil)
+			ctx := authn.SetContextUser(httpCtx.SetTenant(r.Context(), f.tenant), identity)
+			ctx = httpCtx.SetBaseURL(ctx, "http://gateway.example.test")
+			ctx = httpCtx.SetCurrentURL(ctx, r.URL)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, r.WithContext(ctx))
+			return response
+		}
+		invite := func(email *string) model.InviteToken {
+			inv := model.NewInviteToken(f.org.ID(), string(f.role.ID()), email, nil, nil, f.other.ID())
+			require.NoError(t, store.CreateInvite(f.ctx, inv))
+			return inv
+		}
+		accepted, declined, open := invite(ptr("newcomer@example.test")), invite(ptr("newcomer@example.test")), invite(nil)
+		elsewhere := invite(ptr(f.other.Email()))
+
+		response := request("GET", "/join/"+string(accepted.ID()))
+		require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+		require.Contains(t, response.Body.String(), f.role.Name())
+		user, err := store.GetUserByIdentity(f.ctx, f.tenant.ID(), "test", "newcomer")
+		require.NoError(t, err)
+		require.False(t, user.Active(), "an invitation must not override ActiveByDefault")
+
+		response = request("POST", "/join/"+string(accepted.ID()))
+		require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+		require.Contains(t, response.Body.String(), "Vous avez rejoint")
+		member, err := store.IsMember(f.ctx, user.ID(), f.org.ID())
+		require.NoError(t, err)
+		require.True(t, member)
+
+		response = request("POST", "/no-org/invitations/"+string(declined.ID())+"/decline")
+		require.Equal(t, http.StatusSeeOther, response.Code, response.Body.String())
+		_, err = store.GetInviteByID(f.ctx, declined.ID())
+		require.ErrorIs(t, err, port.ErrNotFound)
+
+		for _, op := range []struct{ method, path string }{{"GET", "/join/" + string(open.ID())}, {"POST", "/join/" + string(open.ID())}, {"POST", "/no-org/invitations/" + string(open.ID()) + "/decline"}} {
+			response := request(op.method, op.path)
+			require.Equal(t, http.StatusForbidden, response.Code, op.path)
+			require.Empty(t, response.Result().Cookies())
+		}
+		after, err := store.GetInviteByID(f.ctx, open.ID())
+		require.NoError(t, err)
+		require.Zero(t, after.UsesCount())
+
+		// Being inactive widens nothing beyond the invitations addressed to the
+		// account: someone else's targeted invitation stays not found.
+		for _, op := range []struct{ method, path string }{{"GET", "/join/" + string(elsewhere.ID())}, {"POST", "/join/" + string(elsewhere.ID())}, {"POST", "/no-org/invitations/" + string(elsewhere.ID()) + "/decline"}} {
+			response := request(op.method, op.path)
+			require.Equal(t, http.StatusNotFound, response.Code, op.path)
+			require.NotContains(t, response.Body.String(), f.org.Name())
+		}
+		_, err = store.GetInviteByID(f.ctx, elsewhere.ID())
+		require.NoError(t, err)
+
+		// The rest of the instance still waits for an administrator.
+		response = request("GET", "/usage")
+		require.Equal(t, http.StatusForbidden, response.Code)
+	})
+}
+
 func mustInvitationMembership(t *testing.T, f *invitationFixture) model.Membership {
 	t.Helper()
 	m, err := f.store.GetUserOrgMembership(f.ctx, f.user.ID(), f.org.ID())

@@ -45,11 +45,18 @@ func (w *wrappedInviteToken) Org() model.Organization {
 var _ model.InviteToken = &wrappedInviteToken{}
 
 func fromInviteToken(t model.InviteToken) *InviteToken {
+	// Stored normalized whatever the implementation: ListPendingInvitesForEmail
+	// relies on it for its plain equality.
+	email := t.InviteeEmail()
+	if email != nil {
+		normalized := model.NormalizeEmail(*email)
+		email = &normalized
+	}
 	return &InviteToken{
 		ID:              string(t.ID()),
 		OrgID:           string(t.OrgID()),
 		Role:            t.Role(),
-		InviteeEmail:    t.InviteeEmail(),
+		InviteeEmail:    email,
 		ExpiresAt:       t.ExpiresAt(),
 		MaxUses:         t.MaxUses(),
 		UsesCount:       t.UsesCount(),

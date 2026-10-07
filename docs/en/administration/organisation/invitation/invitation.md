@@ -25,7 +25,10 @@ that is still needed after upgrading.** Revocation is irreversible; restarting
 does not reactivate links. New links use 256 random bits from `crypto/rand`,
 encoded as unpadded URL-safe base64, with unchanged routes.
 
-Targeted links are single-use and require an exact email match after sign-in.
+Targeted links are single-use and require, after sign-in, the invited email
+address, ignoring case and surrounding whitespace. Their recipient can accept or
+decline them even while the account is still inactive; open links require an
+active account.
 Existing members retain their roles without consuming an invitation. Expiration
 dates mean midnight UTC at the start of the chosen day. Only an empty use limit
 means unlimited; other values must be positive integers.

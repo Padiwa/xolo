@@ -95,7 +95,7 @@ func TestInvitationValidation(t *testing.T) {
 		}{
 			{"foreign tenant same slug", port.ErrNotFound}, {"foreign user", port.ErrNotFound},
 			{"wrong recipient", port.ErrNotFound},
-			{"inactive user", port.ErrNotAllowed}, {"inactive organization", port.ErrInvalid},
+			{"inactive user, open invitation", port.ErrNotAllowed}, {"inactive organization", port.ErrInvalid},
 			{"foreign role", port.ErrInvalid}, {"deleted role", port.ErrInvalid},
 			{"unknown role", port.ErrInvalid}, {"missing builtin", port.ErrInvalid},
 			{"expired", port.ErrInvalid}, {"revoked", port.ErrInvalid}, {"exhausted", port.ErrInvalid},
@@ -116,7 +116,7 @@ func TestInvitationValidation(t *testing.T) {
 					user = f.foreignUser.ID()
 				case "wrong recipient":
 					user = f.other.ID()
-				case "inactive user":
+				case "inactive user, open invitation":
 					f.user.SetActive(false)
 					require.NoError(t, store.SaveUser(f.ctx, f.user))
 				case "inactive organization":
@@ -142,7 +142,10 @@ func TestInvitationValidation(t *testing.T) {
 				case "empty tenant":
 					tenant = ""
 				}
-				inv := f.invite(t, true, role, expires, limit)
+				// The recipient of a targeted invitation may act on it while
+				// inactive (TestInvitationHTTPInactiveInvitee); an open one names
+				// nobody and still requires an active account.
+				inv := f.invite(t, tc.name != "inactive user, open invitation", role, expires, limit)
 				id := inv.ID()
 				switch tc.name {
 				case "revoked":
@@ -289,12 +292,25 @@ func TestInvitationAcceptanceAndDecline(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 1, after.UsesCount())
 		})
+		t.Run("blank target matches nobody", func(t *testing.T) {
+			f := newInvitationFixture(t, store)
+			inv := model.NewInviteToken(f.org.ID(), string(f.role.ID()), ptr(" "), nil, nil, f.other.ID())
+			require.NoError(t, store.CreateInvite(f.ctx, inv))
+			f.other.SetEmail("")
+			require.NoError(t, store.SaveUser(f.ctx, f.other))
+			for _, user := range []model.UserID{f.user.ID(), f.other.ID()} {
+				_, err := f.service.Accept(f.ctx, f.tenant.ID(), inv.ID(), user)
+				require.ErrorIs(t, err, port.ErrNotFound)
+			}
+		})
 		// An address is the same recipient whatever its case: the invitation was
-		// sent to "Recipient@…" while the account stores "recipient@…".
-		t.Run("recipient case is ignored", func(t *testing.T) {
+		// sent to "recipient@…" (stored normalized) while the account holds "RECIPIENT@…".
+		t.Run("recipient address is normalized", func(t *testing.T) {
 			f := newInvitationFixture(t, store)
 			inv := f.invite(t, true, "", nil, nil)
-			f.user.SetEmail(strings.ToLower(f.user.Email()))
+			// Surrounding whitespace too: the bridge's exemption normalizes the
+			// address, so acceptance must not then refuse the same account.
+			f.user.SetEmail(" " + strings.ToUpper(f.user.Email()) + "\t")
 			require.NotEqual(t, *inv.InviteeEmail(), f.user.Email())
 			require.NoError(t, store.SaveUser(f.ctx, f.user))
 			pending, err := store.ListPendingInvitesForEmail(f.ctx, f.tenant.ID(), f.user.Email())

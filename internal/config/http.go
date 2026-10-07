@@ -21,8 +21,10 @@ type Authn struct {
 	ActiveByDefault bool          `env:"ACTIVE_BY_DEFAULT" envDefault:"false"`
 	// AutoCreateUsers controls whether an identity unknown to Xolo gets an
 	// account on its first successful authentication. When false, only
-	// pre-provisioned identities can sign in; the addresses listed in
-	// DefaultAdmins remain an exception so a fresh instance can be bootstrapped.
+	// pre-provisioned identities can sign in, except the addresses listed in
+	// DefaultAdmins (so a fresh instance can be bootstrapped), applications and
+	// the addresses named by a pending targeted invitation. See
+	// bridge.Options.AutoCreateUsers.
 	AutoCreateUsers       bool          `env:"AUTO_CREATE_USERS" envDefault:"true"`
 	CookiesToCheck        []string      `env:"COOKIES_TO_CHECK" envSeparator:"," envDefault:"oauth_id_token"`
 	OIDCTokenExpiryLeeway time.Duration `env:"OIDCTOKEN_EXPIRY_LEEWAY" envDefault:"0"`

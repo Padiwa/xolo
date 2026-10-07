@@ -258,7 +258,9 @@ func TestInvitationRetryDiscardsResultsAndEvents(t *testing.T) {
 		for _, mode := range []string{"commit failure", "retry success", "retry revoked", "retry inactive user", "retry deleted role", "retry foreign organization"} {
 			t.Run(mode, func(t *testing.T) {
 				f := newInvitationFixture(t, store)
-				inv := f.invite(t, true, "", nil, nil)
+				// Deactivating the user only invalidates an open invitation: its
+				// targeted recipient may accept while inactive.
+				inv := f.invite(t, mode != "retry inactive user", "", nil, nil)
 				replay := replayInvitationTransaction{InvitationTransaction: store, finalFailure: mode == "commit failure"}
 				replay.afterRollback = func() {
 					require.Empty(t, f.recorder.snapshot())
