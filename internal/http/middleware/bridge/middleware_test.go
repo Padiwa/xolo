@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -551,4 +552,114 @@ func TestApplicationIdentity(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An API token designates its owner: the bridge serves that account as is,
+// even when provisioning removed its sign-in link, and never provisions.
+func TestAccountIdentity(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	unlinked := model.NewUser(testTenantID, "", "", "owner@corp.tld", "Owner", true, authz.RoleUser)
+	if err := store.SaveUser(ctx, unlinked); err != nil {
+		t.Fatalf("save user: %v", err)
+	}
+
+	result := call(t, store, bridge.Options{}, &authn.User{AccountID: string(unlinked.ID()), Email: "owner@corp.tld"})
+	if !result.served || result.user.ID() != unlinked.ID() {
+		t.Fatalf("request should have been served as the token owner, got status %d", result.status)
+	}
+
+	t.Run("an unknown account is unauthenticated", func(t *testing.T) {
+		result := call(t, store, bridge.Options{AutoCreateUsers: true}, &authn.User{AccountID: string(model.NewUserID())})
+		if result.served || result.status != http.StatusUnauthorized {
+			t.Fatalf("got served=%v status %d, want 401", result.served, result.status)
+		}
+		if loginFailedReason(result) == "" {
+			t.Errorf("a refused token should emit %s", model.EventTypeAuthLoginFailed)
+		}
+	})
+}
+
+// Without provider and subject, an identity would designate every account no
+// sign-in is linked to.
+func TestIncompleteIdentityIsRefused(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	if err := store.SaveUser(ctx, model.NewUser(testTenantID, "", "", "unlinked@corp.tld", "", true, authz.RoleUser)); err != nil {
+		t.Fatalf("save user: %v", err)
+	}
+
+	for _, identity := range []*authn.User{
+		{Email: "unlinked@corp.tld"},
+		{Provider: "openid-connect", Email: "unlinked@corp.tld"},
+		{Subject: "sub-1", Email: "unlinked@corp.tld"},
+	} {
+		result := call(t, store, bridge.Options{AutoCreateUsers: true}, identity)
+		if result.served || result.status != http.StatusUnauthorized {
+			t.Fatalf("%+v: got served=%v status %d, want 401", identity, result.served, result.status)
+		}
+		if loginFailedReason(result) == "" {
+			t.Errorf("%+v: a refused identity should emit %s", identity, model.EventTypeAuthLoginFailed)
+		}
+	}
+}
+
+// A verified email attaches a sign-in to an account no sign-in is linked to;
+// an account already linked elsewhere is never relinked.
+func TestVerifiedEmailAttachment(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+
+	provisioned := model.NewUser(testTenantID, "", "", "Jean@corp.tld", "", true, authz.RoleUser)
+	if err := store.SaveUser(ctx, provisioned); err != nil {
+		t.Fatalf("save user: %v", err)
+	}
+
+	verified := newIdentity("sub-1", "jean@corp.tld", "Jean")
+	verified.EmailVerified = true
+	result := call(t, store, bridge.Options{}, verified)
+	if !result.served || result.user.ID() != provisioned.ID() {
+		t.Fatalf("a verified email should attach the provisioned account, got status %d", result.status)
+	}
+
+	other := newIdentity("sub-2", "jean@corp.tld", "Jean")
+	other.EmailVerified = true
+	result = call(t, store, bridge.Options{AutoCreateUsers: true}, other)
+	if result.served || result.status != http.StatusConflict {
+		t.Fatalf("got served=%v status %d, want 409", result.served, result.status)
+	}
+	if !slices.Contains(result.emitter.types(), model.EventTypeAuthLoginFailed) {
+		t.Errorf("a refused sign-in should emit %s, got %v", model.EventTypeAuthLoginFailed, result.emitter.types())
+	}
+	if reason := loginFailedReason(result); strings.Contains(reason, "email") {
+		t.Errorf("an identity conflict must not blame the email, got reason %q", reason)
+	}
+}
+
+// Only an email held by another account is reported as such; any other
+// uniqueness conflict is an identity conflict.
+func TestConflictReasons(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	if err := store.SaveUser(ctx, model.NewUser(testTenantID, "openid-connect", "sub-1", "taken@corp.tld", "", true, authz.RoleUser)); err != nil {
+		t.Fatalf("save user: %v", err)
+	}
+
+	result := call(t, store, bridge.Options{AutoCreateUsers: true}, newIdentity("sub-2", "taken@corp.tld", "Other"))
+	if result.served || result.status != http.StatusConflict {
+		t.Fatalf("got served=%v status %d, want 409", result.served, result.status)
+	}
+	if reason := loginFailedReason(result); !strings.Contains(reason, "email") {
+		t.Errorf("an email held by another account should be reported, got reason %q", reason)
+	}
+}
+
+func loginFailedReason(result callResult) string {
+	for _, event := range result.emitter.events {
+		if event.Type() == model.EventTypeAuthLoginFailed {
+			return event.Attributes()["reason"]
+		}
+	}
+	return ""
 }
