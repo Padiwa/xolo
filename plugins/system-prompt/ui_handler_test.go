@@ -63,9 +63,9 @@ var _ pluginsdk.HostClient = (*fakeUIHost)(nil)
 
 // withCapturedLogs swaps slog's default handler for one that writes JSON
 // records into a per-call buffer, and restores the previous default on return
-// even when fn panics. The swap is scoped to the closure body so concurrent
-// capture tests (including a sibling running with t.Parallel()) cannot observe
-// each other's default handler.
+// even when fn panics. The swap relies on Go's test model: tests using this
+// helper must not call t.Parallel(), because slog.SetDefault mutates a
+// process-global that another capture would observe.
 func withCapturedLogs(t *testing.T, fn func(*bytes.Buffer)) {
 	t.Helper()
 	prev := slog.Default()
@@ -214,6 +214,40 @@ func TestHandleSaveConfig_SaveError_NoSuccessLog(t *testing.T) {
 		for _, rec := range logRecords(t, buf) {
 			if rec["msg"] == "system-prompt: config saved" {
 				t.Errorf("failed save must not emit 'config saved'; got %s", rec)
+			}
+		}
+	})
+}
+
+// TestHandleSaveConfig_ParseFormError verifies that a malformed form body
+// returns 400, does not call SaveConfig, and does not emit a misleading
+// 'config saved' log line. The previous code path returned err.Error()
+// verbatim to the client; the handler now returns a generic body.
+func TestHandleSaveConfig_ParseFormError(t *testing.T) {
+	host := newFakeUIHost()
+	withCapturedLogs(t, func(buf *bytes.Buffer) {
+		handler := newUIHandler()
+
+		// system_prompt=%zz is invalid percent-encoding; net/http will fail
+		// the body parse before the handler can read any field.
+		req := uiRequest(http.MethodPost, "/api/config",
+			"system_prompt=%zz&append=true",
+			"org-1", host)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d (%s)", rec.Code, rec.Body.String())
+		}
+		if rec.Body.String() != "invalid form body\n" {
+			t.Errorf("expected generic body, got %q", rec.Body.String())
+		}
+		if len(host.saveConfigs) != 0 {
+			t.Errorf("ParseForm failure must not call SaveConfig; got %d calls", len(host.saveConfigs))
+		}
+		for _, rec := range logRecords(t, buf) {
+			if rec["msg"] == "system-prompt: config saved" {
+				t.Errorf("ParseForm failure must not emit 'config saved'; got %s", rec)
 			}
 		}
 	})
