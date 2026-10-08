@@ -20,7 +20,7 @@ import (
 // tests can pin the data returned by GetConfig/SaveConfig.
 type fakeUIHost struct {
 	mu          sync.Mutex
-	getConfigFn func(ctx context.Context, orgID, pluginName string) (string, error)
+	getConfigFn func(ctx context.Context, _ string, _ string) (string, error)
 	saveConfigs []string
 	saveErr     error
 }
@@ -61,22 +61,22 @@ func (h *fakeUIHost) ChatCompletion(context.Context, *proto.HostChatCompletionRe
 
 var _ pluginsdk.HostClient = (*fakeUIHost)(nil)
 
-// captureLogs swaps slog's default handler for one that writes JSON records
-// into the returned buffer. It returns the previous handler so the caller can
-// restore it via t.Cleanup. All assertions parse JSON records line by line,
-// which lets us check both the level and the field values without depending
-// on Go's free-text format.
-func captureLogs(t *testing.T) *bytes.Buffer {
+// withCapturedLogs swaps slog's default handler for one that writes JSON
+// records into a per-call buffer, and restores the previous default on return
+// even when fn panics. The swap is scoped to the closure body so concurrent
+// capture tests (including a sibling running with t.Parallel()) cannot observe
+// each other's default handler.
+func withCapturedLogs(t *testing.T, fn func(*bytes.Buffer)) {
 	t.Helper()
-	var buf bytes.Buffer
 	prev := slog.Default()
+	var buf bytes.Buffer
 	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
 	slog.SetDefault(slog.New(handler))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return &buf
+	defer slog.SetDefault(prev)
+	fn(&buf)
 }
 
-// logRecords returns the JSON records emitted during the test, one per record.
+// logRecords returns the JSON records emitted during the call, one per record.
 func logRecords(t *testing.T, buf *bytes.Buffer) []map[string]any {
 	t.Helper()
 	var records []map[string]any
@@ -117,67 +117,79 @@ const secretPrompt = "Tu es l'assistant de ACME Corp, secret: API_KEY=sk-test-12
 // SystemPrompt", slog.Any("error", cfg.SystemPrompt)) on the success path.
 func TestHandleSaveConfig_DoesNotLogPrompt(t *testing.T) {
 	host := newFakeUIHost()
-	buf := captureLogs(t)
-	handler := newUIHandler()
+	withCapturedLogs(t, func(buf *bytes.Buffer) {
+		handler := newUIHandler()
 
-	req := uiRequest(http.MethodPost, "/api/config",
-		"system_prompt="+secretPrompt+"&append=true",
-		"org-1", host)
-	handler.ServeHTTP(httptest.NewRecorder(), req)
+		req := uiRequest(http.MethodPost, "/api/config",
+			"system_prompt="+secretPrompt+"&append=true",
+			"org-1", host)
+		handler.ServeHTTP(httptest.NewRecorder(), req)
 
-	if buf.Len() == 0 {
-		t.Fatal("no log records captured; the handler should at least emit a save log line")
-	}
-	for _, rec := range logRecords(t, buf) {
-		serialized, _ := json.Marshal(rec)
-		if strings.Contains(string(serialized), secretPrompt) {
-			t.Errorf("prompt leaked into log record: %s", serialized)
+		if buf.Len() == 0 {
+			t.Fatal("no log records captured; the handler should at least emit a save log line")
 		}
-	}
-	for _, rec := range logRecords(t, buf) {
-		if rec["level"] == "ERROR" {
-			t.Errorf("successful save must not emit ERROR; got record %s", rec)
+		for _, rec := range logRecords(t, buf) {
+			serialized, _ := json.Marshal(rec)
+			if strings.Contains(string(serialized), secretPrompt) {
+				t.Errorf("prompt leaked into log record: %s", serialized)
+			}
 		}
-	}
+		for _, rec := range logRecords(t, buf) {
+			if rec["level"] == "ERROR" {
+				t.Errorf("successful save must not emit ERROR; got record %s", rec)
+			}
+		}
+	})
 }
 
 // TestHandleSaveConfig_LogFields checks the success log records the act of
-// saving with non-sensitive metrics only.
+// saving with non-sensitive metrics only, for both append=true and append=false.
 func TestHandleSaveConfig_LogFields(t *testing.T) {
-	host := newFakeUIHost()
-	buf := captureLogs(t)
-	handler := newUIHandler()
-
-	req := uiRequest(http.MethodPost, "/api/config",
-		"system_prompt="+secretPrompt+"&append=true",
-		"org-1", host)
-	handler.ServeHTTP(httptest.NewRecorder(), req)
-
-	var found bool
-	for _, rec := range logRecords(t, buf) {
-		if rec["msg"] != "system-prompt: config saved" {
-			continue
-		}
-		found = true
-		if rec["level"] != "INFO" {
-			t.Errorf("save log level = %v, want INFO", rec["level"])
-		}
-		if rec["org_id"] != "org-1" {
-			t.Errorf("save log org_id = %v, want org-1", rec["org_id"])
-		}
-		if rec["append"] != true {
-			t.Errorf("save log append = %v, want true", rec["append"])
-		}
-		want := float64(len(secretPrompt))
-		if rec["prompt_length"] != want {
-			t.Errorf("save log prompt_length = %v, want %v", rec["prompt_length"], want)
-		}
+	cases := []struct {
+		name       string
+		form       string
+		wantAppend bool
+	}{
+		{"append=true", "system_prompt=" + secretPrompt + "&append=true", true},
+		{"append=false", "system_prompt=" + secretPrompt + "&append=false", false},
 	}
-	if !found {
-		t.Fatalf("no 'config saved' log record found in: %s", buf.String())
-	}
-	if len(host.saveConfigs) != 1 {
-		t.Fatalf("expected one save call, got %d", len(host.saveConfigs))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			host := newFakeUIHost()
+			withCapturedLogs(t, func(buf *bytes.Buffer) {
+				handler := newUIHandler()
+
+				req := uiRequest(http.MethodPost, "/api/config", tc.form, "org-1", host)
+				handler.ServeHTTP(httptest.NewRecorder(), req)
+
+				var found bool
+				for _, rec := range logRecords(t, buf) {
+					if rec["msg"] != "system-prompt: config saved" {
+						continue
+					}
+					found = true
+					if rec["level"] != "INFO" {
+						t.Errorf("save log level = %v, want INFO", rec["level"])
+					}
+					if rec["org_id"] != "org-1" {
+						t.Errorf("save log org_id = %v, want org-1", rec["org_id"])
+					}
+					if rec["append"] != tc.wantAppend {
+						t.Errorf("save log append = %v, want %v", rec["append"], tc.wantAppend)
+					}
+					want := float64(len(secretPrompt))
+					if rec["prompt_length"] != want {
+						t.Errorf("save log prompt_length = %v, want %v", rec["prompt_length"], want)
+					}
+				}
+				if !found {
+					t.Fatalf("no 'config saved' log record found in: %s", buf.String())
+				}
+				if len(host.saveConfigs) != 1 {
+					t.Fatalf("expected one save call, got %d", len(host.saveConfigs))
+				}
+			})
+		})
 	}
 }
 
@@ -187,57 +199,59 @@ func TestHandleSaveConfig_LogFields(t *testing.T) {
 func TestHandleSaveConfig_SaveError_NoSuccessLog(t *testing.T) {
 	host := newFakeUIHost()
 	host.saveErr = errors.New("storage unavailable")
-	buf := captureLogs(t)
-	handler := newUIHandler()
+	withCapturedLogs(t, func(buf *bytes.Buffer) {
+		handler := newUIHandler()
 
-	req := uiRequest(http.MethodPost, "/api/config",
-		"system_prompt=hello&append=false",
-		"org-1", host)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+		req := uiRequest(http.MethodPost, "/api/config",
+			"system_prompt=hello&append=false",
+			"org-1", host)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500, got %d", rec.Code)
-	}
-	for _, rec := range logRecords(t, buf) {
-		if rec["msg"] == "system-prompt: config saved" {
-			t.Errorf("failed save must not emit 'config saved'; got %s", rec)
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("expected 500, got %d", rec.Code)
 		}
-	}
+		for _, rec := range logRecords(t, buf) {
+			if rec["msg"] == "system-prompt: config saved" {
+				t.Errorf("failed save must not emit 'config saved'; got %s", rec)
+			}
+		}
+	})
 }
 
 // TestHandleSaveConfig_MissingContext_LogsWarn verifies the early-return
 // branch logs a warn without putting any value under the 'error' key (the
 // previous code put an int there).
 func TestHandleSaveConfig_MissingContext_LogsWarn(t *testing.T) {
-	buf := captureLogs(t)
-	handler := newUIHandler()
+	withCapturedLogs(t, func(buf *bytes.Buffer) {
+		handler := newUIHandler()
 
-	req := uiRequest(http.MethodPost, "/api/config",
-		"system_prompt=hello&append=false",
-		"", nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+		req := uiRequest(http.MethodPost, "/api/config",
+			"system_prompt=hello&append=false",
+			"", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", rec.Code)
-	}
-	var found bool
-	for _, rec := range logRecords(t, buf) {
-		if !strings.Contains(rec["msg"].(string), "without host or org context") {
-			continue
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d", rec.Code)
 		}
-		found = true
-		if rec["level"] != "WARN" {
-			t.Errorf("expected WARN, got %v", rec["level"])
+		var found bool
+		for _, rec := range logRecords(t, buf) {
+			if !strings.Contains(rec["msg"].(string), "without host or org context") {
+				continue
+			}
+			found = true
+			if rec["level"] != "WARN" {
+				t.Errorf("expected WARN, got %v", rec["level"])
+			}
+			if _, ok := rec["error"]; ok {
+				t.Errorf("'error' key must be absent on the missing-context branch; got %v", rec["error"])
+			}
 		}
-		if _, ok := rec["error"]; ok {
-			t.Errorf("'error' key must be absent on the missing-context branch; got %v", rec["error"])
+		if !found {
+			t.Fatalf("no warn record found in: %s", buf.String())
 		}
-	}
-	if !found {
-		t.Fatalf("no warn record found in: %s", buf.String())
-	}
+	})
 }
 
 // TestHandleIndex_DoesNotLogRawConfig verifies the load path does not leak
@@ -256,69 +270,79 @@ func TestHandleIndex_DoesNotLogRawConfig(t *testing.T) {
 	host.getConfigFn = func(context.Context, string, string) (string, error) {
 		return string(rawConfig), nil
 	}
-	buf := captureLogs(t)
-	handler := newUIHandler()
+	withCapturedLogs(t, func(buf *bytes.Buffer) {
+		handler := newUIHandler()
 
-	req := uiRequest(http.MethodGet, "/", "", "org-1", host)
-	handler.ServeHTTP(httptest.NewRecorder(), req)
+		req := uiRequest(http.MethodGet, "/", "", "org-1", host)
+		handler.ServeHTTP(httptest.NewRecorder(), req)
 
-	for _, rec := range logRecords(t, buf) {
-		serialized, _ := json.Marshal(rec)
-		if strings.Contains(string(serialized), secretPrompt) {
-			t.Errorf("prompt leaked into load log: %s", serialized)
+		for _, rec := range logRecords(t, buf) {
+			serialized, _ := json.Marshal(rec)
+			if strings.Contains(string(serialized), secretPrompt) {
+				t.Errorf("prompt leaked into load log: %s", serialized)
+			}
+			if strings.Contains(string(serialized), string(rawConfig)) {
+				t.Errorf("raw config JSON leaked into load log: %s", serialized)
+			}
 		}
-		if strings.Contains(string(serialized), string(rawConfig)) {
-			t.Errorf("raw config JSON leaked into load log: %s", serialized)
+		var found bool
+		for _, rec := range logRecords(t, buf) {
+			if rec["msg"] != "system-prompt: config loaded" {
+				continue
+			}
+			found = true
+			if rec["level"] != "INFO" {
+				t.Errorf("load log level = %v, want INFO", rec["level"])
+			}
+			if rec["raw_length"] != float64(len(rawConfig)) {
+				t.Errorf("load log raw_length = %v, want %v", rec["raw_length"], len(rawConfig))
+			}
 		}
-	}
-	var found bool
-	for _, rec := range logRecords(t, buf) {
-		if rec["msg"] != "system-prompt: config loaded" {
-			continue
+		if !found {
+			t.Fatalf("no 'config loaded' log record found in: %s", buf.String())
 		}
-		found = true
-		if rec["level"] != "INFO" {
-			t.Errorf("load log level = %v, want INFO", rec["level"])
-		}
-		if rec["raw_length"] != float64(len(rawConfig)) {
-			t.Errorf("load log raw_length = %v, want %v", rec["raw_length"], len(rawConfig))
-		}
-	}
-	if !found {
-		t.Fatalf("no 'config loaded' log record found in: %s", buf.String())
-	}
+	})
 }
 
 // TestHandleIndex_GetConfigError_NoSuccessLog verifies that on a GetConfig
-// failure, the handler does not emit the 'config loaded' INFO line. Only the
-// WARN line is emitted, with no raw payload misreads as a success.
+// failure, the handler does not emit the 'config loaded' INFO line and that
+// the WARN record carries the error returned by GetConfig under the 'error'
+// key.
 func TestHandleIndex_GetConfigError_NoSuccessLog(t *testing.T) {
+	wantErr := errors.New("boom")
 	host := newFakeUIHost()
 	host.getConfigFn = func(context.Context, string, string) (string, error) {
-		return "", errors.New("boom")
+		return "", wantErr
 	}
-	buf := captureLogs(t)
-	handler := newUIHandler()
+	withCapturedLogs(t, func(buf *bytes.Buffer) {
+		handler := newUIHandler()
 
-	req := uiRequest(http.MethodGet, "/", "", "org-1", host)
-	handler.ServeHTTP(httptest.NewRecorder(), req)
+		req := uiRequest(http.MethodGet, "/", "", "org-1", host)
+		handler.ServeHTTP(httptest.NewRecorder(), req)
 
-	var foundInfo bool
-	for _, rec := range logRecords(t, buf) {
-		if rec["msg"] == "system-prompt: config loaded" {
-			foundInfo = true
+		var foundInfo, foundErrKey bool
+		for _, rec := range logRecords(t, buf) {
+			if rec["msg"] == "system-prompt: config loaded" {
+				foundInfo = true
+				continue
+			}
+			if !strings.Contains(rec["msg"].(string), "failed to load config") {
+				continue
+			}
+			if rec["level"] != "WARN" {
+				t.Errorf("load-failure log level = %v, want WARN", rec["level"])
+			}
+			if _, ok := rec["error"]; !ok {
+				t.Errorf("'error' key must be present on the load-failure record; got record %v", rec)
+			} else {
+				foundErrKey = true
+			}
 		}
-	}
-	if foundInfo {
-		t.Errorf("failed GetConfig must not emit 'config loaded'; records: %s", buf.String())
-	}
-	var foundWarn bool
-	for _, rec := range logRecords(t, buf) {
-		if strings.Contains(rec["msg"].(string), "failed to load config") {
-			foundWarn = true
+		if foundInfo {
+			t.Errorf("failed GetConfig must not emit 'config loaded'; records: %s", buf.String())
 		}
-	}
-	if !foundWarn {
-		t.Errorf("expected a 'failed to load config' warn, got: %s", buf.String())
-	}
+		if !foundErrKey {
+			t.Errorf("expected a 'failed to load config' warn with 'error' key, got: %s", buf.String())
+		}
+	})
 }
