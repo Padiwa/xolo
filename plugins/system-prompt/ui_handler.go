@@ -70,7 +70,8 @@ func handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		slog.WarnContext(ctx, "system-prompt/ui: failed to parse form body", slog.Any("error", err))
+		http.Error(w, "invalid form body", http.StatusBadRequest)
 		return
 	}
 
