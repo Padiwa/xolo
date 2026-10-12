@@ -466,6 +466,13 @@ func TestSaveApplicationQuotaBadValueDoesNotOverwriteBudget(t *testing.T) {
 	if !strings.Contains(body, `value="0"`) {
 		t.Errorf("re-rendered form does not echo the operator's typed 0; got body:\n%s", body)
 	}
+	// The rejected 1e16 must also be echoed in the monthly input: the
+	// org and member bad-value tests pin this for their fields, and a
+	// regression in budgetInputValue on the application path would
+	// otherwise pass through.
+	if !strings.Contains(body, `value="1e16"`) {
+		t.Errorf("re-rendered form does not echo the operator's typed 1e16 in monthly; got body:\n%s", body)
+	}
 }
 
 // TestSaveOrgQuotaZeroSucceeds covers the positive case for the "0 means

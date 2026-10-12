@@ -126,7 +126,7 @@ func (h *Handler) saveOrgQuota(w http.ResponseWriter, r *http.Request) {
 		// typed a bad value needs the page back with their input and the
 		// reason it was rejected, not a generic error and certainly not a
 		// ?success=saved banner that lies about the outcome (issue #88).
-		h.renderOrgQuotaFormError(w, r, ctx, user, orgSlug, org, fieldErrors)
+		h.renderOrgQuotaFormError(w, r, ctx, user, orgSlug, org, existing, fieldErrors)
 		return
 	}
 
@@ -251,7 +251,7 @@ func (h *Handler) saveMemberQuota(w http.ResponseWriter, r *http.Request) {
 	daily, monthly, yearly, fieldErrors := parseQuotaBudgetFields(r, existing)
 
 	if len(fieldErrors) > 0 {
-		h.renderMemberQuotaFormError(w, r, ctx, user, orgSlug, org, membership, fieldErrors)
+		h.renderMemberQuotaFormError(w, r, ctx, user, orgSlug, org, membership, existing, fieldErrors)
 		return
 	}
 
@@ -391,7 +391,7 @@ func (h *Handler) saveApplicationQuota(w http.ResponseWriter, r *http.Request) {
 	daily, monthly, yearly, fieldErrors := parseQuotaBudgetFields(r, existing)
 
 	if len(fieldErrors) > 0 {
-		h.renderApplicationQuotaFormError(w, r, ctx, user, orgSlug, org, app, fieldErrors)
+		h.renderApplicationQuotaFormError(w, r, ctx, user, orgSlug, org, app, existing, fieldErrors)
 		return
 	}
 
@@ -575,6 +575,12 @@ type quotaFormConfig struct {
 	SelectedItem string
 	SpendLoader  quotaSpendLoader
 	LoadLog      string // describes the scope in log lines, e.g. "member budget"
+	// Existing is the quota already loaded by the save handler for
+	// parseQuotaBudgetFields. Passing it through avoids a second
+	// quotaStore.GetQuota read in the re-render path. nil is a valid
+	// value meaning "no row on file" and is rendered as such by the
+	// template.
+	Existing model.Quota
 }
 
 // renderQuotaFormError re-renders the quota editor with HTTP 422 when
@@ -586,12 +592,11 @@ type quotaFormConfig struct {
 // dropping one to surface the other would hide a real store failure
 // from the operator.
 func (h *Handler) renderQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, org model.Organization, cfg quotaFormConfig, fieldErrors map[string]string) {
-	existing, err := h.quotaStore.GetQuota(ctx, cfg.Scope, cfg.ScopeID)
-	budgetLoadError := ""
-	if err != nil && !errors.Is(err, port.ErrNotFound) {
-		slog.ErrorContext(ctx, "could not load "+cfg.LoadLog+" for re-render", slogx.Error(err))
-		budgetLoadError = "Budget indisponible : le store a renvoyé une erreur. Le formulaire ci-dessous reste éditable mais le total dépensé peut être inexact."
-	}
+	// The save handler already loaded the existing quota for
+	// parseQuotaBudgetFields; we reuse it here so a rejected submit
+	// makes one quotaStore read, not two. The spend side still queries
+	// the usage store fresh because it is not loaded on the save path.
+	existing := cfg.Existing
 
 	orgCurrency := org.Currency()
 	if orgCurrency == "" {
@@ -603,14 +608,8 @@ func (h *Handler) renderQuotaFormError(w http.ResponseWriter, r *http.Request, c
 		slog.ErrorContext(ctx, "could not load "+cfg.LoadLog+" spend for re-render", slogx.Error(spendErr))
 		spendLoadError = "Consommation indisponible : le store a renvoyé une erreur. Les barres peuvent afficher 0 %."
 	}
-	// Mirror the GET handlers' combine switch: if both stores fail, the
-	// operator sees one banner that mentions both problems rather than
-	// the second silently overwriting the first.
-	loadError := budgetLoadError
-	switch {
-	case budgetLoadError != "" && spendLoadError != "":
-		loadError = budgetLoadError + " " + spendLoadError
-	case spendLoadError != "":
+	loadError := ""
+	if spendLoadError != "" {
 		loadError = spendLoadError
 	}
 
@@ -653,7 +652,7 @@ func (h *Handler) renderQuotaFormError(w http.ResponseWriter, r *http.Request, c
 
 // renderOrgQuotaFormError re-renders the org quota editor when validation
 // fails on POST. See renderQuotaFormError for the shared body.
-func (h *Handler) renderOrgQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, fieldErrors map[string]string) {
+func (h *Handler) renderOrgQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, existing model.Quota, fieldErrors map[string]string) {
 	h.renderQuotaFormError(w, r, ctx, user, org, quotaFormConfig{
 		Scope:        model.QuotaScopeOrg,
 		ScopeID:      string(org.ID()),
@@ -666,6 +665,7 @@ func (h *Handler) renderOrgQuotaFormError(w http.ResponseWriter, r *http.Request
 			{Label: org.Name(), Href: "/orgs/" + orgSlug + "/usage"},
 			{Label: "Budget", Href: "/orgs/" + orgSlug + "/admin/quota"},
 		},
+		Existing: existing,
 	}, fieldErrors)
 }
 
@@ -674,7 +674,7 @@ func (h *Handler) renderOrgQuotaFormError(w http.ResponseWriter, r *http.Request
 // for callers to obtain the membership here: GetMembership is keyed by
 // membership id alone, so a foreign membership would let an operator
 // rewrite another org's per-user budget.
-func (h *Handler) renderMemberQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, membership model.Membership, fieldErrors map[string]string) {
+func (h *Handler) renderMemberQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, membership model.Membership, existing model.Quota, fieldErrors map[string]string) {
 	h.renderQuotaFormError(w, r, ctx, user, org, quotaFormConfig{
 		Scope:        model.QuotaScopeUser,
 		ScopeID:      string(membership.UserID()),
@@ -690,12 +690,13 @@ func (h *Handler) renderMemberQuotaFormError(w http.ResponseWriter, r *http.Requ
 			{Label: membership.User().DisplayName(), Href: ""},
 			{Label: "Budget", Href: ""},
 		},
+		Existing: existing,
 	}, fieldErrors)
 }
 
 // renderApplicationQuotaFormError re-renders the per-application quota
 // editor when validation fails on POST (issue #64).
-func (h *Handler) renderApplicationQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, app model.Application, fieldErrors map[string]string) {
+func (h *Handler) renderApplicationQuotaFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, app model.Application, existing model.Quota, fieldErrors map[string]string) {
 	appID := string(app.ID())
 	h.renderQuotaFormError(w, r, ctx, user, org, quotaFormConfig{
 		Scope:        model.QuotaScopeApplication,
@@ -712,6 +713,7 @@ func (h *Handler) renderApplicationQuotaFormError(w http.ResponseWriter, r *http
 			{Label: app.Name(), Href: "/orgs/" + orgSlug + "/admin/applications/" + appID + "/edit"},
 			{Label: "Budget", Href: ""},
 		},
+		Existing: existing,
 	}, fieldErrors)
 }
 
