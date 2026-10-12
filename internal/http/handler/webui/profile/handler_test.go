@@ -298,13 +298,14 @@ func TestRedirectTokensWithFormURL(t *testing.T) {
 
 // TestRedirectTokensWithFormTrimsDraftValues covers the trim symmetry
 // between what createToken validates and what redirectTokensWithForm
-// round-trips. A whitespace-padded label or org_id would otherwise survive
-// the redirect and fail to match the corresponding select item or the
-// trimmed value the server already accepted, leaving the user staring at
-// a selectbox whose previous choice silently disappeared.
+// round-trips. A whitespace-padded label, org_id or expires_at would
+// otherwise survive the redirect: for org_id the selectbox fails to
+// match the corresponding item (and the user loses their previous
+// choice); for expires_at the browser silently drops a non-ISO date and
+// the user lands on a blank field. Both would happen without a signal.
 func TestRedirectTokensWithFormTrimsDraftValues(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/profile/tokens",
-		strings.NewReader("label=%20%20Mon+poste%20%20&org_id=%20%20acme%20%20&expires_at=2030-01-01"))
+		strings.NewReader("label=%20%20Mon+poste%20%20&org_id=%20%20acme%20%20&expires_at=%202030-01-01%20"))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if err := r.ParseForm(); err != nil {
 		t.Fatalf("ParseForm: %v", err)
@@ -323,6 +324,9 @@ func TestRedirectTokensWithFormTrimsDraftValues(t *testing.T) {
 	}
 	if got := q.Get("org_id"); got != "acme" {
 		t.Errorf("org_id should be trimmed: got %q", got)
+	}
+	if got := q.Get("expires_at"); got != "2030-01-01" {
+		t.Errorf("expires_at should be trimmed: got %q", got)
 	}
 }
 

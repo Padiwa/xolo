@@ -188,10 +188,18 @@ func (h *Handler) createToken(w http.ResponseWriter, r *http.Request) {
 	// Authorization: the AuthToken's OrgID is later used verbatim by the proxy
 	// to resolve which models and quotas the bearer can reach. Without this
 	// check any authenticated user could mint a key for any org they could
-	// guess the ID of, and consume that organisation's budget. The check is
-	// best-effort w.r.t. concurrent membership changes: a user removed from
-	// the org between IsMember and CreateAuthToken still gets the key, which
-	// the next request rejects. That race is the store's to close, not ours.
+	// guess the ID of, and consume that organisation's budget.
+	//
+	// The IsMember check is a one-shot gate at creation time, not a
+	// per-request re-validation. A user removed from the org after this
+	// point keeps the token and its OrgID: FindAuthToken only checks the
+	// expiry, and RemoveMember does not delete AuthToken rows (see
+	// internal/adapter/gorm/user_store.go::FindAuthToken and
+	// org_store.go::RemoveMember, and the "keeps its API tokens" comment
+	// at http/middleware/authn/token/login.go:120). Closing that residual
+	// window — revalidating membership on every authenticated request, or
+	// deleting keys on RemoveMember — is a store- or middleware-level
+	// change, not something this handler can solve.
 	isMember, err := h.orgStore.IsMember(ctx, user.ID(), orgID)
 	if err != nil {
 		slog.ErrorContext(ctx, "could not verify org membership", slogx.Error(err), slog.String("org_id", string(orgID)))
@@ -244,17 +252,21 @@ func (h *Handler) createToken(w http.ResponseWriter, r *http.Request) {
 // common/flash.templ translates into a user-facing message; the dialog
 // reopens on its own as soon as `error` is set.
 //
-// `label` and `org_id` are the trimmed values the handler actually
-// validated; passing the raw `r.FormValue("label"|"org_id")` would
-// round-trip a whitespace-padded draft that does not match what was
-// checked. For `org_id` the visible effect is that the selectbox no
-// longer finds the matching item to pre-select, so the user loses their
-// previous choice without anything telling them why.
+// `label`, `org_id` and `expires_at` are the trimmed values the handler
+// actually validated; passing the raw `r.FormValue(...)` would round-trip
+// a whitespace-padded draft that does not match what was checked. For
+// `org_id` the visible effect is that the selectbox no longer finds the
+// matching item to pre-select, so the user loses their previous choice
+// without anything telling them why; for `expires_at` the browser silently
+// drops a non-ISO date and the user lands on a blank field, again without
+// a signal. The native <input type=date> normally cannot post padding, so
+// this matters mostly for non-browser clients and for symmetry with the
+// other two fields.
 func redirectTokensWithForm(r *http.Request, errorCode string) string {
 	q := url.Values{}
 	q.Set("error", errorCode)
 	q.Set("label", strings.TrimSpace(r.FormValue("label")))
-	q.Set("expires_at", r.FormValue("expires_at"))
+	q.Set("expires_at", strings.TrimSpace(r.FormValue("expires_at")))
 	q.Set("org_id", strings.TrimSpace(r.FormValue("org_id")))
 	return "/profile/tokens?" + q.Encode()
 }
