@@ -64,7 +64,7 @@ func (s *stubOrgStore) IsMember(_ context.Context, _ model.UserID, orgID model.O
 // redirect paths exercised here, and a panic would surface a regression.
 func newTestHandler(t *testing.T, userStore port.UserStore, orgStore port.OrgStore) *Handler {
 	t.Helper()
-	h := NewHandler(userStore, orgStore, nil, nil, nil, nil)
+	h := NewHandler(userStore, orgStore, nil, nil, nil, nil, nil)
 	return h
 }
 

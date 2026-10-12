@@ -28,6 +28,7 @@ func (m *testMembership) ID() model.MembershipID  { return m.id }
 func (m *testMembership) UserID() model.UserID    { return m.userID }
 func (m *testMembership) OrgID() model.OrgID      { return m.orgID }
 func (m *testMembership) CreatedAt() time.Time    { return m.createdAt }
+func (m *testMembership) Status() model.Status    { return model.StatusActive }
 func (m *testMembership) User() model.User        { return nil }
 func (m *testMembership) Org() model.Organization { return m.org }
 func (m *testMembership) Roles() []model.Role     { return nil }
