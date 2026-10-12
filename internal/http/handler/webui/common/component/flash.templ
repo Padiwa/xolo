@@ -44,11 +44,14 @@ templ FlashError(reason, subject string) {
 // errorMessage words the `?error=` code. Handlers also pass free-form messages
 // through the same field, so anything unrecognised is shown as-is.
 //
-// `subject` lets a screen specialise the noun ("La clé API") when a generic
-// wording reads as awkward. The label_required branch uses it: the dialog
-// inline message already says "Le nom de la clé est obligatoire.", and the
-// dialog-level alert needs to match so the user does not read the two as
-// two different problems.
+// `subject` lets a screen specialise the noun when a generic wording
+// reads as awkward. The exists branch already uses it ("Un middleware
+// portant ce nom existe déjà."); other branches ignore it. The
+// label_required branch keeps a subject-aware path on purpose so a
+// future screen that wants "Le nom de la <subject> est obligatoire."
+// can opt in without touching flash.templ again, but today's only
+// caller (the tokens page) passes an empty subject, so the
+// branch collapses to the generic wording.
 func errorMessage(reason, subject string) string {
 	switch reason {
 	case "exists":
