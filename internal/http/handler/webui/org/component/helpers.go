@@ -251,6 +251,12 @@ func quotaFieldError(fieldErrors map[string]string, field string) string {
 // per offending field, prefixed with its label. The alert itself is rendered
 // by the template; this helper only formats the prose so the error copy
 // stays in one place and tests can pin it.
+// QuotaFormErrorSummary is quotaFormErrorSummary for the pages that report a
+// refused budget through their own banner, like the team pages.
+func QuotaFormErrorSummary(fieldErrors map[string]string) string {
+	return quotaFormErrorSummary(fieldErrors)
+}
+
 func quotaFormErrorSummary(fieldErrors map[string]string) string {
 	if len(fieldErrors) == 0 {
 		return ""

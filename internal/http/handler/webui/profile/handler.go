@@ -34,6 +34,14 @@ type Handler struct {
 	personalVMStore   port.PersonalVirtualModelStore
 	secretStore       port.SecretStore
 	pluginManager     pluginManagerIface
+	// teamStore enables the team pickers of tokens and personal virtual
+	// models, see SetTeams.
+	teamStore port.TeamStore
+}
+
+// SetTeams enables the team pickers of tokens and personal virtual models.
+func (h *Handler) SetTeams(teams port.TeamStore) {
+	h.teamStore = teams
 }
 
 // ServeHTTP implements http.Handler.
@@ -139,9 +147,17 @@ func (h *Handler) renderTokensPage(w http.ResponseWriter, r *http.Request, creat
 	// dismiss an empty form before they could copy the one-time key.
 	openDialog := tokenError != ""
 
+	teams, err := h.userTeams(ctx, user.ID())
+	if err != nil {
+		slog.ErrorContext(ctx, "could not list user teams", slogx.Error(err))
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
 	vmodel := component.TokensPageVModel{
 		AuthTokens:     tokens,
 		OrgMemberships: memberships,
+		Teams:          teams,
 		CreatedToken:   createdToken,
 		DeletedToken:   deletedToken != "",
 		Error:          tokenError,
@@ -149,6 +165,7 @@ func (h *Handler) renderTokensPage(w http.ResponseWriter, r *http.Request, creat
 		FormLabel:      q.Get("label"),
 		FormOrgID:      model.OrgID(q.Get("org_id")),
 		FormExpiresAt:  q.Get("expires_at"),
+		FormTeamID:     model.TeamID(q.Get("team_id")),
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
 			SelectedItem: "tokens",
@@ -227,6 +244,23 @@ func (h *Handler) createToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The team, when one is picked, is one of the user's teams in the chosen
+	// organization.
+	var team component.TeamOption
+	if teamID := model.TeamID(strings.TrimSpace(r.FormValue("team_id"))); teamID != "" {
+		teams, err := h.userTeams(ctx, user.ID())
+		if err != nil {
+			slog.ErrorContext(ctx, "could not list user teams", slogx.Error(err))
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		var ok bool
+		if team, ok = pickTeam(teams, teamID); !ok || team.OrgID != orgID {
+			http.Redirect(w, r, redirectTokensWithForm(r, "team_not_in_org"), http.StatusSeeOther)
+			return
+		}
+	}
+
 	// Generate secure token
 	tokenValue, err := crypto.GenerateSecureToken()
 	if err != nil {
@@ -236,6 +270,7 @@ func (h *Handler) createToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	authToken := model.NewAuthToken(user, orgID, label, tokenValue, expiresAt)
+	authToken.SetTeamID(team.TeamID)
 	if err := h.userStore.CreateAuthToken(ctx, authToken); err != nil {
 		slog.ErrorContext(ctx, "could not create auth token", slogx.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -268,6 +303,7 @@ func redirectTokensWithForm(r *http.Request, errorCode string) string {
 	q.Set("label", strings.TrimSpace(r.FormValue("label")))
 	q.Set("expires_at", strings.TrimSpace(r.FormValue("expires_at")))
 	q.Set("org_id", strings.TrimSpace(r.FormValue("org_id")))
+	q.Set("team_id", strings.TrimSpace(r.FormValue("team_id")))
 	return "/profile/tokens?" + q.Encode()
 }
 

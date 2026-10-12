@@ -61,6 +61,8 @@ func errorMessage(reason, subject string) string {
 		return subject + " portant ce nom existe déjà."
 	case "name_required":
 		return "Le nom est obligatoire."
+	case "team_conflict":
+		return "Ce nom commence par l'identifiant d'une équipe suivi de « / » : il serait lu comme un modèle de cette équipe. Choisissez un autre nom."
 	case "invalid_overrides":
 		return "La fenêtre de contexte et la sortie maximale doivent être des entiers positifs."
 	case "label_required":
@@ -86,6 +88,8 @@ func errorMessage(reason, subject string) string {
 		return "Vous n'appartenez pas à cette organisation."
 	case "org_lookup_failed":
 		return "La vérification de l'organisation a échoué. Réessayez."
+	case "team_not_in_org":
+		return "L'équipe choisie n'est pas une de vos équipes dans cette organisation."
 	case "invalid_expires_at":
 		return "La date d'expiration est invalide."
 	case "create_failed":

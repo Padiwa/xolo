@@ -39,6 +39,11 @@ templ QuotaPage(vmodel QuotaPageVModel) {
 					@common.InfoBanner(common.ToneNegative, vmodel.LoadError)
 				</div>
 			}
+			if vmodel.Error != "" {
+				<div class="mb-3.5">
+					@common.InfoBanner(common.ToneNegative, vmodel.Error)
+				</div>
+			}
 			if len(vmodel.FieldErrors) > 0 {
 				<div class="mb-3.5">
 					@alert.Alert(alert.Props{Variant: alert.VariantDestructive}) {
@@ -71,6 +76,9 @@ templ QuotaPage(vmodel QuotaPageVModel) {
 							Un champ vide vaut « illimité ». Saisissez 0 pour geler immédiatement les dépenses (toute nouvelle requête payante reçoit un 429). Pour changer la devise, passez par les
 							<a href={ templ.SafeURL(common.BaseURLString(ctx, common.WithPath("/orgs/", vmodel.Org.Slug(), "/admin/settings"))) } class="font-medium underline">paramètres de l'organisation</a>.
 						</p>
+						if vmodel.ScopeType == "org" {
+							@cascadeChoice("org-cascade", "Répartition entre les équipes", quotaCascade(vmodel.Quota), readonly)
+						}
 					}
 					if common.HasPermission(ctx, vmodel.Org.ID(), rbac.PermQuotaWrite) {
 						@common.SectionHeader(common.SectionHeaderProps{Class: "border-b-0 border-t"}) {

@@ -21,6 +21,10 @@ type fakeQuotaStore struct {
 
 func (f *fakeQuotaStore) SetQuota(_ context.Context, _ model.Quota) error { return nil }
 
+func (f *fakeQuotaStore) ListQuotas(context.Context, model.QuotaScope, []string) ([]model.Quota, error) {
+	return nil, nil
+}
+
 func (f *fakeQuotaStore) GetQuota(_ context.Context, scope model.QuotaScope, _ string) (model.Quota, error) {
 	switch scope {
 	case model.QuotaScopeUser:
@@ -40,14 +44,6 @@ func (f *fakeQuotaStore) GetQuota(_ context.Context, scope model.QuotaScope, _ s
 		return f.appQuota, nil
 	}
 	return nil, port.ErrNotFound
-}
-
-func (f *fakeQuotaStore) ResolveEffectiveQuota(_ context.Context, _ model.UserID, _ model.OrgID) (*model.EffectiveQuota, model.Quota, error) {
-	return nil, f.orgQuota, nil // not used by QuotaService
-}
-
-func (f *fakeQuotaStore) ResolveEffectiveQuotaForApplication(_ context.Context, _ model.ApplicationID, _ model.OrgID) (*model.EffectiveQuota, model.Quota, error) {
-	return nil, f.orgQuota, nil
 }
 
 // fakeOrgProvider satisfies service.OrgProvider (narrow interface used by QuotaService).
@@ -103,15 +99,16 @@ type fakeQuota struct {
 	scopeID                string
 }
 
-func (q *fakeQuota) ID() model.QuotaID       { return "" }
-func (q *fakeQuota) Scope() model.QuotaScope { return q.scope }
-func (q *fakeQuota) ScopeID() string         { return q.scopeID }
-func (q *fakeQuota) Currency() string        { return q.currency }
-func (q *fakeQuota) DailyBudget() *int64     { return q.daily }
-func (q *fakeQuota) MonthlyBudget() *int64   { return q.monthly }
-func (q *fakeQuota) YearlyBudget() *int64    { return q.yearly }
-func (q *fakeQuota) CreatedAt() time.Time    { return time.Time{} }
-func (q *fakeQuota) UpdatedAt() time.Time    { return time.Time{} }
+func (q *fakeQuota) ID() model.QuotaID           { return "" }
+func (q *fakeQuota) Scope() model.QuotaScope     { return q.scope }
+func (q *fakeQuota) ScopeID() string             { return q.scopeID }
+func (q *fakeQuota) Currency() string            { return q.currency }
+func (q *fakeQuota) DailyBudget() *int64         { return q.daily }
+func (q *fakeQuota) MonthlyBudget() *int64       { return q.monthly }
+func (q *fakeQuota) YearlyBudget() *int64        { return q.yearly }
+func (q *fakeQuota) Cascade() model.QuotaCascade { return model.QuotaCascadeFree }
+func (q *fakeQuota) CreatedAt() time.Time        { return time.Time{} }
+func (q *fakeQuota) UpdatedAt() time.Time        { return time.Time{} }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -319,5 +316,33 @@ func TestQuotaService_ResolveEffectiveQuotaForApplication_OrgTakesPrecedenceOnCu
 	}
 	if got.Currency != "EUR" {
 		t.Errorf("currency = %q, want EUR (org takes precedence)", got.Currency)
+	}
+}
+
+// Issue #82: both resolutions return the org quota they loaded, nil when none
+// is on file, so that the enforcer's org-wide check needs no second read.
+func TestQuotaService_ResolveEffectiveQuota_CarriesOrgQuota(t *testing.T) {
+	ctx := context.Background()
+	store := &fakeQuotaStore{}
+	svc := service.NewQuotaService(store, &fakeOrgProvider{org: &fakeOrg{}})
+
+	if _, orgQuota, err := svc.ResolveEffectiveQuota(ctx, "user1", "org1"); err != nil || orgQuota != nil {
+		t.Fatalf("user path without org quota: org quota %v, err %v, want nil", orgQuota, err)
+	}
+	if _, orgQuota, err := svc.ResolveEffectiveQuotaForApplication(ctx, "app1", "org1"); err != nil || orgQuota != nil {
+		t.Fatalf("application path without org quota: org quota %v, err %v, want nil", orgQuota, err)
+	}
+
+	store.orgQuota = &fakeQuota{daily: ptr[int64](1_000), currency: "EUR", scope: model.QuotaScopeOrg, scopeID: "org1"}
+	store.appQuota = &fakeQuota{daily: ptr[int64](800), currency: "EUR", scope: model.QuotaScopeApplication, scopeID: "app1"}
+	if _, orgQuota, err := svc.ResolveEffectiveQuota(ctx, "user1", "org1"); err != nil || orgQuota != store.orgQuota {
+		t.Fatalf("user path: org quota %v, err %v, want the stored one", orgQuota, err)
+	}
+	effective, orgQuota, err := svc.ResolveEffectiveQuotaForApplication(ctx, "app1", "org1")
+	if err != nil || orgQuota != store.orgQuota {
+		t.Fatalf("application path: org quota %v, err %v, want the stored one", orgQuota, err)
+	}
+	if effective.DailyBudget == nil || *effective.DailyBudget != 800 {
+		t.Errorf("application daily budget = %v, want min(800, 1000) = 800", effective.DailyBudget)
 	}
 }

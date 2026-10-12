@@ -456,6 +456,52 @@ func TestCreateToken_ForeignOrgIDIsRejected(t *testing.T) {
 	}
 }
 
+// TestCreateToken_TeamOutsideTheUserTeamsRedirects: a team the user does not
+// belong to in the chosen organization bounces back to the form like the
+// other validation errors, the picked team kept in the draft.
+func TestCreateToken_TeamOutsideTheUserTeamsRedirects(t *testing.T) {
+	const testTenantID model.TenantID = "test-tenant"
+
+	user := model.NewUser(testTenantID, "test", "subject", "user@xolo.test", "Ada", true, model.PlatformRoleUser)
+	org := model.NewOrganization(testTenantID, "acme", "Acme", "")
+
+	userStore := &stubUserStore{}
+	orgStore := &stubOrgStore{
+		memberships:  []model.Membership{model.NewMembership(user.ID(), org.ID())},
+		memberOrgIDs: map[model.OrgID]struct{}{org.ID(): {}},
+	}
+	h := newTestHandler(t, userStore, orgStore)
+
+	form := url.Values{}
+	form.Set("label", "Équipe")
+	form.Set("org_id", string(org.ID()))
+	form.Set("team_id", "not-my-team")
+
+	req := httptest.NewRequest(http.MethodPost, "/profile/tokens", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = authRequest(req, user)
+
+	rr := httptest.NewRecorder()
+	h.createToken(rr, req)
+
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect, got %d", rr.Code)
+	}
+	q, err := url.Parse(rr.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("redirect URL not parseable: %v", err)
+	}
+	if got := q.Query().Get("error"); got != "team_not_in_org" {
+		t.Errorf("error = %q, want team_not_in_org", got)
+	}
+	if got := q.Query().Get("team_id"); got != "not-my-team" {
+		t.Errorf("team lost in the redirect, got %q", got)
+	}
+	if len(userStore.created) != 0 {
+		t.Fatalf("no token must be persisted on a foreign team, got %d", len(userStore.created))
+	}
+}
+
 // TestCreateToken_OrgLookupErrorRedirectsSafely covers the branch where
 // IsMember returns an infrastructure error (DB blip, etc.). The user must
 // not be left looking at a 500 page; the handler redirects back to the

@@ -78,8 +78,16 @@ func (h *Handler) getNewPersonalModelPage(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	teams, err := h.userTeams(ctx, user.ID())
+	if err != nil {
+		slog.ErrorContext(ctx, "could not list user teams", slogx.Error(err))
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
 	vmodel := component.PersonalModelFormVModel{
 		IsNew: true,
+		Teams: teams,
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
 			SelectedItem: "personal-models",
@@ -136,6 +144,11 @@ func (h *Handler) createPersonalModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	team, ok := h.formTeam(w, r, user.ID())
+	if !ok {
+		return
+	}
+
 	overrides, err := common.ParseCatalogOverrides(r)
 	if err != nil {
 		http.Redirect(w, r, "/profile/personal-models?error=invalid_overrides", http.StatusSeeOther)
@@ -143,6 +156,7 @@ func (h *Handler) createPersonalModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	vm := model.NewPersonalVirtualModel(user.ID(), name, description)
+	vm.SetTeamID(team.TeamID)
 	vm.SetCatalogOverrides(overrides)
 	if err := h.personalVMStore.CreatePersonalVirtualModel(ctx, vm); err != nil {
 		if errors.Is(err, port.ErrAlreadyExists) {
@@ -184,11 +198,20 @@ func (h *Handler) getEditPersonalModelPage(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	teams, err := h.userTeams(ctx, user.ID())
+	if err != nil {
+		slog.ErrorContext(ctx, "could not list user teams", slogx.Error(err))
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+
 	vmodel := component.PersonalModelFormVModel{
 		VirtualModel: vm,
 		IsNew:        false,
 		Name:         vm.Name(),
 		Description:  vm.Description(),
+		Teams:        teams,
+		TeamID:       vm.TeamID(),
 		Error:        r.URL.Query().Get("error"),
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
@@ -270,6 +293,11 @@ func (h *Handler) updatePersonalModel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	team, ok := h.formTeam(w, r, user.ID())
+	if !ok {
+		return
+	}
+
 	overrides, err := common.ParseCatalogOverrides(r)
 	if err != nil {
 		http.Redirect(w, r, "/profile/personal-models/"+vmID+"/edit?error=invalid_overrides", http.StatusSeeOther)
@@ -279,6 +307,7 @@ func (h *Handler) updatePersonalModel(w http.ResponseWriter, r *http.Request) {
 	type mutable interface {
 		SetName(string)
 		SetDescription(string)
+		SetTeamID(model.TeamID)
 		SetCatalogOverrides(*model.CatalogOverrides)
 		SetUpdatedAt(time.Time)
 	}
@@ -290,6 +319,9 @@ func (h *Handler) updatePersonalModel(w http.ResponseWriter, r *http.Request) {
 	}
 	m.SetName(name)
 	m.SetDescription(description)
+	if h.teamStore != nil {
+		m.SetTeamID(team.TeamID)
+	}
 	m.SetCatalogOverrides(overrides)
 	m.SetUpdatedAt(time.Now())
 
@@ -390,4 +422,25 @@ func (h *Handler) getPersonalPipelineEditorPage(w http.ResponseWriter, r *http.R
 	}
 
 	templ.Handler(component.PersonalModelEditorPage(vmodel)).ServeHTTP(w, r)
+}
+
+// formTeam reads the team_id field of a form: none, or one of the user's
+// teams. It writes the response and returns false otherwise.
+func (h *Handler) formTeam(w http.ResponseWriter, r *http.Request, userID model.UserID) (component.TeamOption, bool) {
+	teamID := model.TeamID(r.FormValue("team_id"))
+	if teamID == "" {
+		return component.TeamOption{}, true
+	}
+	teams, err := h.userTeams(r.Context(), userID)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "could not list user teams", slogx.Error(err))
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return component.TeamOption{}, false
+	}
+	team, ok := pickTeam(teams, teamID)
+	if !ok {
+		http.Error(w, "Team not found", http.StatusBadRequest)
+		return component.TeamOption{}, false
+	}
+	return team, true
 }

@@ -181,6 +181,7 @@ func (t *XoloUsageTracker) PostResponse(ctx context.Context, req *genaiProxy.Pro
 		model.UserID(req.UserID),
 		applicationID,
 		orgID,
+		TeamIDFromMeta(req.Metadata),
 		llmModel.ProviderID(),
 		modelID,
 		originalModel,

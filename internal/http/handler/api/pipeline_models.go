@@ -1,9 +1,11 @@
 package api
 
 import (
+	"log/slog"
 	"net/http"
 	"sort"
 
+	"github.com/bornholm/go-x/slogx"
 	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
@@ -55,13 +57,33 @@ func (h *Handler) handlePipelineModels(w http.ResponseWriter, r *http.Request) {
 
 // handlePersonalPipelineModels lists what a personal pipeline can name: the
 // user's own virtual models (~/name) and, qualified by org slug, the models of
-// every organisation the user belongs to.
+// every organisation the user belongs to that it can use. A personal pipeline
+// delegates nothing: it only reaches what its owner can use. With ?vm= naming
+// a virtual model that charges a team, only the organization of that team
+// offers models, those of the team plus the organization-wide access: the
+// proxy refuses the requests to any other organization, and every request
+// while the owner is no longer in the team (see proxy.TeamScopeHook).
 func (h *Handler) handlePersonalPipelineModels(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := httpCtx.User(ctx)
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
+	}
+
+	var charged model.TeamID
+	if id := r.URL.Query().Get("vm"); id != "" && h.personalVMStore != nil {
+		pvm, err := h.personalVMStore.GetPersonalVirtualModelByID(ctx, model.PersonalVirtualModelID(id))
+		switch {
+		case err == nil && pvm.UserID() == user.ID():
+			charged = pvm.TeamID()
+		case err != nil && !errors.Is(err, port.ErrNotFound):
+			// Read as no virtual model, the error would offer the models of
+			// every organization instead of the charged team's.
+			slog.ErrorContext(ctx, "could not get personal virtual model", slogx.Error(err))
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
 	}
 
 	options := []pipelineModelOption{}
@@ -92,7 +114,19 @@ func (h *Handler) handlePersonalPipelineModels(w http.ResponseWriter, r *http.Re
 		if err != nil {
 			continue
 		}
-		orgOptions, err := h.orgModelOptions(r, org, org.Slug()+"/")
+		perms, err := httpCtx.ResolvePermissions(ctx, org.ID())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		usable := func(id, kind string) bool {
+			if charged != "" {
+				// perms only knows the teams of this organization.
+				return perms.InTeam(string(charged)) && perms.CanUseModel(string(charged), id, kind)
+			}
+			return perms.HasOrgWideModelAccess(kind) || len(perms.TeamsGranting(id, kind)) > 0
+		}
+		orgOptions, err := h.orgModelOptionsWhere(r, org, org.Slug()+"/", usable)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
@@ -106,6 +140,12 @@ func (h *Handler) handlePersonalPipelineModels(w http.ResponseWriter, r *http.Re
 // orgModelOptions returns the org's models and virtual models, proxy names
 // prefixed as given (empty inside the org, "slug/" from a personal pipeline).
 func (h *Handler) orgModelOptions(r *http.Request, org model.Organization, prefix string) ([]pipelineModelOption, error) {
+	return h.orgModelOptionsWhere(r, org, prefix, nil)
+}
+
+// orgModelOptionsWhere is orgModelOptions keeping the models usable reports
+// true for; a nil usable keeps them all.
+func (h *Handler) orgModelOptionsWhere(r *http.Request, org model.Organization, prefix string, usable func(id, kind string) bool) ([]pipelineModelOption, error) {
 	ctx := r.Context()
 	options := []pipelineModelOption{}
 
@@ -115,6 +155,9 @@ func (h *Handler) orgModelOptions(r *http.Request, org model.Organization, prefi
 	}
 	providerNames := map[model.ProviderID]string{}
 	for _, m := range models {
+		if usable != nil && !usable(string(m.ID()), rbac.ModelKindLLM) {
+			continue
+		}
 		group, ok := providerNames[m.ProviderID()]
 		if !ok {
 			group = org.Name()
@@ -136,6 +179,9 @@ func (h *Handler) orgModelOptions(r *http.Request, org model.Organization, prefi
 		return nil, err
 	}
 	for _, vm := range vms {
+		if usable != nil && !usable(string(vm.ID()), rbac.ModelKindVirtual) {
+			continue
+		}
 		options = append(options, pipelineModelOption{
 			ProxyName:   prefix + vm.Name(),
 			Kind:        "virtual",
