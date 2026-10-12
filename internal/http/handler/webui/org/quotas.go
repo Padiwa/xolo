@@ -132,46 +132,14 @@ func (h *Handler) saveOrgQuota(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/orgs/"+orgSlug+"/admin/quota?success=saved", http.StatusSeeOther)
 }
 
-// membershipFromQuotaPath loads the org from the URL slug, then the
-// membership from the URL id, and asserts the membership belongs to the
-// org. Returns:
-//
-//   - org not found: orgFromSlug's error (typically port.ErrNotFound).
-//     The caller answers 404 with "Organization not found".
-//
-//   - membership not found: h.orgStore.GetMembership's error (typically
-//     port.ErrNotFound). The caller answers 404 with "Membership not
-//     found".
-//
-//   - membership belongs to another org: wrapped port.ErrNotFound. The
-//     caller answers 404 with "Membership not found" (the operator must
-//     not learn whether the membership exists in another org of the
-//     same tenant — this matches the resolveOrgAndApplication pattern
-//     where a foreign app also looks like a not-found).
-//
-// What this check does NOT cover: a user who legitimately belongs to
-// several orgs of the same tenant. QuotaStore keys user quotas by userID
-// alone (no org column on the Quota model), so an admin of org A can
-// still set or freeze the shared budget the enforcer applies to that
-// user in org B. That is a model-level property of QuotaScopeUser and
-// would need either (a) scoping Quota by (orgID, userID) end-to-end
-// (model, store, service, enforcer, migration) or (b) refusing to edit
-// a user quota from any membership when the user has memberships in
-// other orgs. Both are out of scope for issue #88.
-func (h *Handler) membershipFromQuotaPath(ctx context.Context, orgSlug, membershipID string) (model.Organization, model.Membership, error) {
-	org, err := h.orgFromSlug(ctx, orgSlug)
-	if err != nil {
-		return nil, nil, err
-	}
-	membership, err := h.orgStore.GetMembership(ctx, model.MembershipID(membershipID))
-	if err != nil {
-		return nil, nil, err
-	}
-	if membership.OrgID() != org.ID() {
-		return nil, nil, errors.WithStack(port.ErrNotFound)
-	}
-	return org, membership, nil
-}
+// writeMembershipLookupError is no longer used: the membership quota
+// handlers share writeResourceLookupError (resource_scope.go) with the
+// rest of the resource lookup helpers, which is the convention PR #115
+// introduced. Kept here as a comment-only placeholder so future readers
+// can find the rationale: the original writeMembershipLookupError
+// returned "Membership not found" instead of the generic "Not Found",
+// but the divergence from the rest of the resource handlers was not
+// worth the body-assertion breakage in resource_scope_test.go.
 
 func (h *Handler) getMemberQuotaPage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -421,9 +389,12 @@ func (h *Handler) saveApplicationQuota(w http.ResponseWriter, r *http.Request) {
 // field with two issues does not produce two messages; the whole map is
 // still returned so the caller can highlight every offending input at once.
 //
-// A nil entry on the returned map means the field either parsed cleanly or
-// was empty (unlimited). An absent key means the field had no input at all,
-// which is the unlimited case for the form.
+// One entry per invalid field: an absent key means the field parsed
+// cleanly (a number was typed or the field was empty, both of which
+// parseBudgetField accepts), and a present key carries the error string
+// for the field's first issue. The map is nil when every field parsed
+// cleanly — callers check len(fieldErrors) > 0 to decide whether to
+// re-render the form.
 func parseQuotaBudgetFields(r *http.Request) (daily, monthly, yearly *int64, fieldErrors map[string]string) {
 	daily, errD := parseBudgetField(r.FormValue("daily_budget"))
 	monthly, errM := parseBudgetField(r.FormValue("monthly_budget"))
@@ -639,7 +610,7 @@ func (h *Handler) renderOrgQuotaFormError(w http.ResponseWriter, r *http.Request
 }
 
 // renderMemberQuotaFormError re-renders the per-member quota editor when
-// validation fails on POST. membershipFromQuotaPath is the only safe way
+// validation fails on POST. resolveOrgAndMembership is the only safe way
 // for callers to obtain the membership here: GetMembership is keyed by
 // membership id alone, so a foreign membership would let an operator
 // rewrite another org's per-user budget.
@@ -709,13 +680,14 @@ func applicationSpend(ctx context.Context, store port.UsageStore, appID model.Ap
 	return total, nil
 }
 
-// maxBudgetMicrocents is the largest microcent amount parseBudgetField will
-// emit. It is math.MaxInt64 rounded down to the nearest whole unit (1 unit ==
-// 1 000 000 microcents) so the int64 conversion below cannot overflow: the
-// ticket's "1e16" example would silently become a small positive value without
-// this clamp, because int64(1e16 * 1_000_000) wraps to a negative number that
-// then rounds back into a positive one through the existing abs-style usage.
-const maxBudgetMicrocents = math.MaxInt64 / 1_000_000
+// maxBudgetUnits is the largest amount, in whole currency units,
+// parseBudgetField will accept. The parser multiplies the parsed value
+// by 1_000_000 to produce microcents, so the bound is the floor of
+// math.MaxInt64 / 1_000_000. Without it, an out-of-range float would
+// convert to an arbitrary int64 (the Go spec leaves float→int64
+// out-of-range conversion implementation-defined: on amd64 it yields
+// math.MinInt64, which a downstream store would happily keep).
+const maxBudgetUnits = math.MaxInt64 / 1_000_000
 
 // parseBudgetField parses a currency budget field into microcents.
 //
@@ -732,15 +704,13 @@ const maxBudgetMicrocents = math.MaxInt64 / 1_000_000
 //
 //   - Anything else → (*int64, nil) on success, (nil, error) on a value that
 //     cannot be trusted. The caller is expected to surface the error on the
-//     form rather than silently store a budget of 0, which is what the
-//     previous parser did and what issue #88 is the fix for.
+//     form rather than silently storing "no cap" (the previous parser's
+//     behaviour, which is what issue #88 is the fix for).
 //
 //   - Negative values, NaN, ±Inf and unparsable strings are rejected. A value
-//     larger than maxBudgetMicrocents (math.MaxInt64 / 1_000_000, in whole
-//     units) is also rejected with a clear message — without the cap, a
-//     hand-crafted "1e16" silently overflowed int64 during the * 1_000_000
-//     conversion and stored an arbitrary amount, which is worse than rejecting
-//     the input outright.
+//     larger than maxBudgetUnits is also rejected with a clear message: a
+//     hand-crafted value just over the cap would otherwise overflow the
+//     microcent conversion and store an arbitrary amount.
 func parseBudgetField(v string) (*int64, error) {
 	if v == "" {
 		return nil, nil
@@ -758,8 +728,8 @@ func parseBudgetField(v string) (*int64, error) {
 	if f < 0 {
 		return nil, fmt.Errorf("valeur invalide %q : le plafond doit être positif ou nul", v)
 	}
-	if f > float64(maxBudgetMicrocents) {
-		return nil, fmt.Errorf("valeur invalide %q : le plafond dépasse le maximum supporté (%d)", v, maxBudgetMicrocents)
+	if f > float64(maxBudgetUnits) {
+		return nil, fmt.Errorf("valeur invalide %q : le plafond dépasse le maximum supporté (%d)", v, maxBudgetUnits)
 	}
 	mc := int64(f * 1_000_000)
 	return &mc, nil

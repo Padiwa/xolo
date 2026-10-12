@@ -406,10 +406,13 @@ func TestSaveApplicationQuotaBadValueDoesNotOverwriteBudget(t *testing.T) {
 
 	h := handlerWithStubs(org, app, qStore, &stubUsageStore{})
 
-	// Bad payload: the operator types 0 in daily (the bug — the previous
-	// parser turned this into nil and stored "no cap"), and something even
-	// worse in monthly (a hand-crafted value that overflowed int64). Both
-	// must reject the whole submission.
+	// Bad payload: monthly=1e16 is a hand-crafted value that overflowed
+	// int64 during the * 1_000_000 conversion in the previous parser,
+	// which stored an arbitrary amount silently. daily=0 is the legitimate
+	// "freeze spending" case the operator can submit through the browser
+	// (the form renders with min="0"); it must be accepted as a strict
+	// zero cap by parseQuotaBudgetFields. The whole submission is
+	// rejected because monthly is invalid.
 	form := url.Values{}
 	form.Set("daily_budget", "0")
 	form.Set("monthly_budget", "1e16")
@@ -649,7 +652,7 @@ func TestSaveMemberQuotaBadValueDoesNotOverwriteBudget(t *testing.T) {
 // PermQuotaWrite on their own org must not write a QuotaScopeUser row
 // for a membership that belongs to another org, since QuotaStore keys
 // user quotas by userID alone (no org column) and one user can belong to
-// several orgs. membershipFromQuotaPath is the fix; this test pins the
+// several orgs. resolveOrgAndMembership is the fix; this test pins the
 // answer is 404 and the store is not touched.
 func TestSaveMemberQuotaForeignMembership(t *testing.T) {
 	// Operator's own org.
@@ -689,6 +692,17 @@ func TestSaveMemberQuotaForeignMembership(t *testing.T) {
 	if loc := rec.Header().Get("Location"); loc != "" {
 		t.Errorf("Location = %q, want empty (no redirect on cross-org 404)", loc)
 	}
+	// Pin the chosen diagnostic message. PR #115 introduced a shared
+	// writeResourceLookupError for every resource type: any not-found
+	// answers the generic http.StatusText(http.StatusNotFound) text
+	// ("Not Found"). We pin that here to lock the helper choice — a
+	// regression that switched back to a domain-specific message
+	// (e.g. "Membership not found") would break this assertion and
+	// also diverge from how every other resource handler answers.
+	body := rec.Body.String()
+	if !strings.Contains(body, "Not Found") {
+		t.Errorf("body missing %q (the cross-org 404 must answer the generic 404 body that writeResourceLookupError produces); got:\n%s", "Not Found", body)
+	}
 }
 
 // TestGetMemberQuotaPageForeignMembership mirrors the save handler test for
@@ -717,6 +731,14 @@ func TestGetMemberQuotaPageForeignMembership(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 (foreign membership must look like a not-found)", rec.Code)
+	}
+	// Same body-pin as the save handler test above. The membership
+	// quota handlers share writeResourceLookupError (PR #115) with
+	// every other resource handler, so a cross-org membership on the
+	// GET path answers the same generic 404 as on the POST path.
+	body := rec.Body.String()
+	if !strings.Contains(body, "Not Found") {
+		t.Errorf("body missing %q (the cross-org 404 must answer the generic 404 body that writeResourceLookupError produces); got:\n%s", "Not Found", body)
 	}
 }
 

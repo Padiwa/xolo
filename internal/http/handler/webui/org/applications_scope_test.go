@@ -12,7 +12,7 @@ import (
 // stubOrgStore resolves a single organization by slug and a single
 // membership by id, and fails every other call. resolveOrgAndApplication
 // exercises GetOrgBySlug; the member quota handlers exercise
-// GetMembership via membershipFromQuotaPath.
+// GetMembership via resolveOrgAndMembership.
 type stubOrgStore struct {
 	port.OrgStore
 	org        model.Organization
