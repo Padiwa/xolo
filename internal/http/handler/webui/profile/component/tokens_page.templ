@@ -140,50 +140,49 @@ templ TokensPage(vmodel TokensPageVModel) {
 						<strong>Important :</strong> La clé API ne sera affichée qu'une seule fois après sa création. Assurez-vous de la copier dans un endroit sûr.
 					</div>
 					<form id="token-create-form" method="POST" action={ common.BaseURL(ctx, common.WithPath("/profile/tokens")) } class="space-y-4" novalidate>
-							@form.Item() {
-								@form.Label(form.LabelProps{For: "token-label"}) {
-									Nom de la clé
-								}
-								@input.Input(input.Props{
-									Name:        "label",
-									ID:          "token-label",
-									Placeholder: "Ex: Application mobile, Script de sauvegarde...",
-									Value:       vmodel.FormLabel,
-									HasError:    vmodel.Error == "label_required",
-								})
-								if vmodel.Error == "label_required" {
-									@form.Message(form.MessageProps{Variant: form.MessageVariantError}) {
-										Le nom de la clé est obligatoire.
-									}
+						@form.Item() {
+							@form.Label(form.LabelProps{For: "token-label"}) {
+								Nom de la clé
+							}
+							@input.Input(input.Props{
+								Name:        "label",
+								ID:          "token-label",
+								Placeholder: "Ex: Application mobile, Script de sauvegarde...",
+								Value:       vmodel.FormLabel,
+								HasError:    vmodel.Error == "label_required",
+							})
+							if vmodel.Error == "label_required" {
+								@form.Message(form.MessageProps{Variant: form.MessageVariantError}) {
+									Le nom de la clé est obligatoire.
 								}
 							}
-							@form.Item() {
-								@form.Label(form.LabelProps{For: "token-org-trigger"}) {
-									Organisation <span class="text-destructive">*</span>
+						}
+						@form.Item() {
+							@form.Label(form.LabelProps{For: "token-org-trigger"}) {
+								Organisation <span class="text-destructive">*</span>
+							}
+							if len(vmodel.OrgMemberships) == 0 {
+								@form.Description() {
+									Vous n’appartenez à aucune organisation. Contactez un administrateur pour rejoindre une organisation avant de créer une clé API.
 								}
-								if len(vmodel.OrgMemberships) == 0 {
-									@form.Description() {
-										Vous n’appartenez à aucune organisation. Contactez un administrateur pour rejoindre une organisation avant de créer une clé API.
+							} else {
+								@selectbox.SelectBox(selectbox.Props{ID: "token-org"}) {
+									@selectbox.Trigger(selectbox.TriggerProps{
+										ID:       "token-org-trigger",
+										Name:     "org_id",
+										HasError: vmodel.Error == "org_required",
+									}) {
+										@selectbox.Value(selectbox.ValueProps{Placeholder: "— Sélectionnez une organisation —"})
 									}
-								} else {
-									@selectbox.SelectBox(selectbox.Props{ID: "token-org"}) {
-										@selectbox.Trigger(selectbox.TriggerProps{
-											ID:       "token-org-trigger",
-											Name:     "org_id",
-											HasError: vmodel.Error == "org_required",
-										}) {
-											@selectbox.Value(selectbox.ValueProps{Placeholder: "— Sélectionnez une organisation —"})
-										}
-										@selectbox.Content(selectbox.ContentProps{NoSearch: true}) {
-											@selectbox.Group() {
-												for _, m := range vmodel.OrgMemberships {
-													if m.Org() != nil {
-														@selectbox.Item(selectbox.ItemProps{
-															Value:    string(m.OrgID()),
-															Selected: vmodel.FormOrgID != "" && m.OrgID() == vmodel.FormOrgID,
-														}) {
-															{ m.Org().Name() }
-														}
+									@selectbox.Content(selectbox.ContentProps{NoSearch: true}) {
+										@selectbox.Group() {
+											for _, m := range vmodel.OrgMemberships {
+												if m.Org() != nil {
+													@selectbox.Item(selectbox.ItemProps{
+														Value:    string(m.OrgID()),
+														Selected: vmodel.FormOrgID != "" && m.OrgID() == vmodel.FormOrgID,
+													}) {
+														{ m.Org().Name() }
 													}
 												}
 											}
@@ -196,13 +195,14 @@ templ TokensPage(vmodel TokensPageVModel) {
 									}
 								}
 							}
-							@form.Item() {
-								@form.Label(form.LabelProps{For: "token-expires"}) {
-									Date d'expiration (optionnel)
-								}
-								@input.Input(input.Props{ID: "token-expires", Name: "expires_at", Type: input.TypeDate, Value: vmodel.FormExpiresAt})
+						}
+						@form.Item() {
+							@form.Label(form.LabelProps{For: "token-expires"}) {
+								Date d'expiration (optionnel)
 							}
-						</form>
+							@input.Input(input.Props{ID: "token-expires", Name: "expires_at", Type: input.TypeDate, Value: vmodel.FormExpiresAt})
+						}
+					</form>
 				</div>
 				@dialog.Footer(dialog.FooterProps{}) {
 					<!-- Le bouton vit dans le pied du dialogue, hors du <form>.

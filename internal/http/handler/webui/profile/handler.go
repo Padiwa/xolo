@@ -244,16 +244,18 @@ func (h *Handler) createToken(w http.ResponseWriter, r *http.Request) {
 // common/flash.templ translates into a user-facing message; the dialog
 // reopens on its own as soon as `error` is set.
 //
-// `label` is the trimmed value the handler actually validated; passing the
-// raw `r.FormValue("label")` would round-trip a whitespace-padded draft
-// that does not match what was checked, so the next render would show a
-// value that the server already refused.
+// `label` and `org_id` are the trimmed values the handler actually
+// validated; passing the raw `r.FormValue("label"|"org_id")` would
+// round-trip a whitespace-padded draft that does not match what was
+// checked. For `org_id` the visible effect is that the selectbox no
+// longer finds the matching item to pre-select, so the user loses their
+// previous choice without anything telling them why.
 func redirectTokensWithForm(r *http.Request, errorCode string) string {
 	q := url.Values{}
 	q.Set("error", errorCode)
 	q.Set("label", strings.TrimSpace(r.FormValue("label")))
 	q.Set("expires_at", r.FormValue("expires_at"))
-	q.Set("org_id", r.FormValue("org_id"))
+	q.Set("org_id", strings.TrimSpace(r.FormValue("org_id")))
 	return "/profile/tokens?" + q.Encode()
 }
 

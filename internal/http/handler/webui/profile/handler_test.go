@@ -193,6 +193,10 @@ func TestCreateToken_MissingLabelRedirects(t *testing.T) {
 // that touches createToken must NOT do that, regardless of the validation
 // reason: the response body must be empty (redirect) or HTML (template),
 // never text/plain.
+//
+// Each case also asserts the redirect carries the right error code, so a
+// future refactor that wires the wrong code (or drops the redirect
+// altogether) trips the table rather than passing on a 303 alone.
 func TestCreateToken_DoesNotReturnPlainText400(t *testing.T) {
 	const testTenantID model.TenantID = "test-tenant"
 
@@ -204,25 +208,29 @@ func TestCreateToken_DoesNotReturnPlainText400(t *testing.T) {
 	h := newTestHandler(t, userStore, orgStore)
 
 	cases := []struct {
-		name  string
-		form  url.Values
-		check func(t *testing.T, rr *httptest.ResponseRecorder)
+		name      string
+		form      url.Values
+		wantError string
 	}{
 		{
-			name: "missing org_id",
-			form: url.Values{"label": {"x"}},
+			name:      "missing org_id",
+			form:      url.Values{"label": {"x"}},
+			wantError: "org_required",
 		},
 		{
-			name: "missing label",
-			form: url.Values{"org_id": {string(org.ID())}},
+			name:      "missing label",
+			form:      url.Values{"org_id": {string(org.ID())}},
+			wantError: "label_required",
 		},
 		{
-			name: "blank label",
-			form: url.Values{"label": {"   "}, "org_id": {string(org.ID())}},
+			name:      "blank label",
+			form:      url.Values{"label": {"   "}, "org_id": {string(org.ID())}},
+			wantError: "label_required",
 		},
 		{
-			name: "blank org_id",
-			form: url.Values{"label": {"x"}, "org_id": {"   "}},
+			name:      "blank org_id",
+			form:      url.Values{"label": {"x"}, "org_id": {"   "}},
+			wantError: "org_required",
 		},
 	}
 
@@ -238,6 +246,18 @@ func TestCreateToken_DoesNotReturnPlainText400(t *testing.T) {
 			ct := rr.Header().Get("Content-Type")
 			if strings.HasPrefix(ct, "text/plain") && rr.Code >= 400 {
 				t.Fatalf("handler returned plain-text %d, would render as a white page: %s", rr.Code, rr.Body.String())
+			}
+
+			if rr.Code != http.StatusSeeOther {
+				t.Fatalf("expected 303 redirect, got %d", rr.Code)
+			}
+			loc := rr.Header().Get("Location")
+			q, err := url.Parse(loc)
+			if err != nil {
+				t.Fatalf("redirect URL not parseable: %v", err)
+			}
+			if got := q.Query().Get("error"); got != tc.wantError {
+				t.Errorf("error code = %q, want %q", got, tc.wantError)
 			}
 		})
 	}
@@ -273,6 +293,36 @@ func TestRedirectTokensWithFormURL(t *testing.T) {
 	}
 	if got := q.Get("expires_at"); got != "2030-01-01" {
 		t.Errorf("expires_at not round-tripped: %q", got)
+	}
+}
+
+// TestRedirectTokensWithFormTrimsDraftValues covers the trim symmetry
+// between what createToken validates and what redirectTokensWithForm
+// round-trips. A whitespace-padded label or org_id would otherwise survive
+// the redirect and fail to match the corresponding select item or the
+// trimmed value the server already accepted, leaving the user staring at
+// a selectbox whose previous choice silently disappeared.
+func TestRedirectTokensWithFormTrimsDraftValues(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/profile/tokens",
+		strings.NewReader("label=%20%20Mon+poste%20%20&org_id=%20%20acme%20%20&expires_at=2030-01-01"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if err := r.ParseForm(); err != nil {
+		t.Fatalf("ParseForm: %v", err)
+	}
+
+	got := redirectTokensWithForm(r, "org_required")
+
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("redirect URL not parseable: %v", err)
+	}
+	q := parsed.Query()
+
+	if got := q.Get("label"); got != "Mon poste" {
+		t.Errorf("label should be trimmed: got %q", got)
+	}
+	if got := q.Get("org_id"); got != "acme" {
+		t.Errorf("org_id should be trimmed: got %q", got)
 	}
 }
 
