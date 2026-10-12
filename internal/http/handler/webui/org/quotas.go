@@ -422,35 +422,41 @@ func (h *Handler) saveApplicationQuota(w http.ResponseWriter, r *http.Request) {
 // re-render the form.
 //
 // A field absent from r.Form keeps its value from the stored quota; a
-// present-and-empty field stores nil (unlimited). This matches the
-// re-render path (quotaFormSubmitted) and the browser form (which always
-// submits all three names), so a partial POST — only the field the
-// operator wanted to edit, a hand-crafted request, or a re-submit after
-// a rejection — does not silently wipe the budgets the operator did
-// not touch. The previous parser's r.FormValue conflates absent and
-// empty and returns nil for both, which is the silent data-loss class
-// issue #88 is the fix for.
+// present-and-empty field stores nil (unlimited), which matches the
+// "Un champ vide vaut « illimité »" help text. The distinction matters:
+// the browser form always submits all three names, so an absent field
+// only happens on a partial POST — a hand-crafted request, a re-submit
+// after a rejection, or an API client omitting a key the operator never
+// touched. The stored fallback is the right behaviour for the operator
+// who edits one field at a time; nil is the right behaviour for the
+// operator who explicitly cleared a field to remove the cap. The
+// previous parser's r.FormValue conflates the two and returns nil for
+// both, which is the silent data-loss class issue #88 is the fix for.
 func parseQuotaBudgetFields(r *http.Request, stored model.Quota) (daily, monthly, yearly *int64, fieldErrors map[string]string) {
-	parse := func(field string) (*int64, error) {
+	// parse returns the parsed value (nil for absent or empty, both of
+	// which parseBudgetField treats as "no cap"), a present flag, and
+	// any error. The present flag lets the merge below fall back to
+	// the stored value only when the operator did not touch the field;
+	// a present-but-empty value stores nil (unlimited) as the help
+	// text and the rest of the UI promise.
+	parse := func(field string) (*int64, bool, error) {
 		values, ok := r.Form[field]
 		if !ok {
-			return nil, nil // absent: keep the stored value
+			return nil, false, nil // absent
 		}
-		present := values[0]
-		return parseBudgetField(present)
+		v, err := parseBudgetField(values[0])
+		return v, true, err
 	}
-	daily, errD := parse("daily_budget")
-	monthly, errM := parse("monthly_budget")
-	yearly, errY := parse("yearly_budget")
-	// Merge with the stored quota: absent fields inherit the stored
-	// value; present-and-empty fields overwrite with nil.
-	if daily == nil {
+	daily, dailyPresent, errD := parse("daily_budget")
+	monthly, monthlyPresent, errM := parse("monthly_budget")
+	yearly, yearlyPresent, errY := parse("yearly_budget")
+	if !dailyPresent {
 		daily = stored.DailyBudget()
 	}
-	if monthly == nil {
+	if !monthlyPresent {
 		monthly = stored.MonthlyBudget()
 	}
-	if yearly == nil {
+	if !yearlyPresent {
 		yearly = stored.YearlyBudget()
 	}
 	if errD != nil || errM != nil || errY != nil {
@@ -734,14 +740,14 @@ func applicationSpend(ctx context.Context, store port.UsageStore, appID model.Ap
 	return total, nil
 }
 
-// maxBudget is the largest amount, in whole currency units,
+// maxBudgetUnits is the largest amount, in whole currency units,
 // parseBudgetField will accept. The parser multiplies the parsed value
 // by 1_000_000 to produce microcents, so the bound is the floor of
 // math.MaxInt64 / 1_000_000. Without it, an out-of-range float converts
 // to an arbitrary int64 (the Go spec leaves float→int64 out-of-range
 // conversion implementation-defined), which a downstream store would
 // happily keep.
-const maxBudget = math.MaxInt64 / 1_000_000
+const maxBudgetUnits = math.MaxInt64 / 1_000_000
 
 // parseBudgetField parses a currency budget field into microcents.
 //
@@ -762,7 +768,7 @@ const maxBudget = math.MaxInt64 / 1_000_000
 //     behaviour, which is what issue #88 is the fix for).
 //
 //   - Negative values, NaN, ±Inf and unparsable strings are rejected. A value
-//     larger than maxBudget is also rejected with a clear message: a
+//     larger than maxBudgetUnits is also rejected with a clear message: a
 //     hand-crafted value just over the cap would otherwise overflow the
 //     microcent conversion and store an arbitrary amount.
 func parseBudgetField(v string) (*int64, error) {
@@ -782,8 +788,8 @@ func parseBudgetField(v string) (*int64, error) {
 	if f < 0 {
 		return nil, fmt.Errorf("valeur invalide %q : le plafond doit être positif ou nul", v)
 	}
-	if f > float64(maxBudget) {
-		return nil, fmt.Errorf("valeur invalide %q : le plafond dépasse le maximum supporté (%d)", v, maxBudget)
+	if f > float64(maxBudgetUnits) {
+		return nil, fmt.Errorf("valeur invalide %q : le plafond dépasse le maximum supporté (%d)", v, maxBudgetUnits)
 	}
 	mc := int64(f * 1_000_000)
 	return &mc, nil

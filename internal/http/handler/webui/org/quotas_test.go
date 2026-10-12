@@ -302,7 +302,7 @@ func TestParseBudgetField(t *testing.T) {
 	// 1_000_000 to get microcents. The largest representable input is the
 	// one that, scaled by 1_000_000, just fits in int64 — that is
 	// math.MaxInt64 / 1_000_000, rounded down to the nearest whole unit.
-	maxBudgetValue := int64(math.MaxInt64 / 1_000_000) // 9_223_372_036_854
+	maxBudgetUnits := int64(math.MaxInt64 / 1_000_000) // 9_223_372_036_854
 	mc := func(v int64) *int64 { return &v }
 
 	tests := []struct {
@@ -327,8 +327,8 @@ func TestParseBudgetField(t *testing.T) {
 		// precision for values in the trillions, so the assertion compares
 		// the expected *units* (which are still exact) rather than the
 		// int64 microcent output.
-		{name: "value at the integer cap is accepted", input: strconv.FormatInt(maxBudgetValue, 10), wantExact: nil},
-		{name: "value above the integer cap is rejected", input: strconv.FormatInt(maxBudgetValue+1, 10), wantErr: true},
+		{name: "value at the integer cap is accepted", input: strconv.FormatInt(maxBudgetUnits, 10), wantExact: nil},
+		{name: "value above the integer cap is rejected", input: strconv.FormatInt(maxBudgetUnits+1, 10), wantErr: true},
 		{name: "scientific notation above the cap is rejected", input: "1e16", wantErr: true},
 		{name: "scientific notation within int64 range is accepted", input: "1e9", wantExact: nil}, // 1e15 microcents, well within int64
 		{name: "scientific notation close to int64 cap is accepted", input: "9e12", wantExact: nil},
@@ -915,5 +915,72 @@ func TestSaveApplicationQuotaPartialPostPreservesStoredBudgets(t *testing.T) {
 			got = *qStore.quota.YearlyBudget()
 		}
 		t.Errorf("yearly budget wiped: got %d, want %d (stored value must survive a partial POST)", got, yearly)
+	}
+}
+
+// TestSaveApplicationQuotaClearedFieldSetsToUnlimited is the regression
+// test for the "clearing a field must remove the cap" half of the
+// silent data-loss bug. TestSaveApplicationQuotaPartialPostPreservesStoredBudgets
+// covers the absent case (operator did not touch the field). This
+// covers the present-and-empty case (operator typed nothing into a
+// field they did touch, on purpose, to remove the cap). The form
+// help text reads "Un champ vide vaut « illimité »" and the
+// parseQuotaBudgetFields doc comment promises the same: an empty
+// field must end up as nil (unlimited) in the store, not the
+// previously-stored value.
+func TestSaveApplicationQuotaClearedFieldSetsToUnlimited(t *testing.T) {
+	org := model.NewOrganization("tenant", "acme", "Acme", "EUR")
+	app := model.NewApplication(org.ID(), "acme-app", "", true)
+
+	daily := int64(5_000_000)    // 5.00
+	monthly := int64(40_000_000) // 40.00
+	yearly := int64(200_000_000) // 200.00
+	existing := model.NewQuota(model.QuotaScopeApplication, string(app.ID()), "EUR", &daily, &monthly, &yearly)
+	qStore := &stubQuotaStore{quota: existing, quotaScope: model.QuotaScopeApplication}
+
+	h := handlerWithStubs(org, app, qStore, &stubUsageStore{})
+
+	// Operator keeps monthly/yearly but clears the daily cap. The
+	// browser submits an empty value for the cleared field; a
+	// hand-crafted POST that omits the field entirely would have the
+	// same effect on r.Form when the form had been configured to
+	// strip empties. Both should land as nil (unlimited) here, while
+	// the partial-POST case (test above) is the one that keeps the
+	// stored value.
+	form := url.Values{}
+	form.Set("daily_budget", "") // cleared: must be stored as nil
+	form.Set("monthly_budget", "40")
+	form.Set("yearly_budget", "200")
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.SetPathValue("orgSlug", org.Slug())
+	r.SetPathValue("appID", string(app.ID()))
+
+	rec := httptest.NewRecorder()
+	h.saveApplicationQuota(rec, r)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303 (a valid POST with a cleared field must succeed)", rec.Code)
+	}
+	if qStore.quota == existing {
+		t.Fatalf("SetQuota was not called; the save path must rewrite the row even on a partial-edit POST")
+	}
+	if qStore.quota.DailyBudget() != nil {
+		t.Errorf("cleared daily budget stored as %d, want nil (unlimited); the help text says \"Un champ vide vaut « illimité »\"", *qStore.quota.DailyBudget())
+	}
+	// The untouched fields keep their stored values.
+	if qStore.quota.MonthlyBudget() == nil || *qStore.quota.MonthlyBudget() != monthly {
+		var got int64
+		if qStore.quota.MonthlyBudget() != nil {
+			got = *qStore.quota.MonthlyBudget()
+		}
+		t.Errorf("monthly budget wiped: got %d, want %d", got, monthly)
+	}
+	if qStore.quota.YearlyBudget() == nil || *qStore.quota.YearlyBudget() != yearly {
+		var got int64
+		if qStore.quota.YearlyBudget() != nil {
+			got = *qStore.quota.YearlyBudget()
+		}
+		t.Errorf("yearly budget wiped: got %d, want %d", got, yearly)
 	}
 }
