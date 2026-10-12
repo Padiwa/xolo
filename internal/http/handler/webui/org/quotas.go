@@ -108,7 +108,18 @@ func (h *Handler) saveOrgQuota(w http.ResponseWriter, r *http.Request) {
 	if currency == "" {
 		currency = model.DefaultCurrency
 	}
-	daily, monthly, yearly, fieldErrors := parseQuotaBudgetFields(r)
+	// Load the existing quota so parseQuotaBudgetFields can preserve
+	// fields the operator did not touch on a partial POST (issue #88).
+	existing, err := h.quotaStore.GetQuota(ctx, model.QuotaScopeOrg, string(org.ID()))
+	if err != nil && !errors.Is(err, port.ErrNotFound) {
+		slog.ErrorContext(ctx, "could not load org budget for save", slogx.Error(err))
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	if existing == nil {
+		existing = model.NewQuota(model.QuotaScopeOrg, string(org.ID()), currency, nil, nil, nil)
+	}
+	daily, monthly, yearly, fieldErrors := parseQuotaBudgetFields(r, existing)
 
 	if len(fieldErrors) > 0 {
 		// Re-render the form rather than 400 + redirect: an operator who
@@ -131,15 +142,6 @@ func (h *Handler) saveOrgQuota(w http.ResponseWriter, r *http.Request) {
 
 	http.Redirect(w, r, "/orgs/"+orgSlug+"/admin/quota?success=saved", http.StatusSeeOther)
 }
-
-// writeMembershipLookupError is no longer used: the membership quota
-// handlers share writeResourceLookupError (resource_scope.go) with the
-// rest of the resource lookup helpers, which is the convention PR #115
-// introduced. Kept here as a comment-only placeholder so future readers
-// can find the rationale: the original writeMembershipLookupError
-// returned "Membership not found" instead of the generic "Not Found",
-// but the divergence from the rest of the resource handlers was not
-// worth the body-assertion breakage in resource_scope_test.go.
 
 func (h *Handler) getMemberQuotaPage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -235,7 +237,18 @@ func (h *Handler) saveMemberQuota(w http.ResponseWriter, r *http.Request) {
 	if currency == "" {
 		currency = model.DefaultCurrency
 	}
-	daily, monthly, yearly, fieldErrors := parseQuotaBudgetFields(r)
+	// Load the existing quota so parseQuotaBudgetFields can preserve
+	// fields the operator did not touch on a partial POST (issue #88).
+	existing, err := h.quotaStore.GetQuota(ctx, model.QuotaScopeUser, string(membership.UserID()))
+	if err != nil && !errors.Is(err, port.ErrNotFound) {
+		slog.ErrorContext(ctx, "could not load member budget for save", slogx.Error(err))
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	if existing == nil {
+		existing = model.NewQuota(model.QuotaScopeUser, string(membership.UserID()), currency, nil, nil, nil)
+	}
+	daily, monthly, yearly, fieldErrors := parseQuotaBudgetFields(r, existing)
 
 	if len(fieldErrors) > 0 {
 		h.renderMemberQuotaFormError(w, r, ctx, user, orgSlug, org, membership, fieldErrors)
@@ -364,7 +377,18 @@ func (h *Handler) saveApplicationQuota(w http.ResponseWriter, r *http.Request) {
 	if currency == "" {
 		currency = model.DefaultCurrency
 	}
-	daily, monthly, yearly, fieldErrors := parseQuotaBudgetFields(r)
+	// Load the existing quota so parseQuotaBudgetFields can preserve
+	// fields the operator did not touch on a partial POST (issue #88).
+	existing, err := h.quotaStore.GetQuota(ctx, model.QuotaScopeApplication, appID)
+	if err != nil && !errors.Is(err, port.ErrNotFound) {
+		slog.ErrorContext(ctx, "could not load application budget for save", slogx.Error(err))
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	if existing == nil {
+		existing = model.NewQuota(model.QuotaScopeApplication, appID, currency, nil, nil, nil)
+	}
+	daily, monthly, yearly, fieldErrors := parseQuotaBudgetFields(r, existing)
 
 	if len(fieldErrors) > 0 {
 		h.renderApplicationQuotaFormError(w, r, ctx, user, orgSlug, org, app, fieldErrors)
@@ -384,10 +408,11 @@ func (h *Handler) saveApplicationQuota(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/orgs/"+orgSlug+"/admin/applications/"+appID+"/quota?success=saved", http.StatusSeeOther)
 }
 
-// parseQuotaBudgetFields runs parseBudgetField over the three budget inputs
-// of the quota editor form. The first error wins per field, so a single
-// field with two issues does not produce two messages; the whole map is
-// still returned so the caller can highlight every offending input at once.
+// parseQuotaBudgetFields runs parseBudgetField over the three budget
+// inputs of the quota editor form. The first error wins per field, so a
+// single field with two issues does not produce two messages; the whole
+// map is still returned so the caller can highlight every offending
+// input at once.
 //
 // One entry per invalid field: an absent key means the field parsed
 // cleanly (a number was typed or the field was empty, both of which
@@ -395,10 +420,39 @@ func (h *Handler) saveApplicationQuota(w http.ResponseWriter, r *http.Request) {
 // for the field's first issue. The map is nil when every field parsed
 // cleanly — callers check len(fieldErrors) > 0 to decide whether to
 // re-render the form.
-func parseQuotaBudgetFields(r *http.Request) (daily, monthly, yearly *int64, fieldErrors map[string]string) {
-	daily, errD := parseBudgetField(r.FormValue("daily_budget"))
-	monthly, errM := parseBudgetField(r.FormValue("monthly_budget"))
-	yearly, errY := parseBudgetField(r.FormValue("yearly_budget"))
+//
+// A field absent from r.Form keeps its value from the stored quota; a
+// present-and-empty field stores nil (unlimited). This matches the
+// re-render path (quotaFormSubmitted) and the browser form (which always
+// submits all three names), so a partial POST — only the field the
+// operator wanted to edit, a hand-crafted request, or a re-submit after
+// a rejection — does not silently wipe the budgets the operator did
+// not touch. The previous parser's r.FormValue conflates absent and
+// empty and returns nil for both, which is the silent data-loss class
+// issue #88 is the fix for.
+func parseQuotaBudgetFields(r *http.Request, stored model.Quota) (daily, monthly, yearly *int64, fieldErrors map[string]string) {
+	parse := func(field string) (*int64, error) {
+		values, ok := r.Form[field]
+		if !ok {
+			return nil, nil // absent: keep the stored value
+		}
+		present := values[0]
+		return parseBudgetField(present)
+	}
+	daily, errD := parse("daily_budget")
+	monthly, errM := parse("monthly_budget")
+	yearly, errY := parse("yearly_budget")
+	// Merge with the stored quota: absent fields inherit the stored
+	// value; present-and-empty fields overwrite with nil.
+	if daily == nil {
+		daily = stored.DailyBudget()
+	}
+	if monthly == nil {
+		monthly = stored.MonthlyBudget()
+	}
+	if yearly == nil {
+		yearly = stored.YearlyBudget()
+	}
 	if errD != nil || errM != nil || errY != nil {
 		fieldErrors = make(map[string]string)
 		if errD != nil {
@@ -680,14 +734,14 @@ func applicationSpend(ctx context.Context, store port.UsageStore, appID model.Ap
 	return total, nil
 }
 
-// maxBudgetUnits is the largest amount, in whole currency units,
+// maxBudget is the largest amount, in whole currency units,
 // parseBudgetField will accept. The parser multiplies the parsed value
 // by 1_000_000 to produce microcents, so the bound is the floor of
-// math.MaxInt64 / 1_000_000. Without it, an out-of-range float would
-// convert to an arbitrary int64 (the Go spec leaves float→int64
-// out-of-range conversion implementation-defined: on amd64 it yields
-// math.MinInt64, which a downstream store would happily keep).
-const maxBudgetUnits = math.MaxInt64 / 1_000_000
+// math.MaxInt64 / 1_000_000. Without it, an out-of-range float converts
+// to an arbitrary int64 (the Go spec leaves float→int64 out-of-range
+// conversion implementation-defined), which a downstream store would
+// happily keep.
+const maxBudget = math.MaxInt64 / 1_000_000
 
 // parseBudgetField parses a currency budget field into microcents.
 //
@@ -708,7 +762,7 @@ const maxBudgetUnits = math.MaxInt64 / 1_000_000
 //     behaviour, which is what issue #88 is the fix for).
 //
 //   - Negative values, NaN, ±Inf and unparsable strings are rejected. A value
-//     larger than maxBudgetUnits is also rejected with a clear message: a
+//     larger than maxBudget is also rejected with a clear message: a
 //     hand-crafted value just over the cap would otherwise overflow the
 //     microcent conversion and store an arbitrary amount.
 func parseBudgetField(v string) (*int64, error) {
@@ -728,8 +782,8 @@ func parseBudgetField(v string) (*int64, error) {
 	if f < 0 {
 		return nil, fmt.Errorf("valeur invalide %q : le plafond doit être positif ou nul", v)
 	}
-	if f > float64(maxBudgetUnits) {
-		return nil, fmt.Errorf("valeur invalide %q : le plafond dépasse le maximum supporté (%d)", v, maxBudgetUnits)
+	if f > float64(maxBudget) {
+		return nil, fmt.Errorf("valeur invalide %q : le plafond dépasse le maximum supporté (%d)", v, maxBudget)
 	}
 	mc := int64(f * 1_000_000)
 	return &mc, nil

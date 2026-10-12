@@ -292,15 +292,17 @@ func TestSaveApplicationQuotaForeignApp(t *testing.T) {
 // TestParseBudgetField covers every input parseBudgetField can see on the
 // quota editor: empty (unlimited), the legitimate values, the edge of the
 // supported range and every malformed input that issue #88 documents. A
-// failure here is a regression: the previous parser silently mapped
-// unparsable / negative / overflowing inputs to nil, which stored "no
-// cap" and showed a green "saved" banner on top.
+// failure here is a regression: the previous parser stored nil for NaN /
+// ±Inf / unparsable strings, kept 0 as a strict cap (issue #79), and
+// overflowed to an implementation-defined int64 (math.MinInt64 on amd64)
+// for out-of-range values. This PR adds the rejection and the 0 help-text
+// documentation, not the 0 semantics.
 func TestParseBudgetField(t *testing.T) {
 	// The form input is in whole currency units; the parser multiplies by
 	// 1_000_000 to get microcents. The largest representable input is the
 	// one that, scaled by 1_000_000, just fits in int64 — that is
 	// math.MaxInt64 / 1_000_000, rounded down to the nearest whole unit.
-	maxBudgetUnits := int64(math.MaxInt64 / 1_000_000) // 9_223_372_036_854
+	maxBudgetValue := int64(math.MaxInt64 / 1_000_000) // 9_223_372_036_854
 	mc := func(v int64) *int64 { return &v }
 
 	tests := []struct {
@@ -325,8 +327,8 @@ func TestParseBudgetField(t *testing.T) {
 		// precision for values in the trillions, so the assertion compares
 		// the expected *units* (which are still exact) rather than the
 		// int64 microcent output.
-		{name: "value at the integer cap is accepted", input: strconv.FormatInt(maxBudgetUnits, 10), wantExact: nil},
-		{name: "value above the integer cap is rejected", input: strconv.FormatInt(maxBudgetUnits+1, 10), wantErr: true},
+		{name: "value at the integer cap is accepted", input: strconv.FormatInt(maxBudgetValue, 10), wantExact: nil},
+		{name: "value above the integer cap is rejected", input: strconv.FormatInt(maxBudgetValue+1, 10), wantErr: true},
 		{name: "scientific notation above the cap is rejected", input: "1e16", wantErr: true},
 		{name: "scientific notation within int64 range is accepted", input: "1e9", wantExact: nil}, // 1e15 microcents, well within int64
 		{name: "scientific notation close to int64 cap is accepted", input: "9e12", wantExact: nil},
@@ -466,11 +468,13 @@ func TestSaveApplicationQuotaBadValueDoesNotOverwriteBudget(t *testing.T) {
 	}
 }
 
-// TestSaveOrgQuotaZeroSucceeds covers the positive case for the new "0 means
-// strict zero cap" semantics: an operator typing 0 to freeze spending must
-// still get a successful save (issue #88 lists this as the most likely
-// scenario). Without this test the parser change could regress the freeze
-// use case.
+// TestSaveOrgQuotaZeroSucceeds covers the positive case for the "0 means
+// strict zero cap" use case: an operator typing 0 to freeze spending
+// must still get a successful save. 0 was already accepted as a strict
+// cap before this PR (issue #79 had already changed the guard to
+// f < 0); what this PR adds for 0 is the help-text documentation and
+// the re-render echo. The test pins the positive path so a future
+// tightening of the parser cannot regress the freeze use case.
 func TestSaveOrgQuotaZeroSucceeds(t *testing.T) {
 	org := model.NewOrganization("tenant", "acme", "Acme", "EUR")
 	qStore := &stubQuotaStore{}
@@ -526,14 +530,14 @@ type membershipWithUser struct {
 	user   model.User
 }
 
-func (m membershipWithUser) ID() model.MembershipID        { return m.id }
-func (m membershipWithUser) UserID() model.UserID          { return m.userID }
-func (m membershipWithUser) OrgID() model.OrgID            { return m.orgID }
-func (m membershipWithUser) CreatedAt() time.Time          { return time.Time{} }
-func (m membershipWithUser) User() model.User              { return m.user }
-func (m membershipWithUser) Org() model.Organization       { return nil }
-func (m membershipWithUser) Roles() []model.Role           { return nil }
-func (m membershipWithUser) Status() model.Status { return "" }
+func (m membershipWithUser) ID() model.MembershipID  { return m.id }
+func (m membershipWithUser) UserID() model.UserID    { return m.userID }
+func (m membershipWithUser) OrgID() model.OrgID      { return m.orgID }
+func (m membershipWithUser) CreatedAt() time.Time    { return time.Time{} }
+func (m membershipWithUser) User() model.User        { return m.user }
+func (m membershipWithUser) Org() model.Organization { return nil }
+func (m membershipWithUser) Roles() []model.Role     { return nil }
+func (m membershipWithUser) Status() model.Status    { return "" }
 
 // TestSaveOrgQuotaBadValueDoesNotOverwriteBudget is the org-scoped mirror of
 // TestSaveApplicationQuotaBadValueDoesNotOverwriteBudget. The re-render
@@ -553,8 +557,10 @@ func TestSaveOrgQuotaBadValueDoesNotOverwriteBudget(t *testing.T) {
 		usageStore: &stubUsageStore{},
 	}
 
-	// 1e16 is the ticket's overflow example: the previous parser silently
-	// dropped it to nil (unlimited). With the fix it must reject.
+	// 1e16 is the ticket's overflow example: the previous parser
+	// overflowed to an arbitrary int64 (implementation-defined; math.MinInt64
+	// on amd64), which a downstream store would happily keep. With the
+	// fix it must reject the overflow and re-render the form.
 	form := url.Values{}
 	form.Set("daily_budget", "1e16")
 	form.Set("monthly_budget", "")
@@ -841,5 +847,73 @@ func TestSaveApplicationQuotaReRenderPreservesUnpostedFields(t *testing.T) {
 			got = *qStore.quota.YearlyBudget()
 		}
 		t.Errorf("follow-up save wiped yearly: got %d, want %d (stored value must survive)", got, yearly)
+	}
+}
+
+// TestSaveApplicationQuotaPartialPostPreservesStoredBudgets is the
+// regression test for the save-path side of the silent data-loss bug
+// Conclave review #6 caught on PR #111. TestSaveApplicationQuotaReRenderPreservesUnpostedFields
+// covers the re-render path (r.Form, r.Form's absence detection). This
+// test covers the save path itself: parseQuotaBudgetFields must also
+// distinguish absent from empty and preserve the stored value for
+// absent fields, otherwise a hand-crafted POST that supplies only one
+// of the three budget fields would silently wipe the other two
+// (the same bug class issue #88 was filed to prevent).
+func TestSaveApplicationQuotaPartialPostPreservesStoredBudgets(t *testing.T) {
+	org := model.NewOrganization("tenant", "acme", "Acme", "EUR")
+	app := model.NewApplication(org.ID(), "acme-app", "", true)
+
+	daily := int64(5_000_000)    // 5.00
+	monthly := int64(40_000_000) // 40.00
+	yearly := int64(200_000_000) // 200.00
+	existing := model.NewQuota(model.QuotaScopeApplication, string(app.ID()), "EUR", &daily, &monthly, &yearly)
+	qStore := &stubQuotaStore{quota: existing, quotaScope: model.QuotaScopeApplication}
+
+	h := handlerWithStubs(org, app, qStore, &stubUsageStore{})
+
+	// Operator supplies only the daily budget (the field they meant to
+	// edit) and omits monthly/yearly entirely. A crafty attacker can
+	// reproduce this; the browser form always submits all three names,
+	// but a real re-submit after a partial edit can also drop the other
+	// fields if the operator uses "back" to recover state.
+	form := url.Values{}
+	form.Set("daily_budget", "10")
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.SetPathValue("orgSlug", org.Slug())
+	r.SetPathValue("appID", string(app.ID()))
+
+	rec := httptest.NewRecorder()
+	h.saveApplicationQuota(rec, r)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303 (a partial POST with a valid daily must succeed)", rec.Code)
+	}
+	if qStore.quota == existing {
+		t.Fatalf("SetQuota was not called; the save path must rewrite the row even on a partial POST")
+	}
+	// Daily reflects what the operator typed.
+	if qStore.quota.DailyBudget() == nil || *qStore.quota.DailyBudget() != 10_000_000 {
+		var got int64
+		if qStore.quota.DailyBudget() != nil {
+			got = *qStore.quota.DailyBudget()
+		}
+		t.Errorf("daily budget = %d, want 10_000_000", got)
+	}
+	// Monthly and yearly kept their stored values: the partial POST did
+	// not silently wipe them. This is the assertion the test exists for.
+	if qStore.quota.MonthlyBudget() == nil || *qStore.quota.MonthlyBudget() != monthly {
+		var got int64
+		if qStore.quota.MonthlyBudget() != nil {
+			got = *qStore.quota.MonthlyBudget()
+		}
+		t.Errorf("monthly budget wiped: got %d, want %d (stored value must survive a partial POST)", got, monthly)
+	}
+	if qStore.quota.YearlyBudget() == nil || *qStore.quota.YearlyBudget() != yearly {
+		var got int64
+		if qStore.quota.YearlyBudget() != nil {
+			got = *qStore.quota.YearlyBudget()
+		}
+		t.Errorf("yearly budget wiped: got %d, want %d (stored value must survive a partial POST)", got, yearly)
 	}
 }
