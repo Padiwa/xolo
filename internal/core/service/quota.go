@@ -143,9 +143,7 @@ func (s *QuotaService) ResolveEffectiveQuota(
 
 	effective := &model.EffectiveQuota{}
 
-	// A quota record with all-nil budgets is treated as "no personal quota".
-	userHasPersonalQuota := userQuota != nil &&
-		(userQuota.DailyBudget() != nil || userQuota.MonthlyBudget() != nil || userQuota.YearlyBudget() != nil)
+	userHasPersonalQuota := hasBudget(userQuota)
 
 	// Currency: org quota > user quota > default.
 	switch {
@@ -191,6 +189,66 @@ func (s *QuotaService) ResolveEffectiveQuota(
 	// hot path. nil carries the same meaning as a GetQuota that returned
 	// port.ErrNotFound (issue #82).
 	return effective, orgQuota, nil
+}
+
+// hasBudget reports whether q sets at least one budget: a quota record with
+// all-nil budgets is treated as no quota.
+func hasBudget(q model.Quota) bool {
+	return q != nil && (q.DailyBudget() != nil || q.MonthlyBudget() != nil || q.YearlyBudget() != nil)
+}
+
+// ResolveUserQuota returns the budget of userID alone inside orgID, the one
+// its own counter is checked against: the user's personal quota when set;
+// otherwise, when the organization shares its budget equally, the user's
+// share of it; otherwise no budget. Unlike ResolveEffectiveQuota, the result
+// is never capped by the organization budget, which has its own counter.
+func (s *QuotaService) ResolveUserQuota(ctx context.Context, userID model.UserID, orgID model.OrgID) (*model.UserQuota, error) {
+	userQuota, err := s.optionalQuota(ctx, model.QuotaScopeUser, string(userID))
+	if err != nil {
+		return nil, err
+	}
+	if hasBudget(userQuota) {
+		return &model.UserQuota{
+			Source:        model.UserQuotaPersonal,
+			Currency:      userQuota.Currency(),
+			DailyBudget:   userQuota.DailyBudget(),
+			MonthlyBudget: userQuota.MonthlyBudget(),
+			YearlyBudget:  userQuota.YearlyBudget(),
+		}, nil
+	}
+
+	orgQuota, err := s.optionalQuota(ctx, model.QuotaScopeOrg, string(orgID))
+	if err != nil {
+		return nil, err
+	}
+	none := &model.UserQuota{Source: model.UserQuotaNone, Currency: model.DefaultCurrency}
+	if orgQuota == nil {
+		return none, nil
+	}
+	none.Currency = orgQuota.Currency()
+
+	org, err := s.orgStore.GetOrgByID(ctx, orgID)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	if !org.ShareQuotaEqually() {
+		return none, nil
+	}
+	members, _, err := s.orgStore.ListOrgMembers(ctx, orgID, port.ListOrgMembersOptions{})
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	n := int64(len(members))
+	if n == 0 {
+		return none, nil
+	}
+	return &model.UserQuota{
+		Source:        model.UserQuotaShared,
+		Currency:      orgQuota.Currency(),
+		DailyBudget:   divPtr(orgQuota.DailyBudget(), n),
+		MonthlyBudget: divPtr(orgQuota.MonthlyBudget(), n),
+		YearlyBudget:  divPtr(orgQuota.YearlyBudget(), n),
+	}, nil
 }
 
 func divPtr(v *int64, n int64) *int64 {

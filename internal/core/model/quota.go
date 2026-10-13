@@ -168,3 +168,27 @@ type EffectiveQuota struct {
 	MonthlyBudget *int64
 	YearlyBudget  *int64
 }
+
+// UserQuotaSource tells where the budget of a user inside one organization
+// comes from.
+type UserQuotaSource string
+
+const (
+	// UserQuotaPersonal is a quota set on the user.
+	UserQuotaPersonal UserQuotaSource = "personal"
+	// UserQuotaShared is the user's equal share of the organization budget.
+	UserQuotaShared UserQuotaSource = "shared"
+	// UserQuotaNone means no budget applies to the user alone: only the
+	// organization, team and member levels may limit the user.
+	UserQuotaNone UserQuotaSource = "none"
+)
+
+// UserQuota is the budget of the user level of a request, before it is merged
+// with the organization budget. Budgets are nil when unlimited.
+type UserQuota struct {
+	Source        UserQuotaSource
+	Currency      string
+	DailyBudget   *int64
+	MonthlyBudget *int64
+	YearlyBudget  *int64
+}

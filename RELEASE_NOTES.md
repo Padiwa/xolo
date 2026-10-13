@@ -1,3 +1,18 @@
+# Unreleased — user quota API
+
+`GET /api/v1/quota?organization=<orgID>` returns the caller's own budget inside
+one of their organizations: their personal quota, or their equal share of the
+organization budget, with the spend of the current day, month and year and the
+end of each window. It reads the counters the quota enforcer checks, so the
+figures match a `429`. It accepts the proxy's authentications, a relayed OIDC ID
+token included, needs no permission, and refuses applications. Organization,
+team and member budgets are not reported. No migration.
+
+Details:
+[English](docs/en/concepts/budgets-et-quotas.md#reading-your-own-budget),
+[Français](docs/fr/concepts/budgets-et-quotas.md#consulter-son-propre-budget),
+[Español](docs/es/concepts/budgets-et-quotas.md#consultar-su-propio-presupuesto).
+
 # Unreleased — durable OIDC sessions and back-channel logout
 
 An interactive OIDC sign-in now opens a session registered in the database, and

@@ -59,6 +59,45 @@ Baisser le budget d'un parent est donc refusé si les budgets enfants déjà enr
 
 Un enfant sans budget propre sur une période n'est pas contraint : il reste borné par le parent à chaque requête.
 
+## Consulter son propre budget
+
+Un utilisateur lit son propre budget dans une organisation avec `GET /api/v1/quota?organization=<orgID>`. Cette route accepte les mêmes authentifications que le proxy : jeton d'utilisateur, ID token OIDC ou session. Une application peut ainsi afficher à ses utilisateurs leur consommation en relayant leur ID token.
+
+La réponse ne porte que sur le niveau de l'utilisateur, c'est-à-dire le budget comparé à son propre compteur :
+
+- son quota personnel s'il en a un (`"source": "personal"`) ;
+- sinon sa part du budget de l'organisation, si celle-ci le partage équitablement (`"shared"`) ;
+- sinon aucun budget (`"none"`).
+
+Les budgets de l'organisation, des équipes et des membres d'équipe ont leurs propres compteurs et ne sont pas renvoyés. Ils peuvent donc bloquer une requête avant le budget de l'utilisateur.
+
+Quand le budget de l'organisation est inférieur à celui de l'utilisateur, les requêtes s'arrêtent au montant de l'organisation : `remaining` n'est alors qu'une borne supérieure, et le refus peut être signalé au niveau de l'utilisateur (`User daily budget exceeded`, par exemple), car son compteur est comparé au plus petit des deux.
+
+```json
+{
+  "organization_id": "00000000-0000-0000-0000-000000000102",
+  "source": "personal",
+  "currency": "EUR",
+  "periods": {
+    "daily":   {"budget": 1000000, "spent": 120000, "remaining": 880000, "resets_at": "2026-10-14T00:00:00+02:00"},
+    "monthly": {"budget": null, "spent": 2400000, "remaining": null, "resets_at": "2026-11-01T00:00:00+01:00"},
+    "yearly":  {"budget": null, "spent": 9800000, "remaining": null, "resets_at": "2027-01-01T00:00:00+01:00"}
+  }
+}
+```
+
+Les montants sont en millionièmes de l'unité monétaire. `budget` et `remaining` valent `null` quand la période est illimitée, et `remaining` ne descend pas sous zéro. `spent` compte les dépenses de l'utilisateur dans l'organisation depuis le début de la période, hors usage couvert par un abonnement. Les périodes suivent le fuseau horaire du serveur.
+
+L'organisation est choisie dans cet ordre :
+
+1. celle du jeton, pour un jeton rattaché à une organisation ;
+2. sinon le paramètre `organization` ;
+3. sinon l'unique organisation de l'utilisateur.
+
+Sans paramètre, un utilisateur de plusieurs organisations reçoit `400`. Une organisation dont il n'est pas membre actif, ou différente de celle du jeton, donne `404`. Un jeton d'application reçoit `403`, car son budget est celui de l'application. Aucune permission n'est requise : chacun ne lit que son propre budget.
+
+Comme `GET /api/v1/models`, cette route échappe à la limite de débit par adresse IP. Les applications l'appellent souvent depuis une seule adresse pour tous leurs utilisateurs.
+
 ## Permissions associées
 
 | Action | Permission requise |

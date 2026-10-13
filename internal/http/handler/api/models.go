@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/bornholm/go-x/slogx"
 	"github.com/xolo-gateway/xolo/internal/core/model"
@@ -66,7 +67,11 @@ type Handler struct {
 	pluginManager       pluginManagerIface
 	// teamStore keeps team slugs and model names apart, see WithTeams.
 	teamStore port.TeamStore
-	mux       *http.ServeMux
+	// userQuotas, quotaSpend and now serve the caller's quota, see WithUserQuota.
+	userQuotas userQuotaResolver
+	quotaSpend quotaSpendReader
+	now        func() time.Time
+	mux        *http.ServeMux
 }
 
 // Permission checks resolve through the request context (see authz.go), so the

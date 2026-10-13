@@ -20,6 +20,7 @@ import (
 	"github.com/xolo-gateway/xolo/internal/http/middleware/tenant"
 
 	gohttp "net/http"
+	"time"
 )
 
 func NewHTTPServerFromConfig(ctx context.Context, conf *config.Config) (*http.Server, error) {
@@ -253,7 +254,7 @@ func NewHTTPServerFromConfig(ctx context.Context, conf *config.Config) (*http.Se
 
 	webuiHandler := webui.NewHandler(taskRunner, userStore, orgStore, roleStore, providerStore, virtualModelStore, middlewareStore, personalVMStore, usageStore, inviteStore, invitationService, applicationStore, quotaStore, quotaService, exchangeRateService, secretStore, conf.SecretKey, pluginManager, subscriptionState, fairShareService, eventStore, alertStore, alertIncidentStore, eventSettingsStore, conf.Events.MaxPerOrg, conf.Events.DefaultPerOrg).WithTeams(teamStore)
 
-	apiHandler := api.NewHandler(providerStore, orgStore, virtualModelStore, personalVMStore, middlewareStore, secretStore, exchangeRateService, pluginManager).WithTeams(teamStore)
+	apiHandler := api.NewHandler(providerStore, orgStore, virtualModelStore, personalVMStore, middlewareStore, secretStore, exchangeRateService, pluginManager).WithTeams(teamStore).WithUserQuota(quotaService, usageStore, time.Now)
 
 	proxyServer := proxy.NewServer(
 		proxy.WithAuthExtractor(proxyAdapter.XoloAuthExtractor()),
@@ -329,6 +330,10 @@ func NewHTTPServerFromConfig(ctx context.Context, conf *config.Config) (*http.Se
 		// otherwise reject concurrent embeddings/chat traffic with 429s.
 		http.WithMount("/api/v1/", apiAuthChain(proxyServer)),
 		http.WithRoute("GET /api/v1/models", apiAuthChain(apiHandler)),
+		// Read by the applications on behalf of their users, often from a
+		// single server address: like the catalogue, it is left out of the
+		// per-IP limiter.
+		http.WithRoute("GET /api/v1/quota", apiAuthChain(apiHandler)),
 		http.WithRoute("GET /api/models-dev/lookup", rateLimiter(apiAuthChain(apiHandler))),
 		http.WithRoute("GET /api/exchange-rate", rateLimiter(apiAuthChain(apiHandler))),
 		// Plugin UI config sync
