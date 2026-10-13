@@ -18,6 +18,7 @@ import (
 	"github.com/xolo-gateway/xolo/internal/core/service"
 	"github.com/xolo-gateway/xolo/internal/estimator"
 	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
+	webcommon "github.com/xolo-gateway/xolo/internal/http/handler/webui/common"
 	common "github.com/xolo-gateway/xolo/internal/http/handler/webui/common/component"
 	orgcomponent "github.com/xolo-gateway/xolo/internal/http/handler/webui/org/component"
 	"github.com/xolo-gateway/xolo/internal/http/handler/webui/profile/component"
@@ -48,7 +49,7 @@ func (h *Handler) getDashboardPage(w http.ResponseWriter, r *http.Request) {
 
 	// Time range
 	rangeParam := r.URL.Query().Get("range")
-	since := dashboardRangeToSince(rangeParam)
+	period, since := webcommon.UsageRange(rangeParam, time.Now())
 
 	// CSV export
 	if r.URL.Query().Get("format") == "csv" {
@@ -159,8 +160,9 @@ func (h *Handler) getDashboardPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Cache key for energy totals
-	energyCacheKey := fmt.Sprintf("dashboard:%s:%d", userID, since.Unix())
+	// Cache key for energy totals. It names the range, not its start: since moves
+	// with the clock, and a key built from it never hit the cache.
+	energyCacheKey := fmt.Sprintf("dashboard:%s:%s", userID, period)
 
 	// Filter matching the whole selected period, used by every chart aggregation.
 	chartFilter := port.UsageFilter{
@@ -247,19 +249,21 @@ func (h *Handler) getDashboardPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Energy is non-linear per request and cannot be aggregated in SQL, so it is the only
-	// figure that still needs the full record set — and only when its (short-TTL) cache
-	// misses. On the common path (cache hit) no unbounded scan happens.
+	// Energy is non-linear per request: it is estimated from the requests grouped by
+	// model and token counts, and cached for a few minutes.
 	var totalEnergyWh, totalCO2GramsMid float64
 	if cached, ok := cache.EnergyEstimateCache.Get(energyCacheKey); ok {
 		totalEnergyWh = cached.TotalEnergyWh
 		totalCO2GramsMid = cached.TotalCO2GramsMid
 	} else {
-		totalEnergyWh, totalCO2GramsMid = h.computeEnergyTotals(ctx, chartFilter)
-		cache.EnergyEstimateCache.Add(energyCacheKey, cache.EnergyTotals{
-			TotalEnergyWh:    totalEnergyWh,
-			TotalCO2GramsMid: totalCO2GramsMid,
-		})
+		var computed bool
+		totalEnergyWh, totalCO2GramsMid, computed = h.computeEnergyTotals(ctx, chartFilter)
+		if computed {
+			cache.EnergyEstimateCache.Add(energyCacheKey, cache.EnergyTotals{
+				TotalEnergyWh:    totalEnergyWh,
+				TotalCO2GramsMid: totalCO2GramsMid,
+			})
+		}
 	}
 
 	// Build display records with cost converted to org currency where needed
@@ -354,24 +358,6 @@ func (h *Handler) getDashboardPage(w http.ResponseWriter, r *http.Request) {
 	templ.Handler(component.DashboardPage(vmodel)).ServeHTTP(w, r)
 }
 
-func dashboardRangeToSince(r string) time.Time {
-	now := time.Now()
-	switch r {
-	case "1d":
-		return now.AddDate(0, 0, -1)
-	case "30d":
-		return now.AddDate(0, -1, 0)
-	case "90d":
-		return now.AddDate(0, -3, 0)
-	case "180d":
-		return now.AddDate(0, -6, 0)
-	case "365d":
-		return now.AddDate(-1, 0, 0)
-	default: // "7d"
-		return now.AddDate(0, 0, -7)
-	}
-}
-
 func intPtr(n int) *int { return &n }
 
 // aggregateCostRows fetches the PAYG cost sub-totals for a dimension, logging and
@@ -385,60 +371,16 @@ func (h *Handler) aggregateCostRows(ctx context.Context, filter port.UsageFilter
 	return rows
 }
 
-// computeEnergyTotals iterates every record in the period to sum the (non-linear)
-// energy estimate — the one figure that cannot be aggregated in SQL. Providers and
-// models are resolved through the provider store cache.
-func (h *Handler) computeEnergyTotals(ctx context.Context, filter port.UsageFilter) (totalEnergyWh, totalCO2GramsMid float64) {
-	records, err := h.usageStore.QueryUsage(ctx, filter)
+// computeEnergyTotals estimates the energy and CO₂ of the usage matching the
+// filter. On error it logs and reports false: the page shows zero and the
+// caller does not cache it.
+func (h *Handler) computeEnergyTotals(ctx context.Context, filter port.UsageFilter) (totalEnergyWh, totalCO2GramsMid float64, ok bool) {
+	totalEnergyWh, totalCO2GramsMid, err := service.EstimateUsageEnergy(ctx, h.usageStore, h.providerStore, filter)
 	if err != nil {
-		slog.WarnContext(ctx, "could not query usage records for energy totals", slogx.Error(err))
-		return 0, 0
+		slog.WarnContext(ctx, "could not estimate usage energy", slogx.Error(err))
+		return 0, 0, false
 	}
-	modelCache := make(map[model.LLMModelID]model.LLMModel)
-	providerCache := make(map[model.ProviderID]model.Provider)
-	for _, rec := range records {
-		mid := rec.ModelID()
-		if mid == "" {
-			continue
-		}
-		m, ok := modelCache[mid]
-		if !ok {
-			loaded, err := h.providerStore.GetLLMModelByID(ctx, mid)
-			if err != nil {
-				continue
-			}
-			m = loaded
-			modelCache[mid] = m
-		}
-		if m.ActiveParams() <= 0 {
-			continue
-		}
-		tier := estimator.TierHyperscaler
-		pid := m.ProviderID()
-		p, ok := providerCache[pid]
-		if !ok {
-			if loaded, err := h.providerStore.GetProviderByID(ctx, pid); err == nil {
-				p = loaded
-				providerCache[pid] = loaded
-				ok = true
-			}
-		}
-		if ok {
-			tier = estimator.CloudTier(p.CloudTier())
-		}
-		est := estimator.NewCloudEstimator(tier).EstimateFromParams(
-			float64(m.ActiveParams()),
-			estimator.InferenceRequest{
-				InputTokens:  int(rec.PromptTokens()),
-				OutputTokens: int(rec.CompletionTokens()),
-			},
-			m.TokensPerSecLow(),
-			m.TokensPerSecHigh(),
-		)
-		totalEnergyWh += est.Mid.TotalWh
-		totalCO2GramsMid += est.Mid.Equivalences.CO2Grams
-	}
-	return totalEnergyWh, totalCO2GramsMid
+	return totalEnergyWh, totalCO2GramsMid, true
 }
 
 func dashChartByValue(m map[string]int64) []component.ProfileChartDataPoint {
