@@ -58,6 +58,7 @@ func migrateProvisioningSync(tx *gorm.DB) error {
 // A membership crossing tenants is left unprojected and logged: it must not
 // prevent the startup.
 func backfillProjections(tx *gorm.DB, kind string) error {
+	tx = withMigratingSchema(tx)
 	column := resourceKey(kind)
 	after := ""
 	for {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -158,6 +159,9 @@ func mutationSnapshot(db *gorm.DB, key mutationKey) ([]byte, error) {
 		return nil, fmt.Errorf("unknown mutation kind")
 	}
 	columns := mutationColumns[key.kind]
+	if migratingSchema(db) {
+		columns = existingColumns(db, table, columns)
+	}
 	var rows []map[string]any
 	if err := db.Table(table).Select(columns).Where(resourceKey(key.kind)+" = ?", key.id).Find(&rows).Error; err != nil {
 		return nil, err
@@ -215,6 +219,31 @@ func mutationSnapshot(db *gorm.DB, key mutationKey) ([]byte, error) {
 		row["permissions"] = permissions
 	}
 	return json.Marshal(row)
+}
+
+type migratingSchemaKey struct{}
+
+// withMigratingSchema marks db as running a migration: the schema may predate
+// columns of mutationColumns, added by a later migration that publishes the
+// projections again.
+func withMigratingSchema(db *gorm.DB) *gorm.DB {
+	return db.WithContext(context.WithValue(db.Statement.Context, migratingSchemaKey{}, true))
+}
+
+func migratingSchema(db *gorm.DB) bool {
+	migrating, _ := db.Statement.Context.Value(migratingSchemaKey{}).(bool)
+	return migrating
+}
+
+// existingColumns keeps the columns of the list present in table.
+func existingColumns(db *gorm.DB, table, columns string) string {
+	kept := []string{}
+	for _, column := range strings.Split(columns, ",") {
+		if column = strings.TrimSpace(column); db.Migrator().HasColumn(table, column) {
+			kept = append(kept, column)
+		}
+	}
+	return strings.Join(kept, ", ")
 }
 
 // flushMutations audits every pending change, then publishes its projections.
