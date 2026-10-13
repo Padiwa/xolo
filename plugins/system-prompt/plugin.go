@@ -75,9 +75,6 @@ func (p *Plugin) PreRequest(ctx context.Context, in *proto.PreRequestInput) (*pr
 		slog.Int("modified_messages_bytes", len(b)),
 		slog.Bool("append", cfg.Append),
 	)
-	slog.DebugContext(ctx, "system-prompt: pre-request messages",
-		slog.String("original_messages", in.GetMessagesJson()),
-		slog.String("modified_messages", string(b)))
 
 	return &proto.PreRequestOutput{
 		Allowed:              true,

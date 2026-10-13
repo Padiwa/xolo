@@ -60,15 +60,6 @@ func TestPreRequest_DoesNotLogUserConversation(t *testing.T) {
 	}
 
 	for _, rec := range logRecords(t, buf) {
-		// DEBUG is the verbose level where full payloads are kept by
-		// design (issue #104 reduces them to counts/sizes at INFO, but
-		// the full JSON stays available at DEBUG for incident
-		// investigation). The production logger is INFO, so a
-		// regression that promotes a payload to INFO would break this
-		// assertion and is the class of bug #122 and #104 closed.
-		if rec["level"] == "DEBUG" {
-			continue
-		}
 		serialized, _ := json.Marshal(rec)
 		s := string(serialized)
 		if strings.Contains(s, userMessage) {
