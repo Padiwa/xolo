@@ -140,6 +140,29 @@ func TestPreRequest_EmptySystemPrompt(t *testing.T) {
 	}
 }
 
+// TestPreRequest_MalformedMessagesJson_ReturnsPassthrough covers the case
+// where the upstream MessagesJson cannot be parsed. Without an explicit
+// error check, replace mode would silently emit a ModifiedMessagesJson that
+// contains only the configured system message, replacing the entire client
+// conversation. The plugin must instead pass the request through unchanged
+// so the original body reaches the provider.
+func TestPreRequest_MalformedMessagesJson_ReturnsPassthrough(t *testing.T) {
+	p := &Plugin{}
+	out, err := p.PreRequest(t.Context(), &proto.PreRequestInput{
+		Ctx:          &proto.RequestContext{OrgId: "org1", ConfigJson: `{"system_prompt":"configured","append":false}`},
+		MessagesJson: `{"role":"system"`, // intentionally malformed
+	})
+	if err != nil {
+		t.Fatalf("PreRequest returned error: %v", err)
+	}
+	if !out.GetAllowed() {
+		t.Errorf("expected Allowed=true on malformed MessagesJson, got false")
+	}
+	if got := out.GetModifiedMessagesJson(); got != "" {
+		t.Errorf("expected empty ModifiedMessagesJson (passthrough), got %q", got)
+	}
+}
+
 // TestPreRequest_ReplaceMode_DropsExistingSystemMessages is the regression
 // test for the bug where "replace" mode prepended a new system message
 // without removing the existing one(s), leaving the model with two prompts.
@@ -266,8 +289,7 @@ func TestPreRequest_AppendMode_NoExistingSystem(t *testing.T) {
 // TestPreRequest_AppendMode_OnlyMergesFirstSystemMessage pins the current
 // append-mode behaviour: when several client system messages are already
 // present, only the first one is merged with the configured prompt and any
-// subsequent system messages are left untouched. Tracked as a follow-up to
-// keep the scope of the replace-mode fix narrow.
+// subsequent system messages are left untouched. Tracked in #149.
 func TestPreRequest_AppendMode_OnlyMergesFirstSystemMessage(t *testing.T) {
 	input := mustMarshal(t, []map[string]string{
 		{"role": "system", "content": "first client prompt"},
