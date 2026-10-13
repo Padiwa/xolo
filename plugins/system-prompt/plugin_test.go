@@ -95,7 +95,7 @@ func TestPreRequest_InfoHasNoPayloads(t *testing.T) {
 		}
 		for _, key := range []string{"original_messages", "modified_messages"} {
 			if _, ok := rec[key]; ok {
-				t.Errorf("%s must not appear on the INFO record (only DEBUG, off by default)", key)
+				t.Errorf("%s must not appear on any log record", key)
 			}
 		}
 		if rec["original_messages_count"] == nil || rec["modified_messages_count"] == nil {
