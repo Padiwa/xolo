@@ -3,9 +3,11 @@ package api_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/xolo-gateway/xolo/internal/core/model"
@@ -57,6 +59,10 @@ type cardEntry struct {
 		Completion float64 `json:"completion"`
 	} `json:"pricing"`
 	SupportedParameters []string `json:"supported_parameters"`
+	Xolo                struct {
+		CapabilitiesDeclared bool   `json:"capabilities_declared"`
+		Currency             string `json:"currency"`
+	} `json:"xolo"`
 }
 
 func realModel(org model.Organization, name string, ctxWindow int64, caps model.ModelCapabilities, promptCost, completionCost int64) *model.BaseLLMModel {
@@ -121,6 +127,8 @@ type cardScenario struct {
 	// means a session, scoped by the memberships of every org.
 	tokenOrg model.OrgID
 	query    string
+	// currencies prices the providers of the models; EUR by default.
+	currencies map[model.ProviderID]string
 }
 
 func (sc cardScenario) call(t *testing.T) map[string]cardEntry {
@@ -142,7 +150,7 @@ func (sc cardScenario) call(t *testing.T) map[string]cardEntry {
 	}
 
 	h := api.NewHandler(
-		&fakeProviderStoreForModels{enabledModels: enabled},
+		&fakeProviderStoreForModels{enabledModels: enabled, currencies: sc.currencies},
 		&fakeOrgStoreForModels{
 			orgsByID:    orgsByID,
 			memberships: map[string][]model.Membership{string(user.ID()): memberships},
@@ -570,5 +578,118 @@ func TestVirtualModelCard_ValueNodeWithoutPortType(t *testing.T) {
 
 	if got.ContextLength == nil || *got.ContextLength != 70_000 {
 		t.Fatalf("context_length = %v, want 70000", got.ContextLength)
+	}
+}
+
+func TestModelCard_Declarations(t *testing.T) {
+	org := model.NewOrganization(testTenantID, "acme", "ACME", "")
+	euros := realModel(org, "euros", 64_000, model.ModelCapabilities{Tools: true}, 1000, 2000)
+	dollars := realModel(org, "dollars", 64_000, model.ModelCapabilities{Tools: true}, 1000, 2000)
+	plugins := vmWithGraph(org, "plugins", &model.PipelineGraph{Nodes: []model.PipelineNode{
+		{ID: "p", Type: model.NodeTypePlugin, Data: nodeData(t, model.PluginNodeData{PluginName: "dummy-model"})},
+	}})
+	declared := vmWithGraph(org, "declared", plugins.Graph())
+	declared.SetCatalogOverrides(&model.CatalogOverrides{Capabilities: &model.ModelCapabilities{Vision: true}})
+	contextOnly := vmWithGraph(org, "context-only", plugins.Graph())
+	contextOnly.SetCatalogOverrides(&model.CatalogOverrides{ContextWindow: 8_000})
+	mixed := vmWithGraph(org, "mixed", &model.PipelineGraph{Nodes: []model.PipelineNode{
+		{ID: "f", Type: model.NodeTypeModelFallback, Data: nodeData(t, model.ModelFallbackNodeData{Models: []string{"euros", "dollars"}})},
+	}})
+	sameCurrency := vmWithGraph(org, "same", modelNodeGraph(t, "euros"))
+
+	got := cardScenario{
+		orgs:       []model.Organization{org},
+		models:     map[model.OrgID][]model.LLMModel{org.ID(): {euros, dollars}},
+		vms:        []model.VirtualModel{plugins, declared, contextOnly, mixed, sameCurrency},
+		tokenOrg:   org.ID(),
+		currencies: map[model.ProviderID]string{dollars.ProviderID(): "USD"},
+	}.call(t)
+
+	tests := []struct {
+		id       string
+		declared bool
+		currency string
+		prompt   float64
+	}{
+		{"acme/euros", true, "EUR", 0.001},
+		{"acme/dollars", true, "USD", 0.001},
+		{"acme/plugins", false, "", 0},
+		{"acme/declared", true, "", 0},
+		{"acme/context-only", false, "", 0},
+		{"acme/mixed", true, "", 0},
+		{"acme/same", true, "EUR", 0.001},
+	}
+	for _, tt := range tests {
+		entry, ok := got[tt.id]
+		if !ok {
+			t.Errorf("%s is missing from the catalogue", tt.id)
+			continue
+		}
+		if entry.Xolo.CapabilitiesDeclared != tt.declared || entry.Xolo.Currency != tt.currency || entry.Pricing.Prompt != tt.prompt {
+			t.Errorf("%s: declared=%t currency=%q prompt=%v, want %t %q %v", tt.id, entry.Xolo.CapabilitiesDeclared, entry.Xolo.Currency, entry.Pricing.Prompt, tt.declared, tt.currency, tt.prompt)
+		}
+	}
+}
+
+func TestModelCard_ProviderFailureLeavesTheCurrencyUnknown(t *testing.T) {
+	org := model.NewOrganization(testTenantID, "acme", "ACME", "")
+	m := realModel(org, "gpt", 64_000, model.ModelCapabilities{}, 1000, 2000)
+	h := api.NewHandler(
+		&fakeProviderStoreForModels{enabledModels: map[string][]model.LLMModel{string(org.ID()): {m}}, providersErr: errors.New("boom")},
+		&fakeOrgStoreForModels{orgsByID: map[string]model.Organization{string(org.ID()): org}},
+		&cardVMStore{}, &cardPVMStore{}, nil, nil, nil, nil,
+	)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
+	ctx := authn.SetContextUser(req.Context(), &authn.User{Provider: "oidc", Subject: "u", OrgID: string(org.ID()), TokenID: "tok", TenantID: string(testTenantID)})
+	ctx = httpCtx.SetUser(ctx, cardUser)
+	ctx = httpCtx.SetPermissionResolver(ctx, func(context.Context, model.OrgID) (rbac.PermissionSet, error) {
+		return rbac.NewPermissionSet([]string{string(rbac.PermModelUseOrg)}, nil), nil
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data []cardEntry `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Data) != 1 || !resp.Data[0].Xolo.CapabilitiesDeclared || resp.Data[0].Xolo.Currency != "" {
+		t.Fatalf("catalogue = %+v", resp.Data)
+	}
+	// A price without its currency would be read in the client's own.
+	if p := resp.Data[0].Pricing; p.Prompt != 0 || p.Completion != 0 {
+		t.Errorf("pricing = %+v, want none without a currency", p)
+	}
+}
+
+func TestModelCard_ListsProvidersOncePerOrganization(t *testing.T) {
+	org := model.NewOrganization(testTenantID, "acme", "ACME", "")
+	gpt := realModel(org, "gpt", 64_000, model.ModelCapabilities{}, 1000, 2000)
+	vm := vmWithGraph(org, "auto", modelNodeGraph(t, "gpt"))
+	providers := &fakeProviderStoreForModels{enabledModels: map[string][]model.LLMModel{string(org.ID()): {gpt}}}
+	h := api.NewHandler(
+		providers,
+		&fakeOrgStoreForModels{orgsByID: map[string]model.Organization{string(org.ID()): org}},
+		&cardVMStore{vms: []model.VirtualModel{vm}}, &cardPVMStore{}, nil, nil, nil, nil,
+	)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/models", nil)
+	ctx := authn.SetContextUser(req.Context(), &authn.User{Provider: "oidc", Subject: "u", OrgID: string(org.ID()), TokenID: "tok", TenantID: string(testTenantID)})
+	ctx = httpCtx.SetUser(ctx, cardUser)
+	ctx = httpCtx.SetPermissionResolver(ctx, func(context.Context, model.OrgID) (rbac.PermissionSet, error) {
+		return rbac.NewPermissionSet([]string{string(rbac.PermModelUseOrg), string(rbac.PermModelUseVirtual)}, nil), nil
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"acme/auto"`) {
+		t.Fatalf("virtual model not listed: %s", rec.Body.String())
+	}
+	if providers.listProvidersCalls != 1 {
+		t.Errorf("ListProviders called %d times, want 1", providers.listProvidersCalls)
 	}
 }

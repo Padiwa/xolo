@@ -1,3 +1,19 @@
+# Unreleased — model catalogue declarations
+
+Each model of `GET /api/v1/models` now carries a `xolo` object:
+`capabilities_declared` is `false` for a virtual model whose capabilities
+neither derive from its pipeline nor are declared in its catalogue, whose
+text-only card therefore means "unknown"; `currency` is the currency of the
+model's provider, missing when the price is unknown. A virtual model combining
+candidates billed in different currencies no longer advertises a price. The
+other fields are unchanged; `pricing` is in currency units per 1,000 tokens.
+No migration.
+
+Details:
+[English](docs/en/administration/organisation/application/application.md#capabilities-and-pricing-of-the-listed-models),
+[Français](docs/fr/administration/organisation/application/application.md#capacites-et-tarif-des-modeles-listes),
+[Español](docs/es/administration/organisation/application/application.md#capacidades-y-precio-de-los-modelos-listados).
+
 # Unreleased — user quota API
 
 `GET /api/v1/quota?organization=<orgID>` returns the caller's own budget inside

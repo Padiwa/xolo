@@ -19,17 +19,30 @@ type modelTraits struct {
 	promptLimit     int64
 	completionLimit int64
 	caps            model.ModelCapabilities
-	// Costs in microcents per 1K tokens.
+	// Costs in microcents per 1K tokens of currency. An empty currency means
+	// the price is unknown, whatever the costs.
 	promptCost     int64
 	completionCost int64
+	currency       string
+	// declared is false when nothing tells the capabilities: caps then only
+	// holds zero values, not absent capabilities.
+	declared bool
 }
 
-func traitsOfLLMModel(m model.LLMModel) modelTraits {
+// traitsOfLLMModel describes a real model, priced in the currency of its
+// provider. An unknown currency leaves the price unknown: a figure without its
+// unit would be read in the client's own currency.
+func traitsOfLLMModel(m model.LLMModel, currency string) modelTraits {
 	t := modelTraits{
 		contextLength:  m.ContextWindow(),
 		caps:           m.Capabilities(),
 		promptCost:     m.PromptCostPer1KTokens(),
 		completionCost: m.CompletionCostPer1KTokens(),
+		currency:       currency,
+		declared:       true,
+	}
+	if currency == "" {
+		t.promptCost, t.completionCost = 0, 0
 	}
 	if tlc := m.TokenLimitConfig(); tlc != nil && tlc.MaxTokens > 0 {
 		t.promptLimit = int64(tlc.MaxTokens)
@@ -43,6 +56,8 @@ func traitsOfLLMModel(m model.LLMModel) modelTraits {
 // capabilities every candidate has, and the highest price. A candidate with an
 // unknown context window makes the window unknown, since no figure would be
 // safe. A candidate without a request limit has none to lower the others.
+// Prices in different currencies, or an unknown one, leave the price unknown;
+// one undeclared candidate leaves the capabilities undeclared.
 func combineTraits(candidates []modelTraits) modelTraits {
 	var out modelTraits
 	for i, c := range candidates {
@@ -66,6 +81,13 @@ func combineTraits(candidates []modelTraits) modelTraits {
 		}
 		out.promptCost = max(out.promptCost, c.promptCost)
 		out.completionCost = max(out.completionCost, c.completionCost)
+		if out.currency != c.currency {
+			out.currency = ""
+		}
+		out.declared = out.declared && c.declared
+	}
+	if out.currency == "" {
+		out.promptCost, out.completionCost = 0, 0
 	}
 	return out
 }
@@ -96,6 +118,7 @@ func applyCatalogOverrides(t modelTraits, o *model.CatalogOverrides) modelTraits
 	}
 	if o.Capabilities != nil {
 		t.caps = *o.Capabilities
+		t.declared = true
 	}
 	return t
 }
@@ -119,11 +142,16 @@ type cardResolver struct {
 	orgs     map[model.OrgID]*scopedOrg
 	loaded   bool
 	resolver map[string]bool // plugin name -> picks the model at runtime
+	// currencies memoizes providerCurrencies per organization, shared with
+	// the listing of the real models.
+	currencies map[model.OrgID]map[model.ProviderID]string
 }
 
 type scopedOrg struct {
 	slug   string
 	models map[string]model.LLMModel
+	// currencies are the currencies of the organization's providers.
+	currencies map[model.ProviderID]string
 }
 
 func (h *Handler) newCardResolver(ctx context.Context, orgIDs []model.OrgID, defaultOrg model.OrgID, userID model.UserID) *cardResolver {
@@ -134,7 +162,19 @@ func (h *Handler) newCardResolver(ctx context.Context, orgIDs []model.OrgID, def
 		defaultOrg: defaultOrg,
 		userID:     userID,
 		orgs:       map[model.OrgID]*scopedOrg{},
+		currencies: map[model.OrgID]map[model.ProviderID]string{},
 	}
+}
+
+// providerCurrencies is Handler.providerCurrencies, read once per organization
+// and request, a failure included.
+func (r *cardResolver) providerCurrencies(orgID model.OrgID) map[model.ProviderID]string {
+	if currencies, ok := r.currencies[orgID]; ok {
+		return currencies
+	}
+	currencies := r.h.providerCurrencies(r.ctx, orgID)
+	r.currencies[orgID] = currencies
+	return currencies
 }
 
 // scope loads the organizations of the caller once, on the first name that
@@ -155,7 +195,7 @@ func (r *cardResolver) scope() map[model.OrgID]*scopedOrg {
 			slog.WarnContext(r.ctx, "could not list models to derive virtual model cards", slog.String("orgID", string(id)), slog.Any("error", err))
 			continue
 		}
-		so := &scopedOrg{slug: org.Slug(), models: make(map[string]model.LLMModel, len(models))}
+		so := &scopedOrg{slug: org.Slug(), models: make(map[string]model.LLMModel, len(models)), currencies: r.providerCurrencies(id)}
 		for _, m := range models {
 			so.models[m.ProxyName()] = m
 		}
@@ -167,7 +207,7 @@ func (r *cardResolver) scope() map[model.OrgID]*scopedOrg {
 // orgModelCard returns the card an organization virtual model advertises: the
 // figures derived from its pipeline, then the operator's overrides on top.
 // Nothing derivable leaves the zero value, which the catalogue renders as the
-// plain text-only card.
+// plain text-only card, marked undeclared.
 func (r *cardResolver) orgModelCard(vm model.VirtualModel) modelTraits {
 	return r.cardOf(vm.Graph(), vm.CatalogOverrides(), vm.OrgID(), map[string]struct{}{"vm:" + string(vm.ID()): {}})
 }
@@ -197,7 +237,7 @@ func (r *cardResolver) personalModelCard(pvm model.PersonalVirtualModel) modelTr
 	// ones tried would show a figure that may not be the one charged.
 	for _, d := range derived[min(1, len(derived)):] {
 		if d.promptCost != derived[0].promptCost || d.completionCost != derived[0].completionCost {
-			t.promptCost, t.completionCost = 0, 0
+			t.promptCost, t.completionCost, t.currency = 0, 0, ""
 			break
 		}
 	}
@@ -339,7 +379,7 @@ func (r *cardResolver) resolveName(name string, owner model.OrgID, visited map[s
 	if !ok {
 		return modelTraits{}, false
 	}
-	return traitsOfLLMModel(m), true
+	return traitsOfLLMModel(m, so.currencies[m.ProviderID()]), true
 }
 
 // cardOfNested derives the card of a virtual model called from another one,

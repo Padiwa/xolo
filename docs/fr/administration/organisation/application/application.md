@@ -142,6 +142,25 @@ Concrètement :
 - **Équipes** : un modèle accessible par une équipe est listé sous la forme `<organisation>/<équipe>/<modèle>`, une fois par équipe ; un modèle accessible par `model:use:org` l'est sous la forme `<organisation>/<modèle>`. Un jeton rattaché à une équipe ne voit que les noms de son équipe.
 - **Session issue de `POST /auth/token/login`** : la session est créée à partir d'un jeton Xolo (utilisateur ou application) et `authn.User.OrgID` est rempli avec l'organisation du jeton (`internal/http/middleware/authn/token/login.go`). `GET /api/v1/models` ne renvoie alors que les modèles activés de cette organisation, comme pour le cas « Jeton » correspondant (les autres appartenances de l'utilisateur sont ignorées ; pour une application, c'est précisément l'organisation de l'application). Ce cas se distingue du précédent uniquement par le canal d'authentification (cookie de session au lieu de header `Authorization`).
 
+### Capacités et tarif des modèles listés
+
+Chaque modèle de `GET /api/v1/models` suit le format OpenRouter :
+
+- `description` ;
+- `context_length` ;
+- `architecture.input_modalities`, qui contient `image` quand le modèle lit les images ;
+- `supported_parameters`, qui contient `tools` et `reasoning` selon ses capacités ;
+- `pricing.prompt` et `pricing.completion`, exprimés en unités monétaires pour 1 000 tokens.
+
+Xolo y ajoute un objet `xolo` :
+
+```json
+"xolo": {"capabilities_declared": true, "currency": "EUR"}
+```
+
+- `capabilities_declared` vaut `false` pour un modèle virtuel dont le pipeline ne permet pas de déduire les capacités et qui n'en déclare pas dans son catalogue. Sa fiche se lit alors comme un modèle texte seul, gratuit : ces valeurs nulles signifient « inconnu », pas « absent ».
+- `currency` est la devise du fournisseur du modèle. Elle est absente quand le prix n'est pas connu, par exemple pour un modèle virtuel non déduit, pour des candidats facturés dans des devises différentes, ou quand la liste des fournisseurs n'a pas pu être lue.
+
 > **Note** : Avant la correction du bug [#48](https://github.com/xolo-gateway/xolo/issues/48),
 > un jeton d'application renvoyait une liste vide sur `GET /api/v1/models`
 > parce que l'utilisateur « fantôme » associé à l'application n'a

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -31,6 +32,15 @@ type openRouterModel struct {
 	Pricing           modelPricing      `json:"pricing"`
 	PerRequestLimits  *perRequestLimits `json:"per_request_limits,omitempty"`
 	SupportedParams   []string          `json:"supported_parameters"`
+	Xolo              modelDeclarations `json:"xolo"`
+}
+
+// modelDeclarations is what the OpenRouter card cannot tell: whether its
+// capabilities are declared, since an undeclared card reads as text only, and
+// the currency of its pricing, empty when the price is unknown.
+type modelDeclarations struct {
+	CapabilitiesDeclared bool   `json:"capabilities_declared"`
+	Currency             string `json:"currency,omitempty"`
 }
 
 type modelArchitecture struct {
@@ -244,9 +254,13 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 			slog.WarnContext(ctx, "could not list enabled models", slogx.Error(err), slog.String("orgID", string(orgID)))
 			continue
 		}
+		var currencies map[model.ProviderID]string
+		if len(models) > 0 {
+			currencies = cards.providerCurrencies(orgID)
+		}
 		for _, m := range models {
 			for _, name := range service.ListedModelNames(perms, bound, org.Slug(), m.ProxyName(), string(m.ID()), rbac.ModelKindLLM) {
-				model := h.llmModelToOpenRouterModel(org.Slug(), m)
+				model := h.llmModelToOpenRouterModel(org.Slug(), m, currencies[m.ProviderID()])
 				model.ID = name
 				if filterModel(model, filterParams, filterModalities) {
 					data = append(data, model)
@@ -317,8 +331,23 @@ func (h *Handler) personalVMToOpenRouterModel(pvm model.PersonalVirtualModel, tr
 	return card
 }
 
-func (h *Handler) llmModelToOpenRouterModel(orgSlug string, m model.LLMModel) openRouterModel {
-	card := modelCard(traitsOfLLMModel(m))
+// providerCurrencies maps the providers of orgID to their currency. A failure
+// leaves the prices of the organization's models unknown.
+func (h *Handler) providerCurrencies(ctx context.Context, orgID model.OrgID) map[model.ProviderID]string {
+	providers, err := h.providerStore.ListProviders(ctx, orgID)
+	if err != nil {
+		slog.WarnContext(ctx, "could not list providers for model pricing", slogx.Error(err), slog.String("orgID", string(orgID)))
+		return nil
+	}
+	currencies := make(map[model.ProviderID]string, len(providers))
+	for _, p := range providers {
+		currencies[p.ID()] = p.Currency()
+	}
+	return currencies
+}
+
+func (h *Handler) llmModelToOpenRouterModel(orgSlug string, m model.LLMModel, currency string) openRouterModel {
+	card := modelCard(traitsOfLLMModel(m, currency))
 	card.ID = orgSlug + "/" + m.ProxyName()
 	card.Created = int(m.CreatedAt().Unix())
 	card.Name = m.ProxyName()
@@ -337,7 +366,8 @@ func (h *Handler) virtualModelToOpenRouterModel(orgSlug string, vm model.Virtual
 
 // modelCard renders traits as an OpenRouter-style card, shared by real and
 // virtual models so both describe capabilities the same way. A virtual model
-// whose traits are unknown renders as text only, free, without a window.
+// whose traits are unknown renders as text only, free, without a window, and
+// says so in its declarations.
 func modelCard(t modelTraits) openRouterModel {
 	caps := t.caps
 	inputModalities := []string{"text"}
@@ -391,6 +421,7 @@ func modelCard(t modelTraits) openRouterModel {
 		},
 		PerRequestLimits: perLimits,
 		SupportedParams:  supportedParams,
+		Xolo:             modelDeclarations{CapabilitiesDeclared: t.declared, Currency: t.currency},
 	}
 }
 
