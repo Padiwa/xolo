@@ -32,7 +32,14 @@ func (p *Plugin) PreRequest(ctx context.Context, in *proto.PreRequestInput) (*pr
 	}
 
 	var messages []map[string]interface{}
-	json.Unmarshal([]byte(in.GetMessagesJson()), &messages) //nolint:errcheck
+	if err := json.Unmarshal([]byte(in.GetMessagesJson()), &messages); err != nil {
+		// Malformed MessagesJson: pass the request through untouched so the
+		// client conversation is not silently replaced by a single system
+		// message in replace mode. The configured prompt is skipped for this
+		// call; the warning lets an operator see it happened.
+		slog.WarnContext(ctx, "system-prompt: malformed messages, passing the request through", slog.Any("error", err))
+		return &proto.PreRequestOutput{Allowed: true}, nil
+	}
 
 	var modified []map[string]interface{}
 
