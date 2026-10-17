@@ -20,11 +20,14 @@ type businessRoute struct {
 	family             string
 	required, nullable []string
 	optional           []string
+	// noDelete marks a family whose resource lives and dies with another:
+	// the settings of a team are removed with the team.
+	noDelete bool
 }
 
 var businessRoutes = []businessRoute{
 	{family: model.FamilyCustomRole, required: []string{"name", "description", "permissions"}},
-	{family: model.FamilyTeam, required: []string{"slug", "name", "description", "share_quota_equally", "model_grants", "middleware_ids", "members"}},
+	{family: model.FamilyTeamSettings, required: []string{"description", "share_quota_equally", "model_grants", "middleware_ids", "member_roles"}, noDelete: true},
 	{family: model.FamilyApplication, required: []string{"name", "description", "active", "role_ids"}, optional: []string{"team_id"}},
 	{family: model.FamilyQuota,
 		required: []string{"scope", "scope_id", "currency", "daily_budget", "monthly_budget", "yearly_budget"},
@@ -39,12 +42,12 @@ var businessRoutes = []businessRoute{
 
 // businessCollections names the collection of each business family.
 var businessCollections = map[string]string{
-	model.FamilyCustomRole:  "roles",
-	model.FamilyTeam:        "teams",
-	model.FamilyApplication: "applications",
-	model.FamilyQuota:       "quotas",
-	model.FamilyAlert:       "alerts",
-	model.FamilyProvider:    "providers",
+	model.FamilyCustomRole:   "roles",
+	model.FamilyTeamSettings: "team-settings",
+	model.FamilyApplication:  "applications",
+	model.FamilyQuota:        "quotas",
+	model.FamilyAlert:        "alerts",
+	model.FamilyProvider:     "providers",
 }
 
 // mountBusiness serves the business resources with the reads, conditions,
@@ -63,7 +66,9 @@ func (h *Handler) mountBusiness() {
 		h.mux.HandleFunc("GET "+collection, h.handleBusinessList(route))
 		h.mux.HandleFunc("GET "+collection+"/{resourceID}", h.handleBusinessGet(route))
 		h.mux.HandleFunc("PUT "+collection+"/{resourceID}", h.handleBusinessPut(route))
-		h.mux.HandleFunc("DELETE "+collection+"/{resourceID}", h.handleBusinessDelete(route))
+		if !route.noDelete {
+			h.mux.HandleFunc("DELETE "+collection+"/{resourceID}", h.handleBusinessDelete(route))
+		}
 	}
 	h.mux.HandleFunc("POST "+org+"/roles", h.handleCreateRole)
 	h.mux.HandleFunc("GET "+org+"/roles/builtin", h.handleBuiltinRoles)
@@ -188,12 +193,12 @@ func (h *Handler) putBusiness(ctx context.Context, scope model.CommonScope, key 
 			return model.CommonItem{}, err
 		}
 		return h.provisioning.PutCustomRole(ctx, tenantID, orgID, key, condition, v)
-	case model.FamilyTeam:
+	case model.FamilyTeamSettings:
 		var v model.TeamSettings
 		if err := decode(&v); err != nil {
 			return model.CommonItem{}, err
 		}
-		return h.provisioning.PutTeam(ctx, tenantID, orgID, key, condition, v)
+		return h.provisioning.PutTeamSettings(ctx, tenantID, orgID, key, condition, v)
 	case model.FamilyApplication:
 		var v model.ApplicationSettings
 		if err := decode(&v); err != nil {

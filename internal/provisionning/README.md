@@ -90,8 +90,11 @@ Webhooks have their own variables, see [Webhooks](#webhooks).
 | `PUT` | `/v1/tenants/{tenantID}/organizations/{orgID}` | `{"slug","name","status"}` |
 | `PUT` | `/v1/tenants/{tenantID}/members/{memberID}` | `{"email","tenant_role","status"}`, optional `"display_name"` and `"identity"` |
 | `PUT` | `/v1/tenants/{tenantID}/organizations/{orgID}/members/{memberID}` | `{"role","status"}` |
+| `PUT` | `/v1/tenants/{tenantID}/organizations/{orgID}/teams/{teamID}` | `{"slug","name","status"}` |
+| `PUT` | `/v1/tenants/{tenantID}/organizations/{orgID}/teams/{teamID}/members/{memberID}` | `{"status"}` |
 | `DELETE` | `/v1/tenants/{tenantID}/domains/{hostname}` | — removed at once, `204` |
 | `DELETE` | `/v1/tenants/{tenantID}/organizations/{orgID}/members/{memberID}` | — removed at once, `204` |
+| `DELETE` | `/v1/tenants/{tenantID}/organizations/{orgID}/teams/{teamID}`, `…/teams/{teamID}/members/{memberID}` | — removed at once, `204` (Xolo extension) |
 | `DELETE` | `/v1/tenants/{tenantID}`, `…/organizations/{orgID}`, `…/members/{memberID}` | — deletion recorded, purged later: see [Resource lifecycle](#resource-lifecycle) |
 
 Each of these resources is also readable, listable and followed through the
@@ -231,6 +234,34 @@ An organization always keeps one active owner once it has one: demoting or
 suspending the last one is refused with `409 last_owner`. An organization or a
 member of another tenant is a `404 parent_not_found`.
 
+### Teams
+
+`PUT …/organizations/{orgID}/teams/{teamID}` creates a team of the
+organization or changes its slug, name or status. Teams are flat. The slug is
+unique in the organization and is the team segment of model names
+`<org>/<team>/<model>`: a new or changed slug is checked like the slug of a
+new team (`409 conflict` when a model name of the organization starts with
+`<slug>/`), and clients storing model names with the former slug stop
+resolving them. A team UUID is global: one held by another organization is a
+`409 conflict`. A `PUT` never touches the settings of the team, see
+[Business resources](#business-resources); a new team has none.
+
+`PUT …/teams/{teamID}/members/{memberID}` places a member of the organization
+in the team, or changes its status. The member needs an organization
+membership, whatever its status, and the team must belong to the
+organization: otherwise `404 parent_not_found`. A team membership has no role
+in the common contract: a new one holds no team role, an existing one keeps
+its roles.
+
+A `suspended` team, or a `suspended` team member, grants nothing through the
+team: no model, no team role, no share of the team budget. Members, roles and
+settings are kept. Suspension never cascades. Removing an organization
+membership removes the member from its teams, and publishes
+`team_membership.deleted.v1`. `DELETE` of a team or a team membership is an
+extension of the common contract: immediate, idempotent, under optional
+`If-Match`. A team an application is bound to, or alone holding a middleware,
+is not deleted (`409 conflict`).
+
 ## Domains and routing
 
 `PUT /v1/tenants/{tenantID}/domains/{hostname}` declares a hostname of the tenant
@@ -262,8 +293,8 @@ accepted invitation, a deletion — receives the next position of a single
 
 | Method | Route | Answer |
 |---|---|---|
-| `GET` | `/v1/tenants/{tenantID}`, `…/domains/{hostname}`, `…/organizations/{orgID}`, `…/members/{memberID}`, `…/organizations/{orgID}/members/{memberID}` | The representation, with its `ETag` header |
-| `GET` | `/v1/tenants`, `…/domains`, `…/organizations`, `…/members`, `…/organizations/{orgID}/members` | `{"items":[{"key","representation","etag"}],"next_cursor"}` |
+| `GET` | `/v1/tenants/{tenantID}`, `…/domains/{hostname}`, `…/organizations/{orgID}`, `…/members/{memberID}`, `…/organizations/{orgID}/members/{memberID}`, `…/organizations/{orgID}/teams/{teamID}`, `…/teams/{teamID}/members/{memberID}` | The representation, with its `ETag` header |
+| `GET` | `/v1/tenants`, `…/domains`, `…/organizations`, `…/members`, `…/organizations/{orgID}/members`, `…/organizations/{orgID}/teams`, `…/teams/{teamID}/members` | `{"items":[{"key","representation","etag"}],"next_cursor"}` |
 | `GET` | `/v1/events/cursor` | `{"cursor"}`: the current end of the feed |
 | `GET` | `/v1/events?cursor=` | `{"items":[…],"next_cursor","has_more"}` |
 
@@ -316,9 +347,10 @@ carry no representation and no personal data:
 
 - `type` is `<resource_type>.created.v1`, `.updated.v1` or `.deleted.v1`, with
   `resource_type` one of `tenant`, `tenant_domain`, `organization`, `member`,
-  `organization_membership` and the business families `provider`,
-  `custom_role`, `application`, `quota` and `alert`. A deletion carries no
-  `etag`.
+  `organization_membership`, `team`, `team_membership` and the business
+  families `provider`, `custom_role`, `team_settings`, `application`, `quota`
+  and `alert`. A team key is `{"tenant_id","organization_id","team_id"}`, a
+  team membership key adds `member_id`. A deletion carries no `etag`.
 - **One event per resource and per commit.** A no-op or a rolled back
   transaction publishes nothing. Within a commit, deletions come first, from
   children to parents, then creations and updates from parents to children.
@@ -531,13 +563,14 @@ one: the same person signing in on two tenants owns two distinct accounts.
 
 ## Business resources
 
-Five families specific to Xolo follow the same contract as the common
+Six families specific to Xolo follow the same contract as the common
 families: unit reads with an `ETag`, paginated lists, conditional `PUT`s and
 events. The manifest announces `business_resources`.
 
 | Method | Route |
 |---|---|
 | `GET`, `GET`, `PUT`, `DELETE` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/roles[/{key}]` |
+| `GET`, `GET`, `PUT` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/team-settings[/{teamID}]` |
 | `GET`, `GET`, `PUT`, `DELETE` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/applications[/{key}]` |
 | `GET`, `GET`, `PUT`, `DELETE` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/alerts[/{key}]` |
 | `GET`, `GET`, `PUT`, `DELETE` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/providers[/{key}]` |
@@ -550,8 +583,9 @@ only where shown.
 
 | Family | Representation |
 |---|---|
-| `custom_role` | `{"name","description","permissions":[…],"model_grants":[{"model_id","kind"}]}` |
-| `application` | `{"name","description","active","role_ids":[…]}` |
+| `custom_role` | `{"name","description","permissions":[…]}` |
+| `team_settings` | `{"description","share_quota_equally","model_grants":[{"model_id","kind"}],"middleware_ids":[…],"member_roles":[{"user_id","role_ids":[…]}]}` |
+| `application` | `{"name","description","active","role_ids":[…],"team_id"}` |
 | `quota` | `{"scope","scope_id","currency","daily_budget","monthly_budget","yearly_budget"}`, budgets in microcents or `null` |
 | `alert` | `{"name","description","scope","owner_id","query","aggregation","window_seconds","comparator","threshold","for_seconds","enabled"}` |
 | `provider` | `{"name","type","base_url","active","currency","cloud_tier","billing_mode","subscription_plan","retry_config","rate_limit_config"}`, the last three `null` or objects, plus the write-only `"api_key"` |
@@ -568,6 +602,13 @@ only where shown.
   member of the organization, required for a `personal` alert. A missing or
   foreign parent is `404 parent_not_found`; a resource of another organization
   or tenant is `404 not_found`, like a missing one.
+- **Team settings** exist exactly when their team does: the common contract
+  creates and deletes the team, a settings `PUT` on a missing team is `404
+  parent_not_found`, and the collection has no `DELETE`. `member_roles` lists
+  the team members holding roles on the team scope; a member left out, or
+  listed with no role, holds none. A user who is not a team member is `404
+  parent_not_found`; a builtin role is `422`. Their write authority is the one
+  of the `team` family.
 - **Immutable fields.** The `scope` and `scope_id` of a quota and the `scope`
   and `owner_id` of an alert never change (`409 conflict`). A scope holds one
   quota: another key on the same scope is `409 conflict`.
@@ -593,6 +634,14 @@ only where shown.
 - The web UI writes publish their events as well. Migration `202610120001`
   projects the existing business resources without publishing any event;
   like the previous ones, it requires every server to be stopped.
+- Migration `202610200001` moves teams to the common contract, also with every
+  server stopped. Teams and team members gain a status, `active`. A team
+  created locally with an xid gets a UUID: what is bound to it (grants,
+  middlewares, members, roles, applications, tokens, invitations, personal
+  models, usage records, budgets) follows, and the feed publishes the deletion
+  of the former key and the creation of the new one. Every team is then
+  published as `team`, `team_settings` and `team_membership` resources; the
+  former `/v1/xolo/…/teams` route, which embedded the members, is gone.
 
 Known limit: the cache of each process keeps a deactivated application's
 tokens valid until its entries expire (`XOLO_STORAGE_DATABASE_CACHE_USERS_TTL`):
@@ -606,7 +655,7 @@ control plane (this listener), or both.
 
 | Variable | Default | Description |
 |---|---|---|
-| `XOLO_OWNERSHIP` | — | Comma-separated `family=owner` pairs. Families: `tenant`, `tenant_domain`, `organization`, `member`, `organization_membership`, `subscription`, and the business families `provider`, `custom_role`, `application`, `quota`, `alert`. Owners: `shared`, `local`, `control_plane`. Omitted families are `shared`; an unknown family or owner prevents startup |
+| `XOLO_OWNERSHIP` | — | Comma-separated `family=owner` pairs. Families: `tenant`, `tenant_domain`, `organization`, `member`, `organization_membership`, `team`, `team_membership`, `subscription`, and the business families `provider`, `custom_role`, `application`, `quota`, `alert`; `team` also governs the team settings. Owners: `shared`, `local`, `control_plane`. Omitted families are `shared`; an unknown family or owner prevents startup |
 
 ```dotenv
 XOLO_OWNERSHIP=tenant=control_plane,tenant_domain=control_plane,organization=control_plane,member=control_plane,organization_membership=control_plane,subscription=control_plane
@@ -663,7 +712,7 @@ taking any lock. The format, `xolo-adoption/1`, is NDJSON
 (`application/x-ndjson`):
 
 ```text
-{"version":"xolo-adoption/1","contract":"0.1.0-draft.1","source":"urn:uuid:…","c0":"…","families":["tenant","tenant_domain","organization","member","organization_membership","provider","custom_role","application","quota","alert"]}
+{"version":"xolo-adoption/1","contract":"0.1.0-draft.2","source":"urn:uuid:…","c0":"…","families":["tenant","tenant_domain","organization","member","organization_membership","team","team_membership","provider","custom_role","team_settings","application","quota","alert"]}
 {"family":"tenant","key":{"tenant_id":"…"},"representation":{…},"etag":"W/\"42\""}
 …
 {"count":128,"complete":true,"sha256":"…"}

@@ -27,10 +27,30 @@ templ TeamPage(vmodel TeamPageVModel) {
 				Title:    vmodel.Team.Name(),
 				Subtitle: "Les membres de l'équipe appellent ses modèles sous " + vmodel.SampleModel + " : la requête est alors débitée sur le budget de l'équipe.",
 			}) {
+				if vmodel.CanEditTeam {
+					<form method="POST" action={ templ.SafeURL(teamsURL(ctx, vmodel.Org, "/", string(vmodel.Team.ID()), "/status")) }>
+						if vmodel.Team.Status() == model.StatusSuspended {
+							<input type="hidden" name="status" value="active"/>
+							@button.Button(button.Props{Type: button.TypeSubmit, Variant: button.VariantOutline, Size: button.SizeSm, Class: "gap-1.5"}) {
+								@icon.CirclePlay(icon.Props{Class: "size-3.5"})
+								Réactiver l'équipe
+							}
+						} else {
+							<input type="hidden" name="status" value="suspended"/>
+							@button.Button(button.Props{Type: button.TypeSubmit, Variant: button.VariantOutline, Size: button.SizeSm, Class: "gap-1.5"}) {
+								@icon.CirclePause(icon.Props{Class: "size-3.5"})
+								Suspendre l'équipe
+							}
+						}
+					</form>
+				}
 				@button.Button(button.Props{Variant: button.VariantOutline, Size: button.SizeSm, Class: "gap-1.5", Href: teamsURL(ctx, vmodel.Org)}) {
 					@icon.ArrowLeft(icon.Props{Class: "size-3.5"})
 					Équipes
 				}
+			}
+			if vmodel.Team.Status() == model.StatusSuspended {
+				@common.InfoBanner(common.ToneWarning, "Équipe suspendue : ses membres n'ont plus accès à ses modèles, ni à ses rôles, ni à son budget. Ses réglages et ses membres sont conservés.")
 			}
 			if vmodel.Success != "" {
 				@common.InfoBanner(common.TonePositive, teamSuccessMessage(vmodel.Success))
@@ -223,7 +243,12 @@ templ teamMembersSection(vmodel TeamPageVModel) {
 									if row.Member.User() != nil {
 										@common.PersonAvatar(row.Member.User().DisplayName())
 										<div class="min-w-0">
-											<div class="truncate text-sm font-semibold">{ row.Member.User().DisplayName() }</div>
+											<div class="flex items-center gap-1.5">
+												<span class="truncate text-sm font-semibold">{ row.Member.User().DisplayName() }</span>
+												if row.Member.Status() == model.StatusSuspended {
+													@common.Badge(common.ToneWarning, "suspendu")
+												}
+											</div>
 											@common.Mono(row.Member.User().Email())
 										</div>
 									}
@@ -259,6 +284,19 @@ templ teamMembersSection(vmodel TeamPageVModel) {
 										@icon.Pencil(icon.Props{Class: "size-3.5"})
 									}
 									if vmodel.CanManageMembers {
+										<form method="POST" action={ templ.SafeURL(teamsURL(ctx, vmodel.Org, "/", string(vmodel.Team.ID()), "/members/", string(row.Member.MembershipID()), "/status")) }>
+											if row.Member.Status() == model.StatusSuspended {
+												<input type="hidden" name="status" value="active"/>
+												@button.Button(button.Props{Type: button.TypeSubmit, Variant: button.VariantGhost, Size: button.SizeIcon, Class: "size-7", Attributes: templ.Attributes{"title": "Réactiver dans l'équipe"}}) {
+													@icon.CirclePlay(icon.Props{Class: "size-3.5"})
+												}
+											} else {
+												<input type="hidden" name="status" value="suspended"/>
+												@button.Button(button.Props{Type: button.TypeSubmit, Variant: button.VariantGhost, Size: button.SizeIcon, Class: "size-7", Attributes: templ.Attributes{"title": "Suspendre dans l'équipe"}}) {
+													@icon.CirclePause(icon.Props{Class: "size-3.5"})
+												}
+											}
+										</form>
 										@common.ConfirmDelete(common.ConfirmDeleteProps{
 											URL:          teamsURL(ctx, vmodel.Org, "/", string(vmodel.Team.ID()), "/members/", string(row.Member.MembershipID())),
 											Icon:         icon.UserX,

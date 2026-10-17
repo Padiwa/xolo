@@ -639,5 +639,12 @@ func schemaMigrations(artifact *RecoveryArtifact) []*gormigrate.Migration {
 				return errors.New("teams migration cannot be rolled back: role model grants were moved to teams and dropped")
 			},
 		},
+		{
+			ID:      teamContractMigrationID,
+			Migrate: migrateTeamContract,
+			Rollback: func(*gorm.DB) error {
+				return errors.New("team contract migration cannot be rolled back: team IDs were converted to UUIDs")
+			},
+		},
 	}
 }

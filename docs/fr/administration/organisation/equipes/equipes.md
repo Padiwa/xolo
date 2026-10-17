@@ -42,6 +42,12 @@ La section **Middlewares de l'équipe** rattache des middlewares à l'équipe. U
 
 La section **Membres** liste les membres de l'équipe. Choisissez un membre de l'organisation et cliquez sur **Ajouter à l'équipe**. L'icône de retrait retire un membre de l'équipe et supprime son budget dans l'équipe ; il reste membre de l'organisation.
 
+### Suspendre une équipe ou un membre
+
+Une équipe suspendue, ou un membre suspendu dans une équipe, conserve tout mais ne reçoit plus rien par l'équipe : aucun modèle, aucun rôle d'équipe, aucune part du budget de l'équipe. Cliquez sur **Suspendre l'équipe** en haut de la page de l'équipe, ce qui demande `teams:write`, ou sur l'icône de pause d'un membre, ce qui demande `members:write` sur l'équipe. **Réactiver** rétablit l'accès. Une équipe suspendue est marquée **suspendue** dans la liste, un membre suspendu **suspendu**.
+
+Les équipes et leurs membres peuvent aussi être provisionnés par un plan de contrôle via l'[API de provisioning](../../provisioning/provisioning.md#equipes).
+
 ### Rôles dans l'équipe
 
 Un rôle attribué à un membre depuis la page de l'équipe ne vaut que pour cette équipe. Seules ses permissions marquées « équipe » dans l'éditeur de rôles s'appliquent :

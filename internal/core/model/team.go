@@ -5,13 +5,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rs/xid"
+	"github.com/google/uuid"
 )
 
+// TeamID is a canonical lowercase UUID: the key of a team in the common
+// provisioning contract.
 type TeamID string
 
 func NewTeamID() TeamID {
-	return TeamID(xid.New().String())
+	return TeamID(uuid.NewString())
 }
 
 // Team is a scope inside an organization: its members, the models and
@@ -39,6 +41,9 @@ type Team interface {
 	// MiddlewareIDs lists the middlewares that run on the team's requests, after
 	// the organization middlewares.
 	MiddlewareIDs() []MiddlewareID
+	// Status is suspended for a team that grants nothing: no model, no team
+	// role and no budget, its members and settings kept.
+	Status() Status
 	CreatedAt() time.Time
 	UpdatedAt() time.Time
 }
@@ -52,11 +57,13 @@ type BaseTeam struct {
 	shareQuotaEqually bool
 	modelGrants       []ModelGrant
 	middlewareIDs     []MiddlewareID
+	status            Status
 	createdAt         time.Time
 	updatedAt         time.Time
 }
 
 func (t *BaseTeam) ID() TeamID                    { return t.id }
+func (t *BaseTeam) Status() Status                { return t.status }
 func (t *BaseTeam) OrgID() OrgID                  { return t.orgID }
 func (t *BaseTeam) Slug() string                  { return t.slug }
 func (t *BaseTeam) Name() string                  { return t.name }
@@ -74,6 +81,7 @@ func (t *BaseTeam) SetSlug(slug string)               { t.slug = slug }
 func (t *BaseTeam) SetName(name string)               { t.name = name }
 func (t *BaseTeam) SetDescription(description string) { t.description = description }
 func (t *BaseTeam) SetShareQuotaEqually(v bool)       { t.shareQuotaEqually = v }
+func (t *BaseTeam) SetStatus(status Status)           { t.status = status }
 func (t *BaseTeam) SetModelGrants(grants []ModelGrant) {
 	t.modelGrants = NormalizeModelGrants(grants)
 }
@@ -93,6 +101,7 @@ func NewTeam(orgID OrgID, slug, name, description string) *BaseTeam {
 		slug:        slug,
 		name:        name,
 		description: description,
+		status:      StatusActive,
 		createdAt:   now,
 		updatedAt:   now,
 	}
@@ -109,6 +118,7 @@ func CopyTeam(team Team) *BaseTeam {
 		shareQuotaEqually: team.ShareQuotaEqually(),
 		modelGrants:       slices.Clone(team.ModelGrants()),
 		middlewareIDs:     slices.Clone(team.MiddlewareIDs()),
+		status:            team.Status(),
 		createdAt:         team.CreatedAt(),
 		updatedAt:         time.Now(),
 	}
@@ -134,12 +144,14 @@ func NormalizeModelGrants(grants []ModelGrant) []ModelGrant {
 
 // TeamMember is the membership of an organization member in a team. Its roles
 // are assigned on the team scope: a "team lead" role held here grants its
-// team-scopable permissions on this team only.
+// team-scopable permissions on this team only. A suspended team member keeps
+// its roles but receives nothing through the team.
 type TeamMember interface {
 	TeamID() TeamID
 	MembershipID() MembershipID
 	UserID() UserID
 	RoleIDs() []RoleID
+	Status() Status
 	CreatedAt() time.Time
 
 	// Populated via preload, may be nil.
@@ -151,6 +163,7 @@ type BaseTeamMember struct {
 	membershipID MembershipID
 	userID       UserID
 	roleIDs      []RoleID
+	status       Status
 	createdAt    time.Time
 	user         User
 }
@@ -159,6 +172,7 @@ func (m *BaseTeamMember) TeamID() TeamID             { return m.teamID }
 func (m *BaseTeamMember) MembershipID() MembershipID { return m.membershipID }
 func (m *BaseTeamMember) UserID() UserID             { return m.userID }
 func (m *BaseTeamMember) RoleIDs() []RoleID          { return m.roleIDs }
+func (m *BaseTeamMember) Status() Status             { return m.status }
 func (m *BaseTeamMember) CreatedAt() time.Time       { return m.createdAt }
 func (m *BaseTeamMember) User() User                 { return m.user }
 
@@ -172,6 +186,7 @@ func NewTeamMember(teamID TeamID, membershipID MembershipID, userID UserID, role
 		membershipID: membershipID,
 		userID:       userID,
 		roleIDs:      slices.Compact(roleIDs),
+		status:       StatusActive,
 		createdAt:    time.Now(),
 	}
 }

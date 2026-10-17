@@ -33,6 +33,7 @@ func commonTarget(w http.ResponseWriter, r *http.Request, family string) (model.
 	tenantUUID := func(s string) (string, error) { id, err := model.ParseTenantID(s); return string(id), err }
 	orgUUID := func(s string) (string, error) { id, err := model.ParseOrgID(s); return string(id), err }
 	userUUID := func(s string) (string, error) { id, err := model.ParseUserID(s); return string(id), err }
+	teamUUID := func(s string) (string, error) { id, err := model.ParseTeamID(s); return string(id), err }
 	tenantID, ok := parse("tenantID", tenantUUID)
 	if !ok {
 		return scope, "", false
@@ -41,8 +42,13 @@ func commonTarget(w http.ResponseWriter, r *http.Request, family string) (model.
 		return scope, tenantID, true
 	}
 	scope.TenantID = tenantID
-	if family == model.FamilyOrganizationMembership {
+	if family == model.FamilyOrganizationMembership || family == model.FamilyTeam || family == model.FamilyTeamMembership {
 		if scope.OrganizationID, ok = parse("orgID", orgUUID); !ok {
+			return scope, "", false
+		}
+	}
+	if family == model.FamilyTeamMembership {
+		if scope.TeamID, ok = parse("teamID", teamUUID); !ok {
 			return scope, "", false
 		}
 	}
@@ -53,6 +59,8 @@ func commonTarget(w http.ResponseWriter, r *http.Request, family string) (model.
 		key = r.PathValue("hostname")
 	case model.FamilyOrganization:
 		key, ok = parse("orgID", orgUUID)
+	case model.FamilyTeam:
+		key, ok = parse("teamID", teamUUID)
 	default:
 		key, ok = parse("memberID", userUUID)
 	}

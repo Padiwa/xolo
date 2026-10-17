@@ -42,6 +42,12 @@ La sección **Middlewares de l'équipe** (Middlewares del equipo) vincula middle
 
 La sección **Membres** (Miembros) lista los miembros del equipo. Elija un miembro de la organización y haga clic en **Ajouter à l'équipe** (Añadir al equipo). El icono de retirada retira a un miembro del equipo y elimina su presupuesto en el equipo. Sigue siendo miembro de la organización.
 
+### Suspender un equipo o un miembro
+
+Un equipo suspendido, o un miembro suspendido en un equipo, lo conserva todo pero ya no recibe nada a través del equipo: ningún modelo, ningún rol de equipo, ninguna parte del presupuesto del equipo. Haga clic en **Suspendre l'équipe** (Suspender el equipo) arriba de la página del equipo, lo que requiere `teams:write`, o en el icono de pausa de un miembro, lo que requiere `members:write` en el equipo. **Réactiver** (Reactivar) restablece el acceso. Un equipo suspendido aparece como **suspendue** (suspendido) en la lista, un miembro suspendido como **suspendu** (suspendido).
+
+Los equipos y sus miembros también pueden ser provisionados por un plano de control mediante la [API de provisioning](../../provisioning/provisioning.md#equipos).
+
 ### Roles en el equipo
 
 Un rol asignado a un miembro desde la página del equipo solo vale para ese equipo. Solo se aplican sus permisos marcados como «equipo» en el editor de roles:

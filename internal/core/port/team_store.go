@@ -35,6 +35,9 @@ type TeamStore interface {
 	// already in the team keeps its join date. The membership must belong to
 	// the organization of the team.
 	SetTeamMember(ctx context.Context, id model.TeamID, membershipID model.MembershipID, roleIDs []model.RoleID) error
+	// SetTeamMemberStatus suspends or reactivates a team member, its roles
+	// kept. A missing team member is ErrNotFound.
+	SetTeamMemberStatus(ctx context.Context, id model.TeamID, membershipID model.MembershipID, status model.Status) error
 	RemoveTeamMember(ctx context.Context, id model.TeamID, membershipID model.MembershipID) error
 
 	// ModelNamePrefixTaken reports whether a real or virtual model of the

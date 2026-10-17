@@ -42,6 +42,12 @@ The **Middlewares de l'équipe** (Team middlewares) section attaches middlewares
 
 The **Membres** (Members) section lists the members of the team. Choose a member of the organization and click **Ajouter à l'équipe** (Add to team). The remove icon removes a member from the team and deletes their budget in the team. They stay a member of the organization.
 
+### Suspending a team or a member
+
+A suspended team, or a member suspended in a team, keeps everything in place but grants nothing through the team: no model, no team role, no share of the team budget. Click **Suspendre l'équipe** (Suspend team) at the top of the team page, which requires `teams:write`, or the pause icon of a member, which requires `members:write` on the team. **Réactiver** (Reactivate) restores the access. A suspended team is marked **suspendue** in the list, a suspended member **suspendu**.
+
+Teams and their members can also be provisioned by a control plane through the [Provisioning API](../../provisioning/provisioning.md#teams).
+
 ### Roles in the team
 
 A role assigned to a member from the team page only applies to that team. Only its permissions marked "team" in the role editor apply:

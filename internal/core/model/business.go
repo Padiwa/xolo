@@ -32,16 +32,16 @@ type ApplicationSettings struct {
 	TeamID string `json:"team_id"`
 }
 
-// TeamSettings is the representation of a team, members included.
+// TeamSettings is what a team carries beyond the common contract, whose team
+// resource holds its slug, name and status and whose team memberships hold
+// its members. MemberRoles lists the team members holding roles on the team
+// scope; a member left out holds none.
 type TeamSettings struct {
-	// Slug is the team segment of qualified model names. It never changes.
-	Slug              string               `json:"slug"`
-	Name              string               `json:"name"`
 	Description       string               `json:"description"`
 	ShareQuotaEqually bool                 `json:"share_quota_equally"`
 	ModelGrants       []ModelGrantSettings `json:"model_grants"`
 	MiddlewareIDs     []string             `json:"middleware_ids"`
-	Members           []TeamMemberSettings `json:"members"`
+	MemberRoles       []TeamMemberSettings `json:"member_roles"`
 }
 
 // TeamMemberSettings is one member of a team, with the roles it holds on the

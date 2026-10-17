@@ -14,7 +14,8 @@ type Team struct {
 	Slug              string `gorm:"uniqueIndex:team_org_slug_index;not null"`
 	Name              string `gorm:"not null"`
 	Description       string
-	ShareQuotaEqually bool `gorm:"not null;default:false"`
+	ShareQuotaEqually bool   `gorm:"not null;default:false"`
+	Status            string `gorm:"not null;default:active"`
 
 	Org         *Organization     `gorm:"foreignKey:OrgID"`
 	ModelGrants []*TeamModelGrant `gorm:"foreignKey:TeamID;constraint:OnDelete:CASCADE"`
@@ -41,6 +42,7 @@ type TeamMiddleware struct {
 type TeamMember struct {
 	TeamID       string `gorm:"primaryKey"`
 	MembershipID string `gorm:"primaryKey;index"`
+	Status       string `gorm:"not null;default:active"`
 	CreatedAt    time.Time
 }
 
@@ -61,6 +63,7 @@ func (w *wrappedTeam) Slug() string            { return w.t.Slug }
 func (w *wrappedTeam) Name() string            { return w.t.Name }
 func (w *wrappedTeam) Description() string     { return w.t.Description }
 func (w *wrappedTeam) ShareQuotaEqually() bool { return w.t.ShareQuotaEqually }
+func (w *wrappedTeam) Status() model.Status    { return model.Status(w.t.Status) }
 func (w *wrappedTeam) CreatedAt() time.Time    { return w.t.CreatedAt }
 func (w *wrappedTeam) UpdatedAt() time.Time    { return w.t.UpdatedAt }
 
@@ -92,6 +95,10 @@ func fromTeam(t model.Team) *Team {
 		Name:              t.Name(),
 		Description:       t.Description(),
 		ShareQuotaEqually: t.ShareQuotaEqually(),
+		Status:            string(t.Status()),
+	}
+	if team.Status == "" {
+		team.Status = string(model.StatusActive)
 	}
 	for _, g := range model.NormalizeModelGrants(t.ModelGrants()) {
 		team.ModelGrants = append(team.ModelGrants, &TeamModelGrant{TeamID: team.ID, ModelID: g.ModelID, ModelKind: g.Kind})
@@ -107,6 +114,7 @@ type teamMemberRow struct {
 	TeamID       string
 	MembershipID string
 	UserID       string
+	Status       string
 	CreatedAt    time.Time
 	roleIDs      []model.RoleID
 	user         *User
@@ -122,6 +130,7 @@ func (w *wrappedTeamMember) MembershipID() model.MembershipID {
 }
 func (w *wrappedTeamMember) UserID() model.UserID    { return model.UserID(w.m.UserID) }
 func (w *wrappedTeamMember) RoleIDs() []model.RoleID { return w.m.roleIDs }
+func (w *wrappedTeamMember) Status() model.Status    { return model.Status(w.m.Status) }
 func (w *wrappedTeamMember) CreatedAt() time.Time    { return w.m.CreatedAt }
 func (w *wrappedTeamMember) User() model.User {
 	if w.m.user == nil {

@@ -165,7 +165,8 @@ func TestTeamMembershipFollowsTheMember(t *testing.T) {
 		require.ErrorIs(t, err, port.ErrNotFound, "the member budget goes with the membership")
 
 		events, _ := feedSince(t, store, cursor)
-		require.Contains(t, eventTypes(events), "team.updated.v1", "the team projection lists its members")
+		require.Contains(t, eventTypes(events), "team_membership.deleted.v1", "the team membership goes with the membership")
+		require.Contains(t, eventTypes(events), "team_settings.updated.v1", "the settings list the roles of the members")
 		require.Contains(t, eventTypes(events), "quota.deleted.v1")
 	})
 }
@@ -210,7 +211,8 @@ func TestRemoveTeamMember(t *testing.T) {
 		require.NoError(t, err, "another member keeps its budget")
 
 		events, _ := feedSince(t, store, cursor)
-		require.Contains(t, eventTypes(events), "team.updated.v1")
+		require.Contains(t, eventTypes(events), "team_membership.deleted.v1")
+		require.NotContains(t, eventTypes(events), "team.updated.v1", "the team itself is unchanged")
 		require.Contains(t, eventTypes(events), "quota.deleted.v1")
 
 		require.ErrorIs(t, store.RemoveTeamMember(ctx, team.ID(), f.membership.ID()), port.ErrNotFound)
@@ -249,7 +251,7 @@ func TestDeleteTeam(t *testing.T) {
 			require.ErrorIs(t, err, port.ErrNotFound, scope.scope)
 		}
 		events, _ := feedSince(t, store, cursor)
-		require.Equal(t, []string{"quota.deleted.v1", "quota.deleted.v1", "team.deleted.v1"}, eventTypes(events))
+		require.Equal(t, []string{"quota.deleted.v1", "quota.deleted.v1", "team_settings.deleted.v1", "team_membership.deleted.v1", "team.deleted.v1"}, eventTypes(events))
 
 		// Deleting the organization removes its teams.
 		other := model.NewTeam(f.org.ID(), "rd", "R&D", "")

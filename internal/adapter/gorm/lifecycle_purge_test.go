@@ -386,9 +386,10 @@ func TestPurgeMemberDetachesTeams(t *testing.T) {
 
 		item, err := svc.GetCommon(ctx, businessScopes(fixture, f)[f.team], f.team)
 		require.NoError(t, err)
-		require.NotContains(t, string(item.Representation), string(f.user), "the team projection is published again")
+		require.NotContains(t, string(item.Representation), string(f.user), "the team settings are published again")
 		events, _ := feedSince(t, store, cursor)
-		require.Contains(t, eventTypes(events), "team.updated.v1")
+		require.Contains(t, eventTypes(events), "team_membership.deleted.v1")
+		require.Contains(t, eventTypes(events), "team_settings.updated.v1")
 		require.Contains(t, eventTypes(events), "quota.deleted.v1")
 	})
 }

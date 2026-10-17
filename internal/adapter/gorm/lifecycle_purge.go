@@ -378,7 +378,7 @@ func detachTeamMemberships(ctx context.Context, db *gorm.DB, userID string) erro
 	// deletion was recorded and confirmed.
 	recorder := newMutationRecorder(db, nil)
 	for _, t := range teams {
-		if err := recorder.track("team", t.TeamID); err != nil {
+		if err := trackingTeamMember(model.TeamID(t.TeamID), model.MembershipID(t.MembershipID))(recorder); err != nil {
 			return err
 		}
 		if err := recorder.trackTeamMemberQuotas(t.TeamID, t.MembershipID); err != nil {

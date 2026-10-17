@@ -94,6 +94,7 @@ func parseUUID(s string) (string, error) {
 func ParseTenantID(s string) (TenantID, error) { v, e := parseUUID(s); return TenantID(v), e }
 func ParseOrgID(s string) (OrgID, error)       { v, e := parseUUID(s); return OrgID(v), e }
 func ParseUserID(s string) (UserID, error)     { v, e := parseUUID(s); return UserID(v), e }
+func ParseTeamID(s string) (TeamID, error)     { v, e := parseUUID(s); return TeamID(v), e }
 
 // Domain binds an explicit, instance-unique hostname to one tenant.
 type Domain struct {

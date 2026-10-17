@@ -177,3 +177,49 @@ func TestTeamPages(t *testing.T) {
 		require.False(t, perms.HasInTeam(string(f.team.ID()), rbac.PermMembersWrite))
 	})
 }
+
+// Suspending a team, or a member in it, keeps everything in place but grants
+// nothing through the team. The organization suspends its teams; a team lead
+// suspends members of its own team.
+func TestTeamPagesSuspend(t *testing.T) {
+	eachBackend(t, func(t *testing.T, store *xologorm.Store) {
+		ctx := context.Background()
+		f := newTeamPagesFixture(t, store)
+		teamPath := "/orgs/acme/admin/teams/" + string(f.team.ID())
+		require.NoError(t, store.SetTeamMember(ctx, f.team.ID(), f.plainMembership.ID(), nil))
+		inTeam := func(user model.User) bool {
+			t.Helper()
+			perms, err := store.ResolveEffectivePermissions(ctx, user.ID(), f.org.ID())
+			require.NoError(t, err)
+			return perms.InTeam(string(f.team.ID()))
+		}
+		require.True(t, inTeam(f.plain))
+
+		memberStatus := teamPath + "/members/" + string(f.plainMembership.ID()) + "/status"
+		require.Equal(t, http.StatusForbidden, f.do(t, f.plain, http.MethodPost, memberStatus, url.Values{"status": {"suspended"}}).Code)
+		require.Equal(t, http.StatusBadRequest, f.do(t, f.lead, http.MethodPost, memberStatus, url.Values{"status": {"paused"}}).Code)
+		rr := f.do(t, f.lead, http.MethodPost, memberStatus, url.Values{"status": {"suspended"}})
+		require.Equal(t, http.StatusSeeOther, rr.Code, rr.Body.String())
+		require.False(t, inTeam(f.plain))
+		require.True(t, inTeam(f.lead))
+		page := f.do(t, f.owner, http.MethodGet, teamPath, nil)
+		require.Equal(t, http.StatusOK, page.Code)
+		require.Contains(t, page.Body.String(), "suspendu")
+		rr = f.do(t, f.lead, http.MethodPost, memberStatus, url.Values{"status": {"active"}})
+		require.Equal(t, http.StatusSeeOther, rr.Code, rr.Body.String())
+		require.True(t, inTeam(f.plain))
+
+		require.Equal(t, http.StatusForbidden, f.do(t, f.lead, http.MethodPost, teamPath+"/status", url.Values{"status": {"suspended"}}).Code, "the team is the organization's to suspend")
+		rr = f.do(t, f.owner, http.MethodPost, teamPath+"/status", url.Values{"status": {"suspended"}})
+		require.Equal(t, http.StatusSeeOther, rr.Code, rr.Body.String())
+		team, err := store.GetTeamByID(ctx, f.team.ID())
+		require.NoError(t, err)
+		require.Equal(t, model.StatusSuspended, team.Status())
+		require.False(t, inTeam(f.lead))
+		require.Contains(t, f.do(t, f.owner, http.MethodGet, teamPath, nil).Body.String(), "Équipe suspendue")
+		require.Contains(t, f.do(t, f.owner, http.MethodGet, "/orgs/acme/admin/teams", nil).Body.String(), "suspendue")
+		rr = f.do(t, f.owner, http.MethodPost, teamPath+"/status", url.Values{"status": {"active"}})
+		require.Equal(t, http.StatusSeeOther, rr.Code, rr.Body.String())
+		require.True(t, inTeam(f.lead))
+	})
+}

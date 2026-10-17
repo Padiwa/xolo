@@ -76,7 +76,12 @@ templ TeamsPage(vmodel TeamsPageVModel) {
 							@table.Row() {
 								@table.Cell() {
 									<div class="min-w-0">
-										<div class="truncate text-sm font-semibold">{ row.Team.Name() }</div>
+										<div class="flex items-center gap-1.5">
+											<span class="truncate text-sm font-semibold">{ row.Team.Name() }</span>
+											if row.Team.Status() == model.StatusSuspended {
+												@common.Badge(common.ToneWarning, "suspendue")
+											}
+										</div>
 										@common.Mono(vmodel.Org.Slug() + "/" + row.Team.Slug() + "/…")
 									</div>
 								}

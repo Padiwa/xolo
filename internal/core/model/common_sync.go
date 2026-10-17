@@ -10,7 +10,7 @@ import (
 )
 
 // CommonContractVersion is the version of the common contract Xolo targets.
-const CommonContractVersion = "0.1.0-draft.1"
+const CommonContractVersion = "0.1.0-draft.2"
 
 // Families of the common contract, as published in projections and events.
 const (
@@ -19,6 +19,10 @@ const (
 	FamilyOrganization           = "organization"
 	FamilyMember                 = "member"
 	FamilyOrganizationMembership = "organization_membership"
+	// A team groups members of one organization; a team membership places an
+	// organization member in a team.
+	FamilyTeam           = "team"
+	FamilyTeamMembership = "team_membership"
 )
 
 // Families of the business resources Xolo provisions besides the common
@@ -29,16 +33,19 @@ const (
 	FamilyQuota       = "quota"
 	FamilyAlert       = "alert"
 	FamilyProvider    = "provider"
-	FamilyTeam        = "team"
+	// FamilyTeamSettings holds what a team carries beyond the common contract:
+	// description, budget sharing, model grants, middlewares and the roles of
+	// its members on the team scope. It exists exactly when its team does.
+	FamilyTeamSettings = "team_settings"
 )
 
 // CommonFamilies lists the families of the common contract, parents first.
-var CommonFamilies = []string{FamilyTenant, FamilyTenantDomain, FamilyOrganization, FamilyMember, FamilyOrganizationMembership}
+var CommonFamilies = []string{FamilyTenant, FamilyTenantDomain, FamilyOrganization, FamilyMember, FamilyOrganizationMembership, FamilyTeam, FamilyTeamMembership}
 
 // BusinessFamilies lists the business families, parents first: team grants
 // designate the models of providers, team members hold roles, applications
 // are bound to teams, quotas cap applications and teams.
-var BusinessFamilies = []string{FamilyProvider, FamilyCustomRole, FamilyTeam, FamilyApplication, FamilyQuota, FamilyAlert}
+var BusinessFamilies = []string{FamilyProvider, FamilyCustomRole, FamilyTeamSettings, FamilyApplication, FamilyQuota, FamilyAlert}
 
 // IsBusinessFamily tells whether family is a business family.
 func IsBusinessFamily(family string) bool { return slices.Contains(BusinessFamilies, family) }
@@ -47,6 +54,7 @@ func IsBusinessFamily(family string) bool { return slices.Contains(BusinessFamil
 type CommonKey struct {
 	TenantID       string `json:"tenant_id"`
 	OrganizationID string `json:"organization_id,omitempty"`
+	TeamID         string `json:"team_id,omitempty"`
 	MemberID       string `json:"member_id,omitempty"`
 	Hostname       string `json:"hostname,omitempty"`
 	// ResourceID identifies a business resource within its parents.
@@ -58,6 +66,8 @@ type CommonScope struct {
 	Family         string `json:"f"`
 	TenantID       string `json:"t,omitempty"`
 	OrganizationID string `json:"o,omitempty"`
+	// TeamID is the parent of a team membership collection.
+	TeamID string `json:"m,omitempty"`
 }
 
 // CommonItem is the projection of one resource.

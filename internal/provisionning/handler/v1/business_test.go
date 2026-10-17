@@ -87,34 +87,80 @@ func TestBusinessEndpoints(t *testing.T) {
 func TestTeamEndpoints(t *testing.T) {
 	env := newEnv(t, service.WithSecretKey(testSecretKey))
 	orgID, _ := createOrganization(t, env.handler, env.tenantID, "acme", false)
-	teams := env.xoloBase + "/organizations/" + orgID + "/teams"
+	userID, _ := addOrgMember(t, env.handler, env.tenantID, orgID, "member@example.tld", "member")
+	teams := env.tenantBase + "/organizations/" + orgID + "/teams"
 	key := uuid.NewString()
-	body := map[string]any{
-		"slug": "legal", "name": "Juridique", "description": "", "share_quota_equally": false,
-		"model_grants": []any{}, "middleware_ids": []any{}, "members": []any{},
-	}
+	body := map[string]any{"slug": " LEGAL ", "name": "Juridique", "status": "active"}
 
+	// The team belongs to the common contract.
 	rec := call(t, env.handler, http.MethodPut, teams+"/"+key, body)
 	assertStatus(t, rec, http.StatusOK)
-	require.Equal(t, "legal", decodeBody(t, rec)["slug"])
+	require.Equal(t, map[string]any{"slug": "legal", "name": "Juridique", "status": "active"}, decodeBody(t, rec))
+	etag := rec.Header().Get("ETag")
+	rec = call(t, env.handler, http.MethodPut, teams+"/"+key, body)
+	assertStatus(t, rec, http.StatusOK)
+	require.Equal(t, etag, rec.Header().Get("ETag"), "an identical PUT changes nothing")
 
 	rec = call(t, env.handler, http.MethodGet, teams, nil)
 	assertStatus(t, rec, http.StatusOK)
-	require.Len(t, decodeBody(t, rec)["items"], 1)
+	items := decodeBody(t, rec)["items"].([]any)
+	require.Len(t, items, 1)
+	require.Equal(t, map[string]any{"tenant_id": env.tenantID, "organization_id": orgID, "team_id": key}, items[0].(map[string]any)["key"])
 
-	// A slug can change, checked like the slug of a new team.
-	body["slug"] = "renamed"
-	rec = call(t, env.handler, http.MethodPut, teams+"/"+key, body)
-	assertStatus(t, rec, http.StatusOK)
-	require.Equal(t, "renamed", decodeBody(t, rec)["slug"])
 	body["slug"] = "Not a slug"
 	rec = call(t, env.handler, http.MethodPut, teams+"/"+key, body)
-	require.Contains(t, []int{http.StatusConflict, http.StatusUnprocessableEntity}, rec.Code, rec.Body.String())
-
+	require.Contains(t, []int{http.StatusBadRequest, http.StatusUnprocessableEntity}, rec.Code, rec.Body.String())
 	body["slug"] = "legal"
-	delete(body, "members")
-	rec = call(t, env.handler, http.MethodPut, teams+"/"+key, body)
+	rec = call(t, env.handler, http.MethodPut, teams+"/"+key, map[string]any{"slug": "legal", "name": "Juridique", "status": "active", "members": []any{}})
 	assertStatus(t, rec, http.StatusBadRequest)
+	rec = call(t, env.handler, http.MethodPut, teams+"/"+strings.ToUpper(key), body)
+	assertStatus(t, rec, http.StatusBadRequest)
+
+	// A team key never moves to another organization.
+	otherOrg, _ := createOrganization(t, env.handler, env.tenantID, "other", false)
+	rec = call(t, env.handler, http.MethodPut, env.tenantBase+"/organizations/"+otherOrg+"/teams/"+key, body)
+	assertStatus(t, rec, http.StatusConflict)
+	assertErrorCode(t, rec, "conflict")
+
+	// Team memberships need the organization membership and the team.
+	members := teams + "/" + key + "/members"
+	rec = call(t, env.handler, http.MethodPut, members+"/"+userID, map[string]any{"status": "active"})
+	assertStatus(t, rec, http.StatusOK)
+	require.Equal(t, map[string]any{"status": "active"}, decodeBody(t, rec))
+	rec = call(t, env.handler, http.MethodPut, members+"/"+userID, map[string]any{"status": "active", "role": "member"})
+	assertStatus(t, rec, http.StatusBadRequest)
+	stranger := putMember(t, env.handler, env.tenantID, "stranger@example.tld")
+	rec = call(t, env.handler, http.MethodPut, members+"/"+stranger, map[string]any{"status": "active"})
+	assertStatus(t, rec, http.StatusNotFound)
+	assertErrorCode(t, rec, "parent_not_found")
+	rec = call(t, env.handler, http.MethodPut, teams+"/"+uuid.NewString()+"/members/"+userID, map[string]any{"status": "active"})
+	assertStatus(t, rec, http.StatusNotFound)
+	assertErrorCode(t, rec, "parent_not_found")
+	rec = call(t, env.handler, http.MethodGet, members, nil)
+	assertStatus(t, rec, http.StatusOK)
+	items = decodeBody(t, rec)["items"].([]any)
+	require.Len(t, items, 1)
+	require.Equal(t, map[string]any{"tenant_id": env.tenantID, "organization_id": orgID, "team_id": key, "member_id": userID}, items[0].(map[string]any)["key"])
+	rec = call(t, env.handler, http.MethodGet, members+"/"+userID, nil)
+	assertStatus(t, rec, http.StatusOK)
+
+	// The settings live under /v1/xolo and exist with their team only.
+	settings := env.xoloBase + "/organizations/" + orgID + "/team-settings"
+	settingsBody := map[string]any{"description": "Contrats", "share_quota_equally": true, "model_grants": []any{}, "middleware_ids": []any{}, "member_roles": []any{}}
+	rec = call(t, env.handler, http.MethodPut, settings+"/"+key, settingsBody)
+	assertStatus(t, rec, http.StatusOK)
+	require.Equal(t, "Contrats", decodeBody(t, rec)["description"])
+	rec = call(t, env.handler, http.MethodPut, settings+"/"+uuid.NewString(), settingsBody)
+	assertStatus(t, rec, http.StatusNotFound)
+	assertErrorCode(t, rec, "parent_not_found")
+	delete(settingsBody, "member_roles")
+	rec = call(t, env.handler, http.MethodPut, settings+"/"+key, settingsBody)
+	assertStatus(t, rec, http.StatusBadRequest)
+	rec = call(t, env.handler, http.MethodDelete, settings+"/"+key, nil)
+	assertStatus(t, rec, http.StatusMethodNotAllowed)
+	rec = call(t, env.handler, http.MethodGet, settings, nil)
+	assertStatus(t, rec, http.StatusOK)
+	require.Len(t, decodeBody(t, rec)["items"], 1)
 
 	// A team budget hangs from the tenant, like every quota.
 	rec = call(t, env.handler, http.MethodPut, env.xoloBase+"/quotas/"+uuid.NewString(), map[string]any{
@@ -123,8 +169,15 @@ func TestTeamEndpoints(t *testing.T) {
 	assertStatus(t, rec, http.StatusOK)
 	require.Equal(t, "split", decodeBody(t, rec)["cascade"])
 
+	// Deletions are immediate and idempotent.
+	rec = call(t, env.handler, http.MethodDelete, members+"/"+userID, nil)
+	assertStatus(t, rec, http.StatusNoContent)
+	rec = call(t, env.handler, http.MethodDelete, members+"/"+userID, nil)
+	assertStatus(t, rec, http.StatusNoContent)
 	rec = call(t, env.handler, http.MethodDelete, teams+"/"+key, nil)
-	require.Contains(t, []int{http.StatusOK, http.StatusNoContent}, rec.Code, rec.Body.String())
+	assertStatus(t, rec, http.StatusNoContent)
 	rec = call(t, env.handler, http.MethodGet, teams+"/"+key, nil)
+	assertStatus(t, rec, http.StatusNotFound)
+	rec = call(t, env.handler, http.MethodGet, settings+"/"+key, nil)
 	assertStatus(t, rec, http.StatusNotFound)
 }

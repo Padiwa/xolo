@@ -36,6 +36,8 @@ func (h *Handler) mountDeletes() {
 	)
 	h.mux.HandleFunc("DELETE "+tenant+"/domains/{hostname}", h.handleDeleteDomain)
 	h.mux.HandleFunc("DELETE "+org+"/members/{memberID}", h.handleDeleteOrgMember)
+	h.mux.HandleFunc("DELETE "+org+"/teams/{teamID}", h.handleDeleteTeam)
+	h.mux.HandleFunc("DELETE "+org+"/teams/{teamID}/members/{memberID}", h.handleDeleteTeamMembership)
 	if h.lifecycle == nil {
 		return
 	}
@@ -93,6 +95,39 @@ func (h *Handler) handleDeleteOrgMember(w http.ResponseWriter, r *http.Request) 
 	err := h.provisioning.DeleteOrgMember(r.Context(), model.TenantID(scope.TenantID), model.OrgID(scope.OrganizationID), model.UserID(key), condition)
 	if err != nil {
 		writeServiceError(r.Context(), w, err, "could not delete membership")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) handleDeleteTeam(w http.ResponseWriter, r *http.Request) {
+	scope, key, ok := commonTarget(w, r, model.FamilyTeam)
+	if !ok || !noBody(w, r) {
+		return
+	}
+	condition, ok := commonCondition(w, r)
+	if !ok {
+		return
+	}
+	if err := h.provisioning.DeleteTeam(r.Context(), model.TenantID(scope.TenantID), model.OrgID(scope.OrganizationID), model.TeamID(key), condition); err != nil {
+		writeServiceError(r.Context(), w, err, "could not delete team")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) handleDeleteTeamMembership(w http.ResponseWriter, r *http.Request) {
+	scope, key, ok := commonTarget(w, r, model.FamilyTeamMembership)
+	if !ok || !noBody(w, r) {
+		return
+	}
+	condition, ok := commonCondition(w, r)
+	if !ok {
+		return
+	}
+	err := h.provisioning.DeleteTeamMembership(r.Context(), model.TenantID(scope.TenantID), model.OrgID(scope.OrganizationID), model.TeamID(scope.TeamID), model.UserID(key), condition)
+	if err != nil {
+		writeServiceError(r.Context(), w, err, "could not delete team membership")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

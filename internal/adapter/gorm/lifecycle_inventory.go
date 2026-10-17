@@ -54,7 +54,7 @@ var lifecycleTables = []lifecycleTable{
 	{table: "teams", org: "r.org_id", family: model.FamilyTeam},
 	{table: "team_model_grants", org: "(SELECT org_id FROM teams WHERE id = r.team_id)", key: []string{"team_id", "model_id", "model_kind"}},
 	{table: "team_middlewares", org: "(SELECT org_id FROM teams WHERE id = r.team_id)", key: []string{"team_id", "middleware_id"}},
-	{table: "team_members", org: "(SELECT org_id FROM teams WHERE id = r.team_id)", member: "(SELECT user_id FROM memberships WHERE id = r.membership_id)", key: []string{"team_id", "membership_id"}},
+	{table: "team_members", org: "(SELECT org_id FROM teams WHERE id = r.team_id)", member: "(SELECT user_id FROM memberships WHERE id = r.membership_id)", family: model.FamilyTeamMembership, key: []string{"team_id", "membership_id"}},
 	{table: "team_member_roles", org: "(SELECT org_id FROM teams WHERE id = r.team_id)", member: "(SELECT user_id FROM memberships WHERE id = r.membership_id)", key: []string{"team_id", "membership_id", "role_id"}},
 	{table: "applications", org: "r.org_id", family: model.FamilyApplication},
 	{table: "application_roles", org: "(SELECT org_id FROM applications WHERE id = r.application_id)", key: []string{"application_id", "role_id"}},

@@ -89,6 +89,11 @@ func validateCommonScope(scope model.CommonScope, key string) error {
 			return errors.WithStack(port.ErrInvalid)
 		}
 	}
+	if scope.TeamID != "" {
+		if _, err := model.ParseTeamID(scope.TeamID); err != nil || scope.Family != model.FamilyTeamMembership {
+			return errors.WithStack(port.ErrInvalid)
+		}
+	}
 	switch scope.Family {
 	case model.FamilyTenant:
 		if scope.TenantID != "" || scope.OrganizationID != "" {
@@ -98,8 +103,12 @@ func validateCommonScope(scope model.CommonScope, key string) error {
 		if scope.TenantID == "" || scope.OrganizationID != "" {
 			return errors.WithStack(port.ErrInvalid)
 		}
-	case model.FamilyOrganizationMembership, model.FamilyCustomRole, model.FamilyTeam, model.FamilyApplication, model.FamilyAlert, model.FamilyProvider:
+	case model.FamilyOrganizationMembership, model.FamilyTeam, model.FamilyCustomRole, model.FamilyTeamSettings, model.FamilyApplication, model.FamilyAlert, model.FamilyProvider:
 		if scope.TenantID == "" || scope.OrganizationID == "" {
+			return errors.WithStack(port.ErrInvalid)
+		}
+	case model.FamilyTeamMembership:
+		if scope.TenantID == "" || scope.OrganizationID == "" || scope.TeamID == "" {
 			return errors.WithStack(port.ErrInvalid)
 		}
 	case model.FamilyQuota:
@@ -123,8 +132,10 @@ func validateCommonScope(scope model.CommonScope, key string) error {
 		_, err = model.ParseTenantID(key)
 	case model.FamilyOrganization:
 		_, err = model.ParseOrgID(key)
-	case model.FamilyMember, model.FamilyOrganizationMembership:
+	case model.FamilyMember, model.FamilyOrganizationMembership, model.FamilyTeamMembership:
 		_, err = model.ParseUserID(key)
+	case model.FamilyTeam, model.FamilyTeamSettings:
+		_, err = model.ParseTeamID(key)
 	default:
 		_, _, err = model.ParseBusinessKey(key)
 	}
@@ -154,17 +165,37 @@ func commonParents(db *gorm.DB, scope model.CommonScope) error {
 			return errors.WithStack(port.ErrParentNotFound)
 		}
 	}
+	if scope.TeamID != "" {
+		if err := db.Table("teams").Where("id = ? AND org_id = ?", scope.TeamID, scope.OrganizationID).Count(&n).Error; err != nil {
+			return errors.WithStack(err)
+		}
+		if n != 1 {
+			return errors.WithStack(port.ErrParentNotFound)
+		}
+	}
 	return nil
 }
 
 // scopeQuery filters projections on the whole scope, tenant included: a
-// collection never reaches into another tenant.
+// collection never reaches into another tenant. The members of a team are
+// the key range of its team id.
 func scopeQuery(db *gorm.DB, scope model.CommonScope) *gorm.DB {
 	q := db.Model(&ProvisioningProjection{}).Where("family = ? AND org_id = ?", scope.Family, scope.OrganizationID)
 	if scope.Family != model.FamilyTenant {
 		q = q.Where("tenant_id = ?", scope.TenantID)
 	}
+	if scope.Family == model.FamilyTeamMembership {
+		q = q.Where("resource_key LIKE ?", scope.TeamID+":%")
+	}
 	return q
+}
+
+// projectionKey is the stored key of a resource of the scope.
+func projectionKey(scope model.CommonScope, key string) string {
+	if scope.Family == model.FamilyTeamMembership {
+		return teamMembershipKey(scope.TeamID, key)
+	}
+	return key
 }
 
 func readProjection(db *gorm.DB, scope model.CommonScope, key string) (model.CommonItem, error) {
@@ -178,7 +209,7 @@ func readProjection(db *gorm.DB, scope model.CommonScope, key string) (model.Com
 		return model.CommonItem{}, err
 	}
 	var rows []ProvisioningProjection
-	if err := scopeQuery(db, scope).Where("resource_key = ?", key).Limit(1).Find(&rows).Error; err != nil {
+	if err := scopeQuery(db, scope).Where("resource_key = ?", projectionKey(scope, key)).Limit(1).Find(&rows).Error; err != nil {
 		return model.CommonItem{}, errors.WithStack(err)
 	}
 	if len(rows) == 0 {

@@ -79,8 +79,11 @@ N'exposez pas ce port sur un réseau public : réservez-le au réseau d'administ
 | `PUT` | `/v1/tenants/{tenantID}/organizations/{orgID}` | `{"slug","name","status"}` |
 | `PUT` | `/v1/tenants/{tenantID}/members/{memberID}` | `{"email","tenant_role","status"}`, `"display_name"` et `"identity"` facultatifs |
 | `PUT` | `/v1/tenants/{tenantID}/organizations/{orgID}/members/{memberID}` | `{"role","status"}` |
+| `PUT` | `/v1/tenants/{tenantID}/organizations/{orgID}/teams/{teamID}` | `{"slug","name","status"}` |
+| `PUT` | `/v1/tenants/{tenantID}/organizations/{orgID}/teams/{teamID}/members/{memberID}` | `{"status"}` |
 | `DELETE` | `/v1/tenants/{tenantID}/domains/{hostname}` | — supprimé immédiatement, `204` |
 | `DELETE` | `/v1/tenants/{tenantID}/organizations/{orgID}/members/{memberID}` | — supprimée immédiatement, `204` |
+| `DELETE` | `/v1/tenants/{tenantID}/organizations/{orgID}/teams/{teamID}`, `…/teams/{teamID}/members/{memberID}` | — supprimée immédiatement, `204` (extension Xolo) |
 | `DELETE` | `/v1/tenants/{tenantID}`, `…/organizations/{orgID}`, `…/members/{memberID}` | — suppression enregistrée, purge différée : voir [Cycle de vie des ressources](#cycle-de-vie-des-ressources) |
 
 Chacune de ces ressources peut aussi être lue, listée et suivie via le flux
@@ -226,6 +229,36 @@ Une organisation garde un propriétaire actif dès qu'elle en a un : rétrograde
 ou suspendre le dernier est refusé avec `409 last_owner`. Une organisation ou un
 membre d'un autre tenant donne `404 parent_not_found`.
 
+### Équipes
+
+`PUT …/organizations/{orgID}/teams/{teamID}` crée une équipe de
+l'organisation ou change son slug, son nom ou son statut. Les équipes sont à
+plat. Le slug est unique dans l'organisation et forme le segment d'équipe des
+noms de modèles `<org>/<équipe>/<modèle>` : un slug nouveau ou modifié est
+vérifié comme celui d'une nouvelle équipe (`409 conflict` quand un nom de
+modèle de l'organisation commence par `<slug>/`), et les clients qui ont
+enregistré des noms de modèles avec l'ancien slug ne les résolvent plus. Un
+UUID d'équipe est global : celui d'une autre organisation répond
+`409 conflict`. Un `PUT` ne touche jamais aux réglages de l'équipe, voir
+[Ressources métier](#ressources-metier) ; une nouvelle équipe n'en a pas.
+
+`PUT …/teams/{teamID}/members/{memberID}` place un membre de l'organisation
+dans l'équipe, ou change son statut. Le membre doit avoir une adhésion à
+l'organisation, quel que soit son statut, et l'équipe doit appartenir à
+l'organisation : sinon `404 parent_not_found`. Une appartenance à une équipe
+n'a pas de rôle dans le contrat commun : une nouvelle n'a aucun rôle
+d'équipe, une existante garde les siens.
+
+Une équipe `suspended`, ou un membre d'équipe `suspended`, ne donne rien par
+l'équipe : aucun modèle, aucun rôle d'équipe, aucune part du budget de
+l'équipe. Membres, rôles et réglages sont conservés. La suspension ne se
+propage jamais. Retirer une adhésion à l'organisation retire le membre de ses
+équipes et publie `team_membership.deleted.v1`. Le `DELETE` d'une équipe ou
+d'une appartenance est une extension du contrat commun : immédiat, idempotent,
+avec un `If-Match` facultatif. Une équipe à laquelle une application est
+rattachée, ou qui porte seule un middleware, n'est pas supprimée
+(`409 conflict`).
+
 ## Domaines et routage
 
 `PUT /v1/tenants/{tenantID}/domains/{hostname}` déclare un nom d'hôte du tenant
@@ -258,8 +291,8 @@ reçoit la position suivante d'un **flux d'événements** unique et publie un
 
 | Méthode | Route | Réponse |
 | --- | --- | --- |
-| `GET` | `/v1/tenants/{tenantID}`, `…/domains/{hostname}`, `…/organizations/{orgID}`, `…/members/{memberID}`, `…/organizations/{orgID}/members/{memberID}` | La représentation, avec son en-tête `ETag` |
-| `GET` | `/v1/tenants`, `…/domains`, `…/organizations`, `…/members`, `…/organizations/{orgID}/members` | `{"items":[{"key","representation","etag"}],"next_cursor"}` |
+| `GET` | `/v1/tenants/{tenantID}`, `…/domains/{hostname}`, `…/organizations/{orgID}`, `…/members/{memberID}`, `…/organizations/{orgID}/members/{memberID}`, `…/organizations/{orgID}/teams/{teamID}`, `…/teams/{teamID}/members/{memberID}` | La représentation, avec son en-tête `ETag` |
+| `GET` | `/v1/tenants`, `…/domains`, `…/organizations`, `…/members`, `…/organizations/{orgID}/members`, `…/organizations/{orgID}/teams`, `…/teams/{teamID}/members` | `{"items":[{"key","representation","etag"}],"next_cursor"}` |
 | `GET` | `/v1/events/cursor` | `{"cursor"}` : la fin actuelle du flux |
 | `GET` | `/v1/events?cursor=` | `{"items":[…],"next_cursor","has_more"}` |
 
@@ -315,9 +348,11 @@ sans représentation ni donnée personnelle :
 
 - `type` vaut `<resource_type>.created.v1`, `.updated.v1` ou `.deleted.v1`, où
   `resource_type` est `tenant`, `tenant_domain`, `organization`, `member`,
-  `organization_membership` ou l'une des familles métier `provider`,
-  `custom_role`, `team`, `application`, `quota` et `alert`. Une suppression ne porte
-  pas d'`etag`.
+  `organization_membership`, `team`, `team_membership` ou l'une des familles
+  métier `provider`, `custom_role`, `team_settings`, `application`, `quota` et
+  `alert`. La clé d'une équipe est `{"tenant_id","organization_id","team_id"}`,
+  celle d'une appartenance y ajoute `member_id`. Une suppression ne porte pas
+  d'`etag`.
 - **Un événement par ressource et par commit.** Un no-op ou une transaction
   annulée ne publie rien. Dans un commit, les suppressions viennent d'abord,
   des enfants vers les parents, puis les créations et modifications, des
@@ -548,7 +583,7 @@ et événements. Le manifeste annonce `business_resources`.
 | Méthode | Route |
 |---|---|
 | `GET`, `GET`, `PUT`, `DELETE` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/roles[/{key}]` |
-| `GET`, `GET`, `PUT`, `DELETE` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/teams[/{key}]` |
+| `GET`, `GET`, `PUT` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/team-settings[/{teamID}]` |
 | `GET`, `GET`, `PUT`, `DELETE` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/applications[/{key}]` |
 | `GET`, `GET`, `PUT`, `DELETE` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/alerts[/{key}]` |
 | `GET`, `GET`, `PUT`, `DELETE` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/providers[/{key}]` |
@@ -562,7 +597,7 @@ Les représentations sont en snake_case et complètes : chaque champ est requis,
 | Famille | Représentation |
 |---|---|
 | `custom_role` | `{"name","description","permissions":[…]}` |
-| `team` | `{"slug","name","description","share_quota_equally","model_grants":[{"model_id","kind"}],"middleware_ids":[…],"members":[{"user_id","role_ids":[…]}]}` |
+| `team_settings` | `{"description","share_quota_equally","model_grants":[{"model_id","kind"}],"middleware_ids":[…],"member_roles":[{"user_id","role_ids":[…]}]}` |
 | `application` | `{"name","description","active","role_ids":[…]}`, plus `"team_id"` facultatif (vide pour aucune équipe) |
 | `quota` | `{"scope","scope_id","currency","daily_budget","monthly_budget","yearly_budget"}`, budgets en microcents ou `null`, plus `"cascade"` facultatif (`free` par défaut, `capped` ou `split`) |
 | `alert` | `{"name","description","scope","owner_id","query","aggregation","window_seconds","comparator","threshold","for_seconds","enabled"}` |
@@ -578,8 +613,8 @@ Les représentations sont en snake_case et complètes : chaque champ est requis,
   LLM, un provider de l'organisation) ; `middleware_ids` désigne des
   middlewares de l'organisation, et une équipe ne peut ni retirer un middleware
   qu'elle seule porte, ni être supprimée avec lui (`409`) : il s'appliquerait
-  alors à toute l'organisation ; un membre d'équipe est un membre de
-  l'organisation, et ses `role_ids`, comme ceux d'une application, désignent
+  alors à toute l'organisation ; un utilisateur de `member_roles` est un membre
+  de l'équipe, et ses `role_ids`, comme ceux d'une application, désignent
   des rôles de l'organisation, mais jamais, à la différence de ces derniers, un rôle intégré (`422`) ; `team_id` désigne une équipe de l'organisation ;
   un quota plafonne une organisation du tenant, un membre du tenant, une
   application ou une équipe d'une de ses organisations, ou un membre d'une
@@ -590,11 +625,13 @@ Les représentations sont en snake_case et complètes : chaque champ est requis,
   `404 not_found`, comme une ressource absente.
 - **Champs immuables.** Le `scope` et le `scope_id` d'un quota, le `scope` et
   l'`owner_id` d'une alerte ne changent jamais (`409 conflict`). Une portée porte un seul quota : une autre clé sur la même
-  portée répond `409 conflict`. Le `slug` d'une équipe, à sa création comme à
-  son changement, suit le format des slugs d'organisation, n'est porté par
-  aucune autre équipe et ne peut pas commencer le nom d'un modèle de
-  l'organisation (`409 conflict`). Le changer casse les noms de modèles que les
-  clients ont enregistrés avec l'ancien.
+  portée répond `409 conflict`.
+- **Les réglages d'une équipe** existent exactement quand l'équipe existe : le
+  contrat commun crée et supprime l'équipe, voir [Équipes](#equipes), un `PUT`
+  de réglages sur une équipe absente répond `404 parent_not_found`, et la
+  collection n'a pas de `DELETE`. `member_roles` liste les membres de l'équipe
+  qui y tiennent des rôles ; un membre omis, ou listé sans rôle, n'en tient
+  aucun. Leur autorité d'écriture est celle de la famille `team`.
 - **Répartition des budgets.** Le `cascade` d'un quota d'organisation ou
   d'équipe contraint les quotas de ses équipes ou de ses membres à leur
   écriture : `capped`, chacun au plus égal au parent, période par période ;
@@ -618,9 +655,7 @@ Les représentations sont en snake_case et complètes : chaque champ est requis,
   un `If-Match` facultatif, et publie `<family>.deleted.v1`. Supprimer une
   ressource absente, ou celle d'une autre organisation, ne change rien, sauf si
   `If-Match` désigne une révision (`412`). Supprimer une application retire ses
-  rôles, ses jetons et son quota ; un provider, ses modèles ; une équipe, ses
-  membres et ses quotas, et elle est refusée (`409 conflict`) tant qu'une
-  application y est rattachée ; un quota conserve
+  rôles, ses jetons et son quota ; un provider, ses modèles ; un quota conserve
   la consommation enregistrée sur son périmètre. Un rôle intégré est refusé
   (`409 conflict`). Un périmètre gelé les refuse toutes
   (`409 resource_deleted`). Elles ne dépendent pas de
@@ -634,6 +669,15 @@ Les représentations sont en snake_case et complètes : chaque champ est requis,
   `team.created.v1`, et les représentations des rôles (sans `model_grants`),
   des applications (avec `team_id`) et des quotas (avec `cascade`) sont
   publiées de nouveau quand elles changent.
+- La migration `202610200001` fait passer les équipes au contrat commun, elle
+  aussi avec tous les serveurs arrêtés. Équipes et membres d'équipe reçoivent
+  un statut, `active`. Une équipe créée localement avec un xid reçoit un UUID :
+  ce qui lui est rattaché (grants, middlewares, membres, rôles, applications,
+  jetons, invitations, modèles personnels, enregistrements d'usage, budgets)
+  suit, et le flux publie la suppression de l'ancienne clé et la création de la
+  nouvelle. Chaque équipe est ensuite publiée en ressources `team`,
+  `team_settings` et `team_membership` ; l'ancienne route `/v1/xolo/…/teams`,
+  qui intégrait les membres, disparaît.
 
 Limite connue : le cache de chaque processus garde valides les jetons d'une
 application désactivée jusqu'à l'expiration de ses entrées
@@ -648,7 +692,7 @@ invitations), le système de pilotage (cet écouteur), ou les deux.
 
 | Variable | Défaut | Description |
 |---|---|---|
-| `XOLO_OWNERSHIP` | — | Paires `famille=autorité` séparées par des virgules. Familles : `tenant`, `tenant_domain`, `organization`, `member`, `organization_membership`, `subscription`, et les familles métier `provider`, `custom_role`, `team`, `application`, `quota`, `alert`. Autorités : `shared`, `local`, `control_plane`. Les familles omises valent `shared` ; une famille ou une autorité inconnue empêche le démarrage. |
+| `XOLO_OWNERSHIP` | — | Paires `famille=autorité` séparées par des virgules. Familles : `tenant`, `tenant_domain`, `organization`, `member`, `organization_membership`, `team`, `team_membership`, `subscription`, et les familles métier `provider`, `custom_role`, `application`, `quota`, `alert` ; `team` gouverne aussi les réglages d'équipe. Autorités : `shared`, `local`, `control_plane`. Les familles omises valent `shared` ; une famille ou une autorité inconnue empêche le démarrage. |
 
 ```dotenv
 XOLO_OWNERSHIP=tenant=control_plane,tenant_domain=control_plane,organization=control_plane,member=control_plane,organization_membership=control_plane,subscription=control_plane
@@ -708,7 +752,7 @@ sans prendre de verrou. Le format, `xolo-adoption/1`, est du NDJSON
 (`application/x-ndjson`) :
 
 ```text
-{"version":"xolo-adoption/1","contract":"0.1.0-draft.1","source":"urn:uuid:…","c0":"…","families":["tenant","tenant_domain","organization","member","organization_membership","provider","custom_role","application","quota","alert"]}
+{"version":"xolo-adoption/1","contract":"0.1.0-draft.2","source":"urn:uuid:…","c0":"…","families":["tenant","tenant_domain","organization","member","organization_membership","team","team_membership","provider","custom_role","team_settings","application","quota","alert"]}
 {"family":"tenant","key":{"tenant_id":"…"},"representation":{…},"etag":"W/\"42\""}
 …
 {"count":128,"complete":true,"sha256":"…"}
@@ -1009,9 +1053,10 @@ actuel.
 | `…/organizations/{orgID}/roles[/{roleID}]` (toutes méthodes) | `/v1/xolo/…/organizations/{orgID}/roles[/{key}]`, avec les changements ci-dessous |
 | `GET /v1/xolo/…/roles` (intégrés et personnalisés, `roleDTO` en camelCase) | `GET /v1/xolo/…/roles` liste les rôles personnalisés en page de projections ; les rôles intégrés via `GET /v1/xolo/…/roles/builtin` |
 | `GET /v1/xolo/…/roles/{roleID}` (`roleDTO` en camelCase) | Même route : la représentation snake_case et son `ETag` |
-| `POST /v1/xolo/…/roles` `{name, description?, permissions?, modelGrants?}` | Même route, la représentation snake_case complète `{name, description, permissions}` ; `201` avec `{key, representation, etag}`. Les accès aux modèles passent par les équipes : `/v1/xolo/…/teams/{key}` |
+| `POST /v1/xolo/…/roles` `{name, description?, permissions?, modelGrants?}` | Même route, la représentation snake_case complète `{name, description, permissions}` ; `201` avec `{key, representation, etag}`. Les accès aux modèles passent par les équipes : `/v1/xolo/…/team-settings/{teamID}` |
 | `PUT /v1/xolo/…/roles/{roleID}` partiel `{name?, description?, permissions?, modelGrants?}` | Même route, la représentation complète, `If-Match` optionnel ; crée le rôle sous un UUID de votre choix |
 | `GET`, `PUT /v1/tenants/{tenantID}/users` | `GET`, `PUT /v1/xolo/tenants/{tenantID}/users` (mêmes corps) |
+| `GET`, `PUT`, `DELETE /v1/xolo/…/organizations/{orgID}/teams[/{key}]` (membres intégrés) | L'équipe via le contrat commun, `/v1/tenants/{tenantID}/organizations/{orgID}/teams[/{teamID}]` `{slug, name, status}`, chaque membre via `…/teams/{teamID}/members/{memberID}` `{status}`, le reste via `/v1/xolo/…/team-settings/{teamID}` |
 | `GET /v1/tenants/{tenantID}/users/{userID}` | `GET /v1/xolo/tenants/{tenantID}/users/{userID}` |
 | `PATCH /v1/tenants/{tenantID}/users/{userID}` `{email, displayName, active}` | `PUT /v1/tenants/{tenantID}/members/{userID}` `{email, display_name, tenant_role, status}` |
 

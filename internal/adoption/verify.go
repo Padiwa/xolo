@@ -147,10 +147,15 @@ type inventoryState struct {
 	tenants       map[string]bool
 	organizations map[string]string
 	members       map[string]string
+	// memberships holds "<organization>:<member>"; teams the organization of
+	// each team.
+	memberships map[string]bool
+	teams       map[string]string
 }
 
 func newInventoryState() *inventoryState {
-	return &inventoryState{seen: map[string]bool{}, tenants: map[string]bool{}, organizations: map[string]string{}, members: map[string]string{}}
+	return &inventoryState{seen: map[string]bool{}, tenants: map[string]bool{}, organizations: map[string]string{}, members: map[string]string{},
+		memberships: map[string]bool{}, teams: map[string]string{}}
 }
 
 // allow accepts the families an export declares: an ordered selection of
@@ -218,6 +223,9 @@ func (s *inventoryState) add(r Record) error {
 	if k.ResourceID != "" {
 		return errors.New("unexpected resource key")
 	}
+	if k.TeamID != "" && r.Family != model.FamilyTeam && r.Family != model.FamilyTeamMembership {
+		return errors.New("unexpected team key")
+	}
 	switch r.Family {
 	case model.FamilyTenant:
 		if k.OrganizationID != "" || k.MemberID != "" || k.Hostname != "" {
@@ -246,6 +254,22 @@ func (s *inventoryState) add(r Record) error {
 		if s.organizations[k.OrganizationID] != k.TenantID || s.members[k.MemberID] != k.TenantID {
 			return errors.New("missing membership parent")
 		}
+		s.memberships[k.OrganizationID+":"+k.MemberID] = true
+	case model.FamilyTeam:
+		if _, err := model.ParseTeamID(k.TeamID); err != nil || k.MemberID != "" || k.Hostname != "" {
+			return errors.New("invalid team key")
+		}
+		if s.organizations[k.OrganizationID] != k.TenantID {
+			return errors.New("missing team parent")
+		}
+		s.teams[k.TeamID] = k.OrganizationID
+	case model.FamilyTeamMembership:
+		if k.Hostname != "" {
+			return errors.New("invalid team membership key")
+		}
+		if s.organizations[k.OrganizationID] != k.TenantID || s.teams[k.TeamID] != k.OrganizationID || !s.memberships[k.OrganizationID+":"+k.MemberID] {
+			return errors.New("missing team membership parent")
+		}
 	}
 	return nil
 }
@@ -254,8 +278,11 @@ func (s *inventoryState) add(r Record) error {
 // organization it hangs from, except a quota, which hangs from its tenant.
 func (s *inventoryState) addBusiness(r Record) error {
 	k := r.Key
-	if _, _, err := model.ParseBusinessKey(k.ResourceID); err != nil || k.MemberID != "" || k.Hostname != "" {
+	if _, _, err := model.ParseBusinessKey(k.ResourceID); err != nil || k.MemberID != "" || k.Hostname != "" || k.TeamID != "" {
 		return errors.New("invalid resource key")
+	}
+	if r.Family == model.FamilyTeamSettings && s.teams[k.ResourceID] != k.OrganizationID {
+		return errors.New("missing team parent")
 	}
 	if r.Family == model.FamilyQuota {
 		if k.OrganizationID != "" {

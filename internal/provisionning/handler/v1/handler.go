@@ -64,6 +64,8 @@ func NewHandler(provisioning *service.ProvisioningService, version string, optio
 		orgs        = tenant + "/organizations"
 		members     = tenant + "/members"
 		memberships = orgs + "/{orgID}/members"
+		teams       = orgs + "/{orgID}/teams"
+		teamMembers = teams + "/{teamID}/members"
 	)
 	for _, route := range []struct {
 		collection, unit, family string
@@ -74,6 +76,8 @@ func NewHandler(provisioning *service.ProvisioningService, version string, optio
 		{orgs, orgs + "/{orgID}", model.FamilyOrganization, h.handlePutOrganization},
 		{members, members + "/{memberID}", model.FamilyMember, h.handlePutTenantMember},
 		{memberships, memberships + "/{memberID}", model.FamilyOrganizationMembership, h.handlePutOrgMember},
+		{teams, teams + "/{teamID}", model.FamilyTeam, h.handlePutTeam},
+		{teamMembers, teamMembers + "/{memberID}", model.FamilyTeamMembership, h.handlePutTeamMembership},
 	} {
 		h.mux.HandleFunc("GET "+route.collection, h.handleCommonList(route.family))
 		h.mux.HandleFunc("GET "+route.unit, h.handleCommonGet(route.family))

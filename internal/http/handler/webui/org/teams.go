@@ -37,11 +37,13 @@ func (h *Handler) mountTeams() {
 	h.mux.Handle("GET /{orgSlug}/admin/teams/{teamID}", http.HandlerFunc(h.getTeamPage))
 	h.mux.Handle("POST /{orgSlug}/admin/teams/{teamID}/edit", http.HandlerFunc(h.updateTeam))
 	h.mux.Handle("POST /{orgSlug}/admin/teams/{teamID}/delete", http.HandlerFunc(h.deleteTeam))
+	h.mux.Handle("POST /{orgSlug}/admin/teams/{teamID}/status", http.HandlerFunc(h.setTeamStatus))
 	h.mux.Handle("POST /{orgSlug}/admin/teams/{teamID}/budget", http.HandlerFunc(h.saveTeamBudget))
 	h.mux.Handle("POST /{orgSlug}/admin/teams/{teamID}/members", http.HandlerFunc(h.addTeamMember))
 	h.mux.Handle("GET /{orgSlug}/admin/teams/{teamID}/members/{membershipID}", http.HandlerFunc(h.getTeamMemberPage))
 	h.mux.Handle("POST /{orgSlug}/admin/teams/{teamID}/members/{membershipID}", http.HandlerFunc(h.updateTeamMemberRoles))
 	h.mux.Handle("POST /{orgSlug}/admin/teams/{teamID}/members/{membershipID}/budget", http.HandlerFunc(h.saveTeamMemberBudget))
+	h.mux.Handle("POST /{orgSlug}/admin/teams/{teamID}/members/{membershipID}/status", http.HandlerFunc(h.setTeamMemberStatus))
 	h.mux.Handle("DELETE /{orgSlug}/admin/teams/{teamID}/members/{membershipID}", http.HandlerFunc(h.removeTeamMember))
 }
 
@@ -489,6 +491,80 @@ func (h *Handler) updateTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, teamURL(scope.org, team)+"?success=saved", http.StatusSeeOther)
+}
+
+// formStatus reads the status of a suspend or reactivate form.
+func formStatus(w http.ResponseWriter, r *http.Request) (model.Status, bool) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "Invalid form", http.StatusBadRequest)
+		return "", false
+	}
+	status := model.Status(r.FormValue("status"))
+	if !status.Valid() {
+		http.Error(w, "Invalid status", http.StatusBadRequest)
+		return "", false
+	}
+	return status, true
+}
+
+// setTeamStatus suspends or reactivates the team: a suspended team grants
+// nothing to its members, who stay in it.
+func (h *Handler) setTeamStatus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	scope, ok := h.resolveTeamScope(w, r, true)
+	if !ok {
+		return
+	}
+	if !scope.perms.Has(rbac.PermTeamsWrite) {
+		forbidden(w)
+		return
+	}
+	status, ok := formStatus(w, r)
+	if !ok {
+		return
+	}
+	team := model.CopyTeam(scope.team)
+	team.SetStatus(status)
+	if err := h.teamStore.SaveTeam(ctx, team); err != nil {
+		if webcommon.RejectLocked(w, r, err) {
+			return
+		}
+		slog.ErrorContext(ctx, "could not change team status", slogx.Error(err))
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, teamURL(scope.org, team)+"?success=saved", http.StatusSeeOther)
+}
+
+// setTeamMemberStatus suspends or reactivates a member in the team: a
+// suspended member keeps its roles but receives nothing through the team.
+func (h *Handler) setTeamMemberStatus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	scope, ok := h.resolveTeamScope(w, r, true)
+	if !ok {
+		return
+	}
+	if !scope.can(rbac.PermMembersWrite) {
+		forbidden(w)
+		return
+	}
+	member, ok := h.teamMember(w, r, scope)
+	if !ok {
+		return
+	}
+	status, ok := formStatus(w, r)
+	if !ok {
+		return
+	}
+	if err := h.teamStore.SetTeamMemberStatus(ctx, scope.team.ID(), member.MembershipID(), status); err != nil {
+		if webcommon.RejectLocked(w, r, err) {
+			return
+		}
+		slog.ErrorContext(ctx, "could not change team member status", slogx.Error(err))
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, teamURL(scope.org, scope.team)+"?success=saved", http.StatusSeeOther)
 }
 
 func (h *Handler) deleteTeam(w http.ResponseWriter, r *http.Request) {

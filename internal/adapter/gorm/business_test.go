@@ -60,8 +60,7 @@ func newBusinessFixture(t *testing.T, store *xologorm.Store, svc *service.Provis
 		Name: "Analyst", Permissions: []string{string(rbac.PermUsageRead)},
 	})
 	require.NoError(t, err)
-	_, err = svc.PutTeam(ctx, testTenantID, fixture.org, f.team, noCondition, teamSettings(f))
-	require.NoError(t, err)
+	provisionTeam(t, svc, fixture.org, f)
 	_, err = svc.PutApplication(ctx, testTenantID, fixture.org, f.app, noCondition, model.ApplicationSettings{Name: "Batch", Active: true, RoleIDs: []string{f.role}, TeamID: f.team})
 	require.NoError(t, err)
 	_, err = svc.PutQuota(ctx, testTenantID, f.quota, noCondition, model.QuotaSettings{Scope: model.QuotaScopeApplication, ScopeID: f.app, Currency: "EUR", MonthlyBudget: ptrTo(int64(1000))})
@@ -71,15 +70,33 @@ func newBusinessFixture(t *testing.T, store *xologorm.Store, svc *service.Provis
 	return f
 }
 
-// teamSettings grants the fixture model to a team holding the fixture user,
-// with the fixture role on the team.
+// teamResource is the common representation of the fixture team.
+func teamResource() service.CommonResource {
+	return service.CommonResource{Slug: "analysts", Name: "Analysts", Status: model.StatusActive}
+}
+
+// teamSettings grants the fixture model to the fixture team, whose fixture
+// user holds the fixture role on the team.
 func teamSettings(f businessFixture) model.TeamSettings {
 	return model.TeamSettings{
-		Slug: "analysts", Name: "Analysts", Description: "",
+		Description:   "",
 		ModelGrants:   []model.ModelGrantSettings{{ModelID: string(f.llm), Kind: rbac.ModelKindLLM}},
 		MiddlewareIDs: []string{},
-		Members:       []model.TeamMemberSettings{{UserID: string(f.user), RoleIDs: []string{f.role}}},
+		MemberRoles:   []model.TeamMemberSettings{{UserID: string(f.user), RoleIDs: []string{f.role}}},
 	}
+}
+
+// provisionTeam creates the fixture team through the common contract, adds
+// the fixture user to it, then writes its settings.
+func provisionTeam(t *testing.T, svc *service.ProvisioningService, org model.OrgID, f businessFixture) {
+	t.Helper()
+	ctx := t.Context()
+	_, err := svc.PutTeam(ctx, testTenantID, org, model.TeamID(f.team), teamResource())
+	require.NoError(t, err)
+	_, err = svc.PutTeamMembership(ctx, testTenantID, org, model.TeamID(f.team), f.user, model.StatusActive)
+	require.NoError(t, err)
+	_, err = svc.PutTeamSettings(ctx, testTenantID, org, f.team, noCondition, teamSettings(f))
+	require.NoError(t, err)
 }
 
 func businessScopes(fixture ownershipFixture, f businessFixture) map[string]model.CommonScope {
@@ -87,7 +104,7 @@ func businessScopes(fixture ownershipFixture, f businessFixture) map[string]mode
 		return model.CommonScope{Family: family, TenantID: string(testTenantID), OrganizationID: string(fixture.org)}
 	}
 	return map[string]model.CommonScope{
-		f.provider: org(model.FamilyProvider), f.role: org(model.FamilyCustomRole), f.team: org(model.FamilyTeam), f.app: org(model.FamilyApplication),
+		f.provider: org(model.FamilyProvider), f.role: org(model.FamilyCustomRole), f.team: org(model.FamilyTeamSettings), f.app: org(model.FamilyApplication),
 		f.alert: org(model.FamilyAlert), f.quota: {Family: model.FamilyQuota, TenantID: string(testTenantID)},
 	}
 }
@@ -106,10 +123,13 @@ func TestBusinessRoundTrip(t *testing.T) {
 
 		events, _ := feedSince(t, store, cursor)
 		require.Equal(t, []string{
-			"provider.created.v1", "custom_role.created.v1", "team.created.v1", "application.created.v1", "quota.created.v1", "alert.created.v1",
+			"provider.created.v1", "custom_role.created.v1", "team.created.v1", "team_settings.created.v1", "team_membership.created.v1",
+			"team_settings.updated.v1", "application.created.v1", "quota.created.v1", "alert.created.v1",
 		}, eventTypes(events))
-		require.Equal(t, f.app, events[3].Data.Key.ResourceID)
-		require.Equal(t, string(fixture.org), events[3].Data.Key.OrganizationID)
+		require.Equal(t, model.CommonKey{TenantID: string(testTenantID), OrganizationID: string(fixture.org), TeamID: f.team}, events[2].Data.Key)
+		require.Equal(t, model.CommonKey{TenantID: string(testTenantID), OrganizationID: string(fixture.org), TeamID: f.team, MemberID: string(f.user)}, events[4].Data.Key)
+		require.Equal(t, f.app, events[6].Data.Key.ResourceID)
+		require.Equal(t, string(fixture.org), events[6].Data.Key.OrganizationID)
 
 		items := map[string]model.CommonItem{}
 		for key, scope := range businessScopes(fixture, f) {
@@ -126,8 +146,14 @@ func TestBusinessRoundTrip(t *testing.T) {
 		var team map[string]any
 		require.NoError(t, json.Unmarshal(items[f.team].Representation, &team))
 		require.Equal(t, []any{map[string]any{"model_id": string(f.llm), "kind": rbac.ModelKindLLM}}, team["model_grants"])
-		require.Equal(t, []any{map[string]any{"user_id": string(f.user), "role_ids": []any{f.role}}}, team["members"])
-		require.Equal(t, "analysts", team["slug"])
+		require.Equal(t, []any{map[string]any{"user_id": string(f.user), "role_ids": []any{f.role}}}, team["member_roles"])
+		require.NotContains(t, team, "slug", "the common team holds the slug")
+		common, err := svc.GetCommon(ctx, model.CommonScope{Family: model.FamilyTeam, TenantID: string(testTenantID), OrganizationID: string(fixture.org)}, f.team)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"slug":"analysts","name":"Analysts","status":"active"}`, string(common.Representation))
+		membership, err := svc.GetCommon(ctx, model.CommonScope{Family: model.FamilyTeamMembership, TenantID: string(testTenantID), OrganizationID: string(fixture.org), TeamID: f.team}, string(f.user))
+		require.NoError(t, err)
+		require.JSONEq(t, `{"status":"active"}`, string(membership.Representation))
 		var app map[string]any
 		require.NoError(t, json.Unmarshal(items[f.app].Representation, &app))
 		require.Equal(t, []any{f.role}, app["role_ids"])
@@ -164,7 +190,7 @@ func newBusinessReplay(t *testing.T, svc *service.ProvisioningService, fixture o
 	require.NoError(t, err)
 	replayTeam := teamSettings(f)
 	replayTeam.ModelGrants = append(replayTeam.ModelGrants, replayTeam.ModelGrants...)
-	out[f.team], err = svc.PutTeam(ctx, testTenantID, fixture.org, f.team, noCondition, replayTeam)
+	out[f.team], err = svc.PutTeamSettings(ctx, testTenantID, fixture.org, f.team, noCondition, replayTeam)
 	require.NoError(t, err)
 	out[f.app], err = svc.PutApplication(ctx, testTenantID, fixture.org, f.app, noCondition, model.ApplicationSettings{Name: "Batch", Active: true, RoleIDs: []string{f.role, f.role}, TeamID: f.team})
 	require.NoError(t, err)
@@ -246,9 +272,12 @@ func TestBusinessParents(t *testing.T) {
 		other := newOwnershipFixture(t, store)
 		f := newBusinessFixture(t, store, svc, other)
 
-		foreignGrant := model.TeamSettings{Slug: "thieves", Name: "Thieves", ModelGrants: []model.ModelGrantSettings{{ModelID: string(f.llm), Kind: rbac.ModelKindLLM}},
-			MiddlewareIDs: []string{}, Members: []model.TeamMemberSettings{}}
-		_, err := svc.PutTeam(ctx, testTenantID, fixture.org, uuid.NewString(), noCondition, foreignGrant)
+		thieves := uuid.NewString()
+		_, err := svc.PutTeam(ctx, testTenantID, fixture.org, model.TeamID(thieves), service.CommonResource{Slug: "thieves", Name: "Thieves", Status: model.StatusActive})
+		require.NoError(t, err)
+		foreignGrant := model.TeamSettings{ModelGrants: []model.ModelGrantSettings{{ModelID: string(f.llm), Kind: rbac.ModelKindLLM}},
+			MiddlewareIDs: []string{}, MemberRoles: []model.TeamMemberSettings{}}
+		_, err = svc.PutTeamSettings(ctx, testTenantID, fixture.org, thieves, noCondition, foreignGrant)
 		require.ErrorIs(t, err, port.ErrParentNotFound)
 
 		_, err = svc.PutApplication(ctx, testTenantID, fixture.org, uuid.NewString(), noCondition, model.ApplicationSettings{Name: "Thief", RoleIDs: []string{f.role}})
@@ -425,9 +454,10 @@ func TestBusinessBackfill(t *testing.T) {
 	})
 }
 
-// TestTeamProvisioning covers what the team family adds to the business
-// contract: a slug checked when it changes, members of the organization
-// only, team budgets and their cascade.
+// TestTeamProvisioning covers the teams of the common contract and their
+// settings: a slug checked when it changes, a global key, members of the
+// organization only, statuses that suspend access, team budgets and their
+// cascade.
 func TestTeamProvisioning(t *testing.T) {
 	eachBackendDB(t, func(t *testing.T, db *gormpkg.DB) {
 		ctx := t.Context()
@@ -435,47 +465,76 @@ func TestTeamProvisioning(t *testing.T) {
 		svc := businessService(store)
 		fixture := newOwnershipFixture(t, store)
 		f := newBusinessFixture(t, store, svc, fixture)
+		teamID := model.TeamID(f.team)
 
-		invalid := teamSettings(f)
-		invalid.Slug = "Not a slug"
-		_, err := svc.PutTeam(ctx, testTenantID, fixture.org, f.team, noCondition, invalid)
+		_, err := svc.PutTeam(ctx, testTenantID, fixture.org, teamID, service.CommonResource{Slug: "Not a slug", Name: "Analysts", Status: model.StatusActive})
 		require.ErrorIs(t, err, port.ErrInvalid, "a new slug is checked")
-
-		renamed := teamSettings(f)
-		renamed.Slug = "renamed"
-		_, err = svc.PutTeam(ctx, testTenantID, fixture.org, f.team, noCondition, renamed)
+		_, err = svc.PutTeam(ctx, testTenantID, fixture.org, teamID, service.CommonResource{Slug: " RENAMED ", Name: "Analysts", Status: model.StatusActive})
 		require.NoError(t, err)
-		team, err := store.GetTeamByID(ctx, model.TeamID(f.team))
+		team, err := store.GetTeamByID(ctx, teamID)
 		require.NoError(t, err)
 		require.Equal(t, "renamed", team.Slug())
-		_, err = svc.PutTeam(ctx, testTenantID, fixture.org, f.team, noCondition, teamSettings(f))
+		require.Len(t, team.ModelGrants(), 1, "a common PUT keeps the settings")
+		_, err = svc.PutTeam(ctx, testTenantID, fixture.org, teamID, teamResource())
 		require.NoError(t, err, "and back")
 
 		stranger := newOwnershipFixture(t, store)
-		withStranger := teamSettings(f)
-		withStranger.Members = append(withStranger.Members, model.TeamMemberSettings{UserID: string(stranger.user), RoleIDs: []string{}})
-		_, err = svc.PutTeam(ctx, testTenantID, fixture.org, f.team, noCondition, withStranger)
+		_, err = svc.PutTeam(ctx, testTenantID, stranger.org, teamID, teamResource())
+		require.ErrorIs(t, err, port.ErrAlreadyExists, "a team key never moves to another organization")
+		_, err = svc.PutTeamMembership(ctx, testTenantID, fixture.org, teamID, stranger.user, model.StatusActive)
 		require.ErrorIs(t, err, port.ErrParentNotFound, "a team member belongs to the organization")
+		_, err = svc.PutTeamMembership(ctx, testTenantID, fixture.org, model.TeamID(uuid.NewString()), f.user, model.StatusActive)
+		require.ErrorIs(t, err, port.ErrParentNotFound, "a team member needs its team")
 
+		withStranger := teamSettings(f)
+		withStranger.MemberRoles = append(withStranger.MemberRoles, model.TeamMemberSettings{UserID: string(stranger.user), RoleIDs: []string{f.role}})
+		_, err = svc.PutTeamSettings(ctx, testTenantID, fixture.org, f.team, noCondition, withStranger)
+		require.ErrorIs(t, err, port.ErrParentNotFound, "only team members hold team roles")
 		twice := teamSettings(f)
-		twice.Members = append(twice.Members, twice.Members[0])
-		_, err = svc.PutTeam(ctx, testTenantID, fixture.org, f.team, noCondition, twice)
+		twice.MemberRoles = append(twice.MemberRoles, twice.MemberRoles[0])
+		_, err = svc.PutTeamSettings(ctx, testTenantID, fixture.org, f.team, noCondition, twice)
 		require.ErrorIs(t, err, port.ErrInvalid)
-
 		roles, err := store.ListOrgRoles(ctx, fixture.org)
 		require.NoError(t, err)
 		builtin := slices.IndexFunc(roles, func(r model.Role) bool { return r.Builtin() })
 		require.NotEqual(t, -1, builtin)
 		withBuiltin := teamSettings(f)
-		withBuiltin.Members[0].RoleIDs = []string{string(roles[builtin].ID())}
-		_, err = svc.PutTeam(ctx, testTenantID, fixture.org, f.team, noCondition, withBuiltin)
+		withBuiltin.MemberRoles[0].RoleIDs = []string{string(roles[builtin].ID())}
+		_, err = svc.PutTeamSettings(ctx, testTenantID, fixture.org, f.team, noCondition, withBuiltin)
 		require.ErrorIs(t, err, port.ErrInvalid, "a builtin role is not held on a team")
+		_, err = svc.PutTeamSettings(ctx, testTenantID, fixture.org, uuid.NewString(), noCondition, teamSettings(f))
+		require.ErrorIs(t, err, port.ErrParentNotFound, "settings exist with their team only")
+
+		// A suspended team member, or a suspended team, grants nothing; both
+		// keep their members, roles and grants.
+		inTeam := func() bool {
+			t.Helper()
+			perms, err := store.ResolveEffectivePermissions(ctx, f.user, fixture.org)
+			require.NoError(t, err)
+			return perms.InTeam(f.team)
+		}
+		require.True(t, inTeam())
+		_, err = svc.PutTeamMembership(ctx, testTenantID, fixture.org, teamID, f.user, model.StatusSuspended)
+		require.NoError(t, err)
+		require.False(t, inTeam())
+		members, err := store.ListTeamMembers(ctx, teamID)
+		require.NoError(t, err)
+		require.Len(t, members, 1)
+		require.Equal(t, model.StatusSuspended, members[0].Status())
+		require.Equal(t, []model.RoleID{model.RoleID(f.role)}, members[0].RoleIDs())
+		_, err = svc.PutTeamMembership(ctx, testTenantID, fixture.org, teamID, f.user, model.StatusActive)
+		require.NoError(t, err)
+		require.True(t, inTeam())
+		_, err = svc.PutTeam(ctx, testTenantID, fixture.org, teamID, service.CommonResource{Slug: "analysts", Name: "Analysts", Status: model.StatusSuspended})
+		require.NoError(t, err)
+		require.False(t, inTeam())
+		_, err = svc.PutTeam(ctx, testTenantID, fixture.org, teamID, teamResource())
+		require.NoError(t, err)
 
 		// A model whose proxy name starts with a slug keeps the slug free.
 		llm := model.NewLLMModel(model.ProviderID(f.provider), fixture.org, "ops/llama", "llama", "", 0, 0)
 		require.NoError(t, store.CreateLLMModel(ctx, llm))
-		ops := model.TeamSettings{Slug: "ops", Name: "Ops", ModelGrants: []model.ModelGrantSettings{}, MiddlewareIDs: []string{}, Members: []model.TeamMemberSettings{}}
-		_, err = svc.PutTeam(ctx, testTenantID, fixture.org, uuid.NewString(), noCondition, ops)
+		_, err = svc.PutTeam(ctx, testTenantID, fixture.org, model.TeamID(uuid.NewString()), service.CommonResource{Slug: "ops", Name: "Ops", Status: model.StatusActive})
 		require.ErrorIs(t, err, port.ErrTeamNameConflict)
 
 		// Team budgets: the organization splits its envelope among teams.
@@ -507,7 +566,33 @@ func TestTeamProvisioning(t *testing.T) {
 		require.ErrorIs(t, err, port.ErrInvalid, "a member budget has no children to constrain")
 
 		// The bound application keeps the team from going.
-		err = svc.DeleteBusiness(ctx, model.CommonScope{Family: model.FamilyTeam, TenantID: string(testTenantID), OrganizationID: string(fixture.org)}, f.team, noCondition)
+		err = svc.DeleteTeam(ctx, testTenantID, fixture.org, teamID, noCondition)
 		require.ErrorIs(t, err, port.ErrNotAllowed)
+
+		// Removing a member drops it from the team; removing it again changes
+		// nothing.
+		require.NoError(t, svc.DeleteTeamMembership(ctx, testTenantID, fixture.org, teamID, f.user, noCondition))
+		require.NoError(t, svc.DeleteTeamMembership(ctx, testTenantID, fixture.org, teamID, f.user, noCondition))
+		members, err = store.ListTeamMembers(ctx, teamID)
+		require.NoError(t, err)
+		require.Empty(t, members)
+
+		// A member created suspended is written suspended at once: it is
+		// never active, and its creation is the only event.
+		cursor, err := store.CaptureEventCursor(ctx)
+		require.NoError(t, err)
+		_, err = svc.PutTeamMembership(ctx, testTenantID, fixture.org, teamID, f.user, model.StatusSuspended)
+		require.NoError(t, err)
+		members, err = store.ListTeamMembers(ctx, teamID)
+		require.NoError(t, err)
+		require.Len(t, members, 1)
+		require.Equal(t, model.StatusSuspended, members[0].Status())
+		events, _ := feedSince(t, store, cursor)
+		require.Equal(t, []string{"team_membership.created.v1"}, eventTypes(events))
+		var audits []xologorm.MutationAudit
+		require.NoError(t, db.Where("resource = ?", "team_member").Order("created_at").Find(&audits).Error)
+		require.NotEmpty(t, audits)
+		require.Equal(t, "null", audits[len(audits)-1].Before)
+		require.Contains(t, audits[len(audits)-1].After, `"status":"suspended"`)
 	})
 }

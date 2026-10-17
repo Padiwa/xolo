@@ -45,7 +45,9 @@ func businessSnapshot(db *gorm.DB, key mutationKey, row map[string]any) error {
 			}
 			row[column] = decoded
 		}
-	case "team":
+	case "team_settings":
+		// Its tenant is resolved through the organization of the team, as
+		// teamMemberSnapshot does for a team member.
 		grants := []map[string]any{}
 		var grantRows []TeamModelGrant
 		if err := db.Table("team_model_grants").Where("team_id = ?", key.id).Order("model_id, model_kind").Find(&grantRows).Error; err != nil {
@@ -69,15 +71,19 @@ func businessSnapshot(db *gorm.DB, key mutationKey, row map[string]any) error {
 			Where("team_members.team_id = ?", key.id).Order("memberships.user_id").Scan(&memberRows).Error; err != nil {
 			return err
 		}
+		// Members without a team role are left out: a settings PUT lists
+		// only the members holding roles.
 		members := []map[string]any{}
 		for _, m := range memberRows {
 			roles := []string{}
 			if err := db.Table("team_member_roles").Where("team_id = ? AND membership_id = ?", key.id, m.MembershipID).Order("role_id").Pluck("role_id", &roles).Error; err != nil {
 				return err
 			}
-			members = append(members, map[string]any{"user_id": m.UserID, "role_ids": roles})
+			if len(roles) > 0 {
+				members = append(members, map[string]any{"user_id": m.UserID, "role_ids": roles})
+			}
 		}
-		row["members"] = members
+		row["member_roles"] = members
 	case "alert":
 		// Rows created before personal alerts carry no scope.
 		if scope, _ := row["scope"].(string); scope == "" {
@@ -137,8 +143,8 @@ func businessFamilyOf(key mutationKey, row snapshotRow) (string, bool) {
 		return model.FamilyAlert, true
 	case "provider":
 		return model.FamilyProvider, true
-	case "team":
-		return model.FamilyTeam, true
+	case "team_settings":
+		return model.FamilyTeamSettings, true
 	}
 	return "", false
 }
@@ -146,12 +152,12 @@ func businessFamilyOf(key mutationKey, row snapshotRow) (string, bool) {
 // businessRepresentationFields lists the fields of each business family, as
 // named by the model settings: a PUT body and its projection are comparable.
 var businessRepresentationFields = map[string][]string{
-	model.FamilyCustomRole:  {"name", "description", "permissions"},
-	model.FamilyApplication: {"name", "description", "active", "role_ids", "team_id"},
-	model.FamilyQuota:       {"scope", "scope_id", "currency", "daily_budget", "monthly_budget", "yearly_budget", "cascade"},
-	model.FamilyTeam:        {"slug", "name", "description", "share_quota_equally", "model_grants", "middleware_ids", "members"},
-	model.FamilyAlert:       {"name", "description", "scope", "owner_id", "query", "aggregation", "window_seconds", "comparator", "threshold", "for_seconds", "enabled"},
-	model.FamilyProvider:    {"name", "type", "base_url", "active", "currency", "cloud_tier", "billing_mode", "subscription_plan", "retry_config", "rate_limit_config"},
+	model.FamilyCustomRole:   {"name", "description", "permissions"},
+	model.FamilyApplication:  {"name", "description", "active", "role_ids", "team_id"},
+	model.FamilyQuota:        {"scope", "scope_id", "currency", "daily_budget", "monthly_budget", "yearly_budget", "cascade"},
+	model.FamilyTeamSettings: {"description", "share_quota_equally", "model_grants", "middleware_ids", "member_roles"},
+	model.FamilyAlert:        {"name", "description", "scope", "owner_id", "query", "aggregation", "window_seconds", "comparator", "threshold", "for_seconds", "enabled"},
+	model.FamilyProvider:     {"name", "type", "base_url", "active", "currency", "cloud_tier", "billing_mode", "subscription_plan", "retry_config", "rate_limit_config"},
 }
 
 func businessRepresentation(family string, row snapshotRow) map[string]any {
@@ -172,7 +178,7 @@ func businessRepresentation(family string, row snapshotRow) map[string]any {
 			rep[field] = sorted
 		}
 	}
-	if family == model.FamilyTeam {
+	if family == model.FamilyTeamSettings {
 		rep["middleware_ids"] = sortedStrings(rep["middleware_ids"])
 		grants, _ := rep["model_grants"].([]any)
 		slices.SortFunc(grants, func(a, b any) int {
@@ -184,7 +190,7 @@ func businessRepresentation(family string, row snapshotRow) map[string]any {
 			grants = []any{}
 		}
 		rep["model_grants"] = grants
-		members, _ := rep["members"].([]any)
+		members, _ := rep["member_roles"].([]any)
 		for _, member := range members {
 			if m, ok := member.(map[string]any); ok {
 				m["role_ids"] = sortedStrings(m["role_ids"])
@@ -198,7 +204,7 @@ func businessRepresentation(family string, row snapshotRow) map[string]any {
 		if members == nil {
 			members = []any{}
 		}
-		rep["members"] = members
+		rep["member_roles"] = members
 	}
 	if family == model.FamilyApplication {
 		// Applications created before teams carry no team.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -66,15 +67,17 @@ var projectionFamilies = map[string]int{
 	model.FamilyOrganization:           2,
 	model.FamilyMember:                 3,
 	model.FamilyOrganizationMembership: 4,
+	model.FamilyTeam:                   5,
+	model.FamilyTeamMembership:         6,
 	// Business resources come after the common families, providers first.
-	model.FamilyProvider:   5,
-	model.FamilyCustomRole: 6,
+	model.FamilyProvider:   7,
+	model.FamilyCustomRole: 8,
 	// Team grants designate models and middlewares, team members hold roles,
 	// applications are bound to teams and quotas cap teams.
-	model.FamilyTeam:        7,
-	model.FamilyApplication: 8,
-	model.FamilyQuota:       9,
-	model.FamilyAlert:       10,
+	model.FamilyTeamSettings: 9,
+	model.FamilyApplication:  10,
+	model.FamilyQuota:        11,
+	model.FamilyAlert:        12,
 }
 
 type projectionID struct{ family, tenantID, orgID, key string }
@@ -103,6 +106,11 @@ func (id projectionID) reference() model.CommonKey {
 		ref.MemberID = id.key
 	case model.FamilyOrganizationMembership:
 		ref.OrganizationID, ref.MemberID = id.orgID, id.key
+	case model.FamilyTeam:
+		ref.OrganizationID, ref.TeamID = id.orgID, id.key
+	case model.FamilyTeamMembership:
+		ref.OrganizationID = id.orgID
+		ref.TeamID, ref.MemberID, _ = strings.Cut(id.key, ":")
 	default:
 		if model.IsBusinessFamily(id.family) {
 			ref.OrganizationID, ref.ResourceID = id.orgID, id.key
@@ -110,6 +118,9 @@ func (id projectionID) reference() model.CommonKey {
 	}
 	return ref
 }
+
+// teamMembershipKey is the projection key of a team membership.
+func teamMembershipKey(teamID, userID string) string { return teamID + ":" + userID }
 
 type snapshotRow map[string]any
 
@@ -144,6 +155,11 @@ func projectionIdentity(key mutationKey, row snapshotRow) (projectionID, bool) {
 		return projectionID{model.FamilyMember, row.str("tenant_id"), "", key.id}, true
 	case "membership":
 		return projectionID{model.FamilyOrganizationMembership, row.str("tenant_id"), row.str("org_id"), row.str("user_id")}, true
+	case "team":
+		return projectionID{model.FamilyTeam, row.str("tenant_id"), row.str("org_id"), key.id}, true
+	case "team_member":
+		// Keyed by team then user, so a team's members are one key range.
+		return projectionID{model.FamilyTeamMembership, row.str("tenant_id"), row.str("org_id"), teamMembershipKey(row.str("team_id"), row.str("user_id"))}, true
 	}
 	if family, ok := businessFamilyOf(key, row); ok {
 		// A quota hangs from its tenant: a user quota applies in every
@@ -171,7 +187,7 @@ func projectionRepresentation(id projectionID, row snapshotRow) (string, error) 
 	}
 	rep := map[string]any{"status": status}
 	switch id.family {
-	case model.FamilyTenant, model.FamilyOrganization:
+	case model.FamilyTenant, model.FamilyOrganization, model.FamilyTeam:
 		rep["slug"], rep["name"] = row.str("slug"), row.str("name")
 	case model.FamilyMember:
 		rep["email"], rep["tenant_role"] = row.str("email"), row.str("tenant_role")

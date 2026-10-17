@@ -36,7 +36,7 @@ var resourceTables = map[string]string{
 	"tenant": "tenants", "organization": "organizations", "user": "users", "membership": "memberships", "role": "roles", "domain": "domains",
 	// The quota table keeps the singular name GORM gave it.
 	"application": "applications", "quota": "quota", "alert": "alerts", "provider": "providers",
-	"team": "teams",
+	"team": "teams", "team_settings": "teams", "team_member": "team_members",
 }
 
 // resourceKeys names the key column of the resources not keyed by id.
@@ -51,15 +51,16 @@ func resourceKey(kind string) string {
 
 // Explicit allowlists exclude secrets and technical timestamps, including future columns.
 var mutationColumns = map[string]string{
-	"tenant":       "id, slug, name, description, active",
-	"organization": "id, tenant_id, slug, name, description, active, currency, share_quota_equally",
-	"user":         "id, tenant_id, provider, subject, identity_issuer, identity_subject, email, display_name, active, tenant_role",
-	"membership":   "id, org_id, user_id, status",
-	"role":         "id, org_id, name, description, builtin, builtin_kind",
-	"domain":       "hostname, tenant_id, status",
-	"application":  "id, org_id, name, description, active, team_id",
-	"quota":        "id, scope, scope_id, currency, daily_budget, monthly_budget, yearly_budget, cascade",
-	"team":         "id, org_id, slug, name, description, share_quota_equally",
+	"tenant":        "id, slug, name, description, active",
+	"organization":  "id, tenant_id, slug, name, description, active, currency, share_quota_equally",
+	"user":          "id, tenant_id, provider, subject, identity_issuer, identity_subject, email, display_name, active, tenant_role",
+	"membership":    "id, org_id, user_id, status",
+	"role":          "id, org_id, name, description, builtin, builtin_kind",
+	"domain":        "hostname, tenant_id, status",
+	"application":   "id, org_id, name, description, active, team_id",
+	"quota":         "id, scope, scope_id, currency, daily_budget, monthly_budget, yearly_budget, cascade",
+	"team":          "id, org_id, slug, name, status",
+	"team_settings": "id, org_id, description, share_quota_equally",
 	// The evaluation state (state, pending_since, last_evaluated_at) is left
 	// out: the evaluator rewrites it on every tick, outside the recorder.
 	"alert": "id, org_id, owner_id, scope, name, description, query, aggregation, window_seconds, comparator, threshold, for_seconds, enabled",
@@ -154,6 +155,9 @@ func (r *mutationRecorder) flush(ctx context.Context) error {
 }
 
 func mutationSnapshot(db *gorm.DB, key mutationKey) ([]byte, error) {
+	if key.kind == "team_member" {
+		return teamMemberSnapshot(db, key)
+	}
 	table, ok := resourceTables[key.kind]
 	if !ok {
 		return nil, fmt.Errorf("unknown mutation kind")
@@ -184,7 +188,7 @@ func mutationSnapshot(db *gorm.DB, key mutationKey) ([]byte, error) {
 	if err := businessSnapshot(db, key, row); err != nil {
 		return nil, err
 	}
-	if key.kind == "membership" || key.kind == "role" || key.kind == "application" || key.kind == "alert" || key.kind == "provider" || key.kind == "team" {
+	if key.kind == "membership" || key.kind == "role" || key.kind == "application" || key.kind == "alert" || key.kind == "provider" || key.kind == "team" || key.kind == "team_settings" {
 		var tenantID string
 		if err := db.Table("organizations").Where("id = ?", row["org_id"]).Pluck("tenant_id", &tenantID).Error; err != nil {
 			return nil, err
@@ -217,6 +221,36 @@ func mutationSnapshot(db *gorm.DB, key mutationKey) ([]byte, error) {
 			return nil, err
 		}
 		row["permissions"] = permissions
+	}
+	return json.Marshal(row)
+}
+
+// teamMemberSnapshot reads a team member, keyed by "<team_id>:<membership_id>",
+// with the user and the parents its projection hangs from. The team_settings
+// case of businessSnapshot walks the same team-to-tenant chain.
+func teamMemberSnapshot(db *gorm.DB, key mutationKey) ([]byte, error) {
+	teamID, membershipID, ok := strings.Cut(key.id, ":")
+	if !ok {
+		return nil, fmt.Errorf("invalid team member key")
+	}
+	var rows []map[string]any
+	if err := db.Table("team_members").
+		Select("team_members.team_id, team_members.membership_id, team_members.status, memberships.user_id, teams.org_id, organizations.tenant_id").
+		Joins("JOIN memberships ON memberships.id = team_members.membership_id").
+		Joins("JOIN teams ON teams.id = team_members.team_id").
+		Joins("JOIN organizations ON organizations.id = teams.org_id").
+		Where("team_members.team_id = ? AND team_members.membership_id = ?", teamID, membershipID).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return []byte("null"), nil
+	}
+	row := rows[0]
+	for k, v := range row {
+		if b, ok := v.([]byte); ok {
+			row[k] = string(b)
+		}
 	}
 	return json.Marshal(row)
 }
@@ -334,7 +368,7 @@ func (r *mutationRecorder) trackDependents(kind, id string) error {
 			return err
 		}
 		for _, team := range teams {
-			if err := r.track("team", team); err != nil {
+			if err := trackingTeamMember(model.TeamID(team), model.MembershipID(id))(r); err != nil {
 				return err
 			}
 			if err := r.trackTeamMemberQuotas(team, id); err != nil {
@@ -342,6 +376,18 @@ func (r *mutationRecorder) trackDependents(kind, id string) error {
 			}
 		}
 	case "team":
+		if err := r.track("team_settings", id); err != nil {
+			return err
+		}
+		var members []string
+		if err := r.db.Table("team_members").Where("team_id = ?", id).Order("membership_id").Pluck("membership_id", &members).Error; err != nil {
+			return err
+		}
+		for _, member := range members {
+			if err := r.track("team_member", teamMemberKey(model.TeamID(id), model.MembershipID(member))); err != nil {
+				return err
+			}
+		}
 		if err := r.trackQuota(model.QuotaScopeTeam, id); err != nil {
 			return err
 		}
@@ -388,7 +434,7 @@ func (r *mutationRecorder) trackDependents(kind, id string) error {
 			return err
 		}
 		for _, team := range teams {
-			if err := r.track("team", team); err != nil {
+			if err := r.track("team_settings", team); err != nil {
 				return err
 			}
 		}

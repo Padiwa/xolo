@@ -150,6 +150,36 @@ func (h *Handler) handlePutOrgMember(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) handlePutTeam(w http.ResponseWriter, r *http.Request) {
+	scope, key, ok := commonTarget(w, r, model.FamilyTeam)
+	if !ok {
+		return
+	}
+	fields, ok := decodeCommon(w, r, []string{"slug", "name", "status"})
+	if !ok {
+		return
+	}
+	h.writeCommon(w, r, scope, key, "could not write team", func(ctx context.Context, tx *service.ProvisioningService) error {
+		_, err := tx.PutTeam(ctx, model.TenantID(scope.TenantID), model.OrgID(scope.OrganizationID), model.TeamID(key), commonResource(fields))
+		return err
+	})
+}
+
+func (h *Handler) handlePutTeamMembership(w http.ResponseWriter, r *http.Request) {
+	scope, key, ok := commonTarget(w, r, model.FamilyTeamMembership)
+	if !ok {
+		return
+	}
+	fields, ok := decodeCommon(w, r, []string{"status"})
+	if !ok {
+		return
+	}
+	h.writeCommon(w, r, scope, key, "could not write team membership", func(ctx context.Context, tx *service.ProvisioningService) error {
+		_, err := tx.PutTeamMembership(ctx, model.TenantID(scope.TenantID), model.OrgID(scope.OrganizationID), model.TeamID(scope.TeamID), model.UserID(key), model.Status(fields["status"]))
+		return err
+	})
+}
+
 // writeCommon applies a PUT under its If-Match condition and answers with the
 // projection written by the same transaction, and its ETag.
 func (h *Handler) writeCommon(w http.ResponseWriter, r *http.Request, scope model.CommonScope, key, fallback string, put func(context.Context, *service.ProvisioningService) error) {

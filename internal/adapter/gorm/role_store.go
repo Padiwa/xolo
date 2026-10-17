@@ -246,7 +246,8 @@ func (s *Store) ResolveEffectivePermissions(ctx context.Context, userID model.Us
 			return errors.WithStack(err)
 		}
 		var err error
-		teams, err = resolveTeamAccess(db, db.Model(&TeamMember{}).Select("team_id").Where("membership_id = ?", m.ID), m.ID)
+		// A suspended team member receives nothing through its team.
+		teams, err = resolveTeamAccess(db, db.Model(&TeamMember{}).Select("team_id").Where("membership_id = ? AND status = ?", m.ID, string(model.StatusActive)), m.ID)
 		return err
 	})
 	if err != nil {
@@ -258,10 +259,11 @@ func (s *Store) ResolveEffectivePermissions(ctx context.Context, userID model.Us
 
 // resolveTeamAccess loads the access held through the selected teams: their
 // slugs and grants, and the permissions of the roles membershipID holds on
-// each of them. An empty membershipID holds no team role.
+// each of them. An empty membershipID holds no team role. A suspended team
+// grants nothing.
 func resolveTeamAccess(db *gorm.DB, teamIDs *gorm.DB, membershipID string) ([]rbac.TeamAccess, error) {
 	var teams []*Team
-	if err := db.Preload("ModelGrants").Where("id IN (?)", teamIDs).Order("slug").Find(&teams).Error; err != nil {
+	if err := db.Preload("ModelGrants").Where("id IN (?) AND status = ?", teamIDs, string(model.StatusActive)).Order("slug").Find(&teams).Error; err != nil {
 		return nil, errors.WithStack(err)
 	}
 	if len(teams) == 0 {

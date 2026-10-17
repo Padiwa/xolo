@@ -86,6 +86,10 @@ type ProvisioningBusinessStore interface {
 	ListOrgTeams(ctx context.Context, orgID model.OrgID) ([]model.Team, error)
 	ListTeamMembers(ctx context.Context, id model.TeamID) ([]model.TeamMember, error)
 	SetTeamMember(ctx context.Context, id model.TeamID, membershipID model.MembershipID, roleIDs []model.RoleID) error
+	SetTeamMemberStatus(ctx context.Context, id model.TeamID, membershipID model.MembershipID, status model.Status) error
+	// AddTeamMember places the membership in the team with the given status
+	// and no team role, in one write.
+	AddTeamMember(ctx context.Context, id model.TeamID, membershipID model.MembershipID, status model.Status) error
 	RemoveTeamMember(ctx context.Context, id model.TeamID, membershipID model.MembershipID) error
 	ModelNamePrefixTaken(ctx context.Context, orgID model.OrgID, slug string) (bool, error)
 	DeleteTeam(ctx context.Context, id model.TeamID) error

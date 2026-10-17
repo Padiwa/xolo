@@ -32,9 +32,10 @@ var OwnershipFamilies = []string{
 	FamilyOrganization,
 	FamilyMember,
 	FamilyOrganizationMembership,
+	FamilyTeam,
+	FamilyTeamMembership,
 	FamilySubscription,
 	FamilyCustomRole,
-	FamilyTeam,
 	FamilyApplication,
 	FamilyQuota,
 	FamilyAlert,
@@ -71,13 +72,22 @@ func (p OwnershipPolicy) Validate() error {
 	return nil
 }
 
+// OwnershipFamily returns the family whose authority governs writes to
+// family: the settings of a team follow its team.
+func OwnershipFamily(family string) string {
+	if family == FamilyTeamSettings {
+		return FamilyTeam
+	}
+	return family
+}
+
 // Allows tells whether authority may write the family. A nil policy allows
 // everything: offline operator tools and migrations hold database authority.
 func (p OwnershipPolicy) Allows(family string, authority Owner) bool {
 	if p == nil {
 		return true
 	}
-	owner, ok := p[family]
+	owner, ok := p[OwnershipFamily(family)]
 	if !ok || owner == OwnerShared {
 		return true
 	}

@@ -18,5 +18,8 @@ var MigrateBusinessProjections = migrateBusinessProjections
 // MigrateTeams exposes the teams migration to the tests.
 var MigrateTeams = migrateTeams
 
+// MigrateTeamContract exposes the team contract migration to the tests.
+var MigrateTeamContract = migrateTeamContract
+
 // LegacyRoleModel is the model grant a role carried before teams.
 type LegacyRoleModel = legacyRoleModel

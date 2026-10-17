@@ -90,7 +90,13 @@ func (s *QuotaService) ResolveTeamQuotas(ctx context.Context, teamID model.TeamI
 	if err != nil {
 		return nil, nil, errors.WithStack(err)
 	}
-	n := int64(len(members))
+	// Suspended members receive nothing through the team: no share either.
+	var n int64
+	for _, member := range members {
+		if member.Status() == model.StatusActive {
+			n++
+		}
+	}
 	if n == 0 {
 		// A request charged to a team without members (a member removed since
 		// its token was minted) has no share: the undivided envelope bounds it.
