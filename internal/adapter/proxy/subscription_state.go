@@ -20,9 +20,13 @@ type SubscriptionState struct {
 	exhaustedAt map[scopeKey]time.Time // per-constraint label
 }
 
+// constraintKey identifies one constraint's cooldown. upstreamModel is set for
+// a per-model constraint, whose models are exhausted one by one, and empty for
+// a provider-wide one.
 type constraintKey struct {
-	scope scopeKey
-	label string
+	scope         scopeKey
+	label         string
+	upstreamModel string
 }
 
 type userScopeKey struct {
@@ -36,13 +40,17 @@ type SubscriptionStateDetailed struct {
 	inFlight       map[scopeKey]int
 	userInFlight   map[userScopeKey]int
 	exhaustedUntil map[constraintKey]time.Time
+	// exhaustedPurgeAt is the size past which MarkExhausted sweeps expired
+	// cooldowns.
+	exhaustedPurgeAt int
 }
 
 func NewSubscriptionState() *SubscriptionStateDetailed {
 	return &SubscriptionStateDetailed{
-		inFlight:       make(map[scopeKey]int),
-		userInFlight:   make(map[userScopeKey]int),
-		exhaustedUntil: make(map[constraintKey]time.Time),
+		inFlight:         make(map[scopeKey]int),
+		userInFlight:     make(map[userScopeKey]int),
+		exhaustedUntil:   make(map[constraintKey]time.Time),
+		exhaustedPurgeAt: minPurgeAt,
 	}
 }
 
@@ -98,23 +106,40 @@ func (s *SubscriptionStateDetailed) CurrentUserInFlight(orgID model.OrgID, provi
 	return s.userInFlight[userScopeKey{orgID, providerID, userID}]
 }
 
-// MarkExhausted sets a cooldown for a specific constraint label until the given time.
-func (s *SubscriptionStateDetailed) MarkExhausted(orgID model.OrgID, providerID model.ProviderID, label string, until time.Time) {
+// MarkExhausted sets a cooldown for a specific constraint label until the given
+// time. upstreamModel names the model of a per-model constraint, empty for a
+// provider-wide one.
+func (s *SubscriptionStateDetailed) MarkExhausted(orgID model.OrgID, providerID model.ProviderID, label, upstreamModel string, until time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.exhaustedUntil[constraintKey{scopeKey{orgID, providerID}, label}] = until
+	// An expired cooldown is otherwise only dropped when its key is checked
+	// again, and per-model cooldowns of models nobody requests any more never
+	// are. Sweeping once the map outgrows its last sweep keeps the cost
+	// amortised over the insertions.
+	if len(s.exhaustedUntil) >= s.exhaustedPurgeAt {
+		now := time.Now()
+		for k, u := range s.exhaustedUntil {
+			if now.After(u) {
+				delete(s.exhaustedUntil, k)
+			}
+		}
+		s.exhaustedPurgeAt = max(2*len(s.exhaustedUntil), minPurgeAt)
+	}
+	s.exhaustedUntil[constraintKey{scopeKey{orgID, providerID}, label, upstreamModel}] = until
 }
 
-// IsExhausted reports whether a constraint is currently in cooldown.
-func (s *SubscriptionStateDetailed) IsExhausted(orgID model.OrgID, providerID model.ProviderID, label string) bool {
+// IsExhausted reports whether a constraint is currently in cooldown, for one
+// upstream model when the constraint is per model.
+func (s *SubscriptionStateDetailed) IsExhausted(orgID model.OrgID, providerID model.ProviderID, label, upstreamModel string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	until, ok := s.exhaustedUntil[constraintKey{scopeKey{orgID, providerID}, label}]
+	key := constraintKey{scopeKey{orgID, providerID}, label, upstreamModel}
+	until, ok := s.exhaustedUntil[key]
 	if !ok {
 		return false
 	}
 	if time.Now().After(until) {
-		delete(s.exhaustedUntil, constraintKey{scopeKey{orgID, providerID}, label})
+		delete(s.exhaustedUntil, key)
 		return false
 	}
 	return true
