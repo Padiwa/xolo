@@ -811,6 +811,20 @@ func parseCostField(v string) int64 {
 	return int64(f * 1_000)
 }
 
+// parseModelAPIFromForm reads the API type and base URL a model overrides its
+// provider's with. Both are optional: empty keeps the provider's.
+func parseModelAPIFromForm(r *http.Request) (apiType, baseURL string, err error) {
+	apiType = strings.TrimSpace(r.FormValue("api_type"))
+	if apiType != "" && !model.IsKnownProviderType(apiType) {
+		return "", "", errors.Errorf("type d'API inconnu : %s. Choisissez un type de la liste.", apiType)
+	}
+	baseURL = strings.TrimSpace(r.FormValue("api_base_url"))
+	if baseURL != "" && !model.IsValidBaseURL(baseURL) {
+		return "", "", errors.Errorf("l'URL de base doit être une URL http ou https absolue, sans identifiants, paramètres ni fragment : %s", baseURL)
+	}
+	return apiType, baseURL, nil
+}
+
 // parseExtraBodyFromForm reads the key/value rows emitted by the ExtraBodyEditor
 // component (extra_body_count + extra_body_k{i}_key / _value) into a map.
 // Rows with an empty key are skipped. Values are typed by inference (see
@@ -948,6 +962,14 @@ func (h *Handler) createModel(w http.ResponseWriter, r *http.Request) {
 	}
 	m.SetExtraBody(extraBody)
 
+	apiType, apiBaseURL, err := parseModelAPIFromForm(r)
+	if err != nil {
+		h.renderModelFormError(w, r, ctx, user, orgSlug, org, p, nil, true, "Accès à l'API : "+err.Error())
+		return
+	}
+	m.SetAPIType(apiType)
+	m.SetBaseURL(apiBaseURL)
+
 	if err := h.providerStore.CreateLLMModel(ctx, m); err != nil {
 		slog.ErrorContext(ctx, "could not create model", slogx.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -1060,6 +1082,12 @@ func (h *Handler) updateModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	apiType, apiBaseURL, err := parseModelAPIFromForm(r)
+	if err != nil {
+		h.renderModelFormError(w, r, ctx, user, orgSlug, org, p, existing, false, "Accès à l'API : "+err.Error())
+		return
+	}
+
 	updated := &updatedLLMModelAdapter{
 		id:                          existing.ID(),
 		providerID:                  existing.ProviderID(),
@@ -1087,6 +1115,8 @@ func (h *Handler) updateModel(w http.ResponseWriter, r *http.Request) {
 		updatedAt:        time.Now(),
 		tokenLimitConfig: tokenLimitConfig,
 		extraBody:        extraBody,
+		apiType:          apiType,
+		baseURL:          apiBaseURL,
 	}
 
 	if err := h.providerStore.SaveLLMModel(ctx, updated); err != nil {
@@ -1116,12 +1146,21 @@ func (h *Handler) renderModelFormError(w http.ResponseWriter, r *http.Request, c
 				{Label: org.Name(), Href: "/orgs/" + orgSlug + "/usage"},
 				{Label: "Fournisseurs", Href: "/orgs/" + orgSlug + "/admin/providers"},
 				{Label: p.Name(), Href: "/orgs/" + orgSlug + "/admin/providers/" + string(p.ID()) + "/models"},
-				{Label: m.ProxyName(), Href: ""},
+				modelCrumb(m),
 			},
 		},
 	}
 	w.WriteHeader(http.StatusUnprocessableEntity)
 	templ.Handler(component.ModelForm(vmodel)).ServeHTTP(w, r)
+}
+
+// modelCrumb is the last breadcrumb of the model form: the model's proxy name,
+// or a plain label on a creation that failed, where nothing was stored.
+func modelCrumb(m model.LLMModel) common.BreadcrumbItem {
+	if m == nil {
+		return common.BreadcrumbItem{Label: "Nouveau modèle", Href: ""}
+	}
+	return common.BreadcrumbItem{Label: m.ProxyName(), Href: ""}
 }
 
 // providerCrumb is the last breadcrumb of the provider form: the provider's
