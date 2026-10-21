@@ -196,6 +196,41 @@ func TestParseExtraBodyFromForm(t *testing.T) {
 	})
 }
 
+func TestParseRequestHeadersFromForm(t *testing.T) {
+	t.Run("nothing set yields nil", func(t *testing.T) {
+		h, err := parseRequestHeadersFromForm(makeRequest(map[string]string{"request_header_count": "0", "session_header": " "}))
+		if err != nil || h != nil {
+			t.Errorf("got %+v, %v; want nil, nil", h, err)
+		}
+	})
+
+	t.Run("opencode go", func(t *testing.T) {
+		h, err := parseRequestHeadersFromForm(makeRequest(map[string]string{
+			"session_header":          " x-opencode-session ",
+			"request_header_count":    "1",
+			"request_header_k0_key":   "User-Agent",
+			"request_header_k0_value": " xolo/1.0 ",
+		}))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if h.SessionHeader != "x-opencode-session" || len(h.Headers) != 1 || h.Headers["User-Agent"] != "xolo/1.0" {
+			t.Errorf("got %+v", h)
+		}
+	})
+
+	t.Run("credentials are refused", func(t *testing.T) {
+		_, err := parseRequestHeadersFromForm(makeRequest(map[string]string{
+			"request_header_count":    "1",
+			"request_header_k0_key":   "Authorization",
+			"request_header_k0_value": "Bearer stolen",
+		}))
+		if err == nil {
+			t.Error("expected an error for a reserved header")
+		}
+	})
+}
+
 func TestParseSubscriptionPlanFromForm_FairShareTuning(t *testing.T) {
 	// The form is the only writer of a subscription plan: a tuning field it does
 	// not read is a field the next save of the provider silently erases.
@@ -574,7 +609,7 @@ func TestProviderWithPlan_ShowsTheSubmittedPlanOnTheStoredProvider(t *testing.T)
 func TestTestProviderConnection_KnowsEveryFormType(t *testing.T) {
 	for _, providerType := range model.ProviderTypes() {
 		t.Run(providerType, func(t *testing.T) {
-			ok, err := testProviderConnection(context.Background(), providerType, "http://127.0.0.1:9", "test-key")
+			ok, err := testProviderConnection(context.Background(), providerType, "http://127.0.0.1:9", "test-key", nil)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -586,7 +621,7 @@ func TestTestProviderConnection_KnowsEveryFormType(t *testing.T) {
 }
 
 func TestTestProviderConnection_UnknownType(t *testing.T) {
-	if _, err := testProviderConnection(context.Background(), "nope", "http://127.0.0.1:9", "k"); err == nil {
+	if _, err := testProviderConnection(context.Background(), "nope", "http://127.0.0.1:9", "k", nil); err == nil {
 		t.Fatal("expected an error for an unknown provider type")
 	}
 }
