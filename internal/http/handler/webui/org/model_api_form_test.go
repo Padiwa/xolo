@@ -22,6 +22,8 @@ type modelFormStore struct {
 	provider model.Provider
 	created  []model.LLMModel
 	saved    []model.LLMModel
+	// createErr, when set, fails every CreateLLMModel.
+	createErr error
 }
 
 func (s *modelFormStore) GetOrgBySlug(_ context.Context, _ model.TenantID, slug string) (model.Organization, error) {
@@ -38,16 +40,28 @@ func (s *modelFormStore) GetProviderByID(_ context.Context, id model.ProviderID)
 	return s.provider, nil
 }
 
-func (s *modelFormStore) GetLLMModelByProxyName(context.Context, model.OrgID, string) (model.LLMModel, error) {
+func (s *modelFormStore) GetLLMModelByProxyName(_ context.Context, _ model.OrgID, name string) (model.LLMModel, error) {
+	for _, m := range s.created {
+		if m.ProxyName() == name {
+			return m, nil
+		}
+	}
 	return nil, port.ErrNotFound
 }
 
+func (s *modelFormStore) ListLLMModels(context.Context, model.OrgID) ([]model.LLMModel, error) {
+	return s.created, nil
+}
+
 func (s *modelFormStore) CreateLLMModel(_ context.Context, m model.LLMModel) error {
+	if s.createErr != nil {
+		return s.createErr
+	}
 	s.created = append(s.created, m)
 	return nil
 }
 
-func postCreateModel(t *testing.T, fields url.Values) (*httptest.ResponseRecorder, *modelFormStore) {
+func postCreateModel(t *testing.T, fields url.Values, configure ...func(*Handler)) (*httptest.ResponseRecorder, *modelFormStore) {
 	t.Helper()
 	tenant := model.NewTenant("a", "A", "")
 	org := model.NewOrganization(tenant.ID(), "acme", "Acme", "")
@@ -56,6 +70,9 @@ func postCreateModel(t *testing.T, fields url.Values) (*httptest.ResponseRecorde
 		provider: model.NewProvider(org.ID(), "OpenCode Go", "openai", "https://opencode.ai/inference/go/openai/v1", "ciphertext", "USD"),
 	}
 	h := &Handler{orgStore: s, providerStore: s}
+	for _, c := range configure {
+		c(h)
+	}
 
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(fields.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -127,7 +144,7 @@ func (s *modelFormStore) SaveLLMModel(_ context.Context, m model.LLMModel) error
 	return nil
 }
 
-func postUpdateModel(t *testing.T, existing *model.BaseLLMModel, fields url.Values) (*httptest.ResponseRecorder, *modelFormStore) {
+func postUpdateModel(t *testing.T, existing *model.BaseLLMModel, fields url.Values, configure ...func(*Handler)) (*httptest.ResponseRecorder, *modelFormStore) {
 	t.Helper()
 	tenant := model.NewTenant("a", "A", "")
 	org := model.NewOrganization(tenant.ID(), "acme", "Acme", "")
@@ -137,6 +154,9 @@ func postUpdateModel(t *testing.T, existing *model.BaseLLMModel, fields url.Valu
 	m.SetBaseURL(existing.BaseURL())
 	s := &modelFormStore{org: org, provider: provider, created: []model.LLMModel{m}}
 	h := &Handler{orgStore: s, providerStore: s}
+	for _, c := range configure {
+		c(h)
+	}
 
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(fields.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")

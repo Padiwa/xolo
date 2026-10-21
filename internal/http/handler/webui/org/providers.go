@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -405,16 +404,10 @@ func unknownProviderTypeMessage(providerType string) string {
 
 func testProviderConnection(ctx context.Context, providerType, baseURL, apiKey string) (bool, error) {
 	name := provider.Name(providerType)
-	opts := provider.NewChatCompletionProviderOptions(name)
+	// dummy model — just validates credentials
+	opts := newProviderOptions(provider.NewChatCompletionProviderOptions, name, baseURL, apiKey, "gpt-3.5-turbo")
 	if opts == nil {
 		return false, errors.Errorf("unknown provider %q", providerType)
-	}
-	v := reflect.ValueOf(opts).Elem()
-	if common := v.FieldByName("CommonOptions"); common.IsValid() {
-		common.FieldByName("BaseURL").SetString(baseURL)
-		common.FieldByName("APIKey").SetString(apiKey)
-		// dummy model — just validates credentials
-		common.FieldByName("Model").SetString("gpt-3.5-turbo")
 	}
 	client, err := provider.Create(ctx, func(o *provider.Options) error {
 		o.ChatCompletion = &provider.ResolvedClientOptions{
@@ -426,7 +419,7 @@ func testProviderConnection(ctx context.Context, providerType, baseURL, apiKey s
 	if err != nil {
 		return false, errors.WithStack(err)
 	}
-	_ = client
+	closeClient(client)
 	return true, nil
 }
 
@@ -923,6 +916,14 @@ func (h *Handler) createModel(w http.ResponseWriter, r *http.Request) {
 			"Un modèle avec le nom proxy « "+proxyName+" » existe déjà dans cette organisation.")
 		return
 	}
+	if msg, err := h.virtualModelConflict(ctx, org.ID(), proxyName); err != nil {
+		slog.ErrorContext(ctx, "could not check virtual model names", slogx.Error(err))
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	} else if msg != "" {
+		h.renderModelFormError(w, r, ctx, user, orgSlug, org, p, nil, true, msg)
+		return
+	}
 	if msg, err := h.teamNameConflict(ctx, org.ID(), proxyName); err != nil {
 		slog.ErrorContext(ctx, "could not check team slugs", slogx.Error(err))
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
@@ -1043,6 +1044,14 @@ func (h *Handler) updateModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if proxyName != existing.ProxyName() {
+		if msg, err := h.virtualModelConflict(ctx, org.ID(), proxyName); err != nil {
+			slog.ErrorContext(ctx, "could not check virtual model names", slogx.Error(err))
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		} else if msg != "" {
+			h.renderModelFormError(w, r, ctx, user, orgSlug, org, p, existing, false, msg)
+			return
+		}
 		if msg, err := h.teamNameConflict(ctx, org.ID(), proxyName); err != nil {
 			slog.ErrorContext(ctx, "could not check team slugs", slogx.Error(err))
 			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
