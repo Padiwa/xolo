@@ -98,13 +98,20 @@ func toolChoiceFuncs(opts *llm.ChatCompletionOptions, tools []llm.Tool) []llm.Ch
 	return []llm.ChatCompletionOptionFunc{llm.WithToolChoice(llm.ToolChoiceAuto)}
 }
 
-// ChatCompletion implements llm.Client.
+// ChatCompletion implements llm.Client. Once ctx is done, the loop runs no
+// further tool or model turn and returns ctx's error, even when the tool
+// results gathered so far could have produced an answer.
 func (c *ToolLoopClient) ChatCompletion(ctx context.Context, funcs ...llm.ChatCompletionOptionFunc) (llm.ChatCompletionResponse, error) {
 	opts := llm.NewChatCompletionOptions(funcs...)
 	messages := opts.Messages
 	tools := mergeTools(opts.Tools, c.tools)
 
 	for i := 0; i < c.maxIterations; i++ {
+		// A caller gone during a tool round needs no further turn.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
 		forceFinal := i >= c.maxConsecutiveToolCalls
 
 		callFuncs := append(append([]llm.ChatCompletionOptionFunc{}, funcs...), llm.WithMessages(messages...), llm.WithTools(tools...))
@@ -130,6 +137,9 @@ func (c *ToolLoopClient) ChatCompletion(ctx context.Context, funcs ...llm.ChatCo
 
 		messages = append(messages, llm.NewToolCallsMessage(toolCalls...))
 		for _, tc := range toolCalls {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			toolMsg := executeToolCallResilient(ctx, tc, c.tools)
 			if blocked, reason := c.inspectToolResult(ctx, tc.Name(), toolMsg.Content()); blocked {
 				return nil, &RejectionError{Reason: reason}
@@ -166,6 +176,11 @@ func executeToolCallResilient(ctx context.Context, tc llm.ToolCall, tools []llm.
 // ChatCompletionStream implements llm.Client. Each turn is fully buffered;
 // only the final turn (no further tool calls to resolve) is replayed to the
 // caller, so intermediate tool-resolution turns stay invisible.
+//
+// Once ctx is done, the loop runs no further tool or model turn and sends
+// nothing more, error chunks included: the stream then ends without an error
+// chunk, possibly empty. The caller that cancelled is gone and reads none of
+// it.
 func (c *ToolLoopClient) ChatCompletionStream(ctx context.Context, funcs ...llm.ChatCompletionOptionFunc) (<-chan llm.StreamChunk, error) {
 	opts := llm.NewChatCompletionOptions(funcs...)
 	messages := opts.Messages
@@ -173,10 +188,31 @@ func (c *ToolLoopClient) ChatCompletionStream(ctx context.Context, funcs ...llm.
 
 	outCh := make(chan llm.StreamChunk, 8)
 
+	// emit gives up once the caller is gone, instead of blocking this
+	// goroutine on a channel nobody reads anymore. The context is checked
+	// first: a select would otherwise pick at random between a free slot in
+	// the buffer and the cancellation.
+	emit := func(chunk llm.StreamChunk) bool {
+		if ctx.Err() != nil {
+			return false
+		}
+		select {
+		case outCh <- chunk:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+
 	go func() {
 		defer close(outCh)
 
 		for i := 0; i < c.maxIterations; i++ {
+			// A caller gone during a tool round needs no further turn.
+			if ctx.Err() != nil {
+				return
+			}
+
 			forceFinal := i >= c.maxConsecutiveToolCalls
 
 			callFuncs := append(append([]llm.ChatCompletionOptionFunc{}, funcs...), llm.WithMessages(messages...), llm.WithTools(tools...))
@@ -188,7 +224,7 @@ func (c *ToolLoopClient) ChatCompletionStream(ctx context.Context, funcs ...llm.
 
 			sourceCh, err := c.inner.ChatCompletionStream(ctx, callFuncs...)
 			if err != nil {
-				outCh <- llm.NewErrorStreamChunk(err)
+				emit(llm.NewErrorStreamChunk(err))
 				return
 			}
 
@@ -196,7 +232,9 @@ func (c *ToolLoopClient) ChatCompletionStream(ctx context.Context, funcs ...llm.
 
 			if forceFinal || len(toolCalls) == 0 || !c.allKnown(toolCalls) {
 				for _, ch := range chunks {
-					outCh <- ch
+					if !emit(ch) {
+						return
+					}
 				}
 				return
 			}
@@ -204,9 +242,12 @@ func (c *ToolLoopClient) ChatCompletionStream(ctx context.Context, funcs ...llm.
 			messages = append(messages, llm.NewToolCallsMessage(toolCalls...))
 			blockedInLoop := false
 			for _, tc := range toolCalls {
+				if ctx.Err() != nil {
+					return
+				}
 				toolMsg := executeToolCallResilient(ctx, tc, c.tools)
 				if blocked, reason := c.inspectToolResult(ctx, tc.Name(), toolMsg.Content()); blocked {
-					outCh <- llm.NewErrorStreamChunk(&RejectionError{Reason: reason})
+					emit(llm.NewErrorStreamChunk(&RejectionError{Reason: reason}))
 					blockedInLoop = true
 					break
 				}
@@ -217,7 +258,7 @@ func (c *ToolLoopClient) ChatCompletionStream(ctx context.Context, funcs ...llm.
 			}
 		}
 
-		outCh <- llm.NewErrorStreamChunk(errTooManyToolIterations)
+		emit(llm.NewErrorStreamChunk(errTooManyToolIterations))
 	}()
 
 	return outCh, nil
@@ -239,6 +280,10 @@ var _ llm.Client = (*ToolLoopClient)(nil)
 // bufferStreamTurn drains sourceCh, accumulating tool call deltas (by index)
 // into complete ToolCall values, and returns every chunk seen alongside the
 // assembled tool calls (empty if the turn carried none).
+//
+// It reads the turn to its end even once the caller is gone: the inner
+// client streams under the same context, so it closes sourceCh promptly, and
+// leaving early would park its goroutine on a send nobody reads.
 func bufferStreamTurn(sourceCh <-chan llm.StreamChunk) ([]llm.StreamChunk, []llm.ToolCall) {
 	var chunks []llm.StreamChunk
 	assembled := map[int]*assembledToolCall{}
