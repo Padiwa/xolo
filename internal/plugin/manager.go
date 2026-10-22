@@ -225,6 +225,7 @@ func (m *Manager) Shutdown() {
 	for _, e := range m.plugins {
 		e.gopClient.Kill()
 	}
+	slog.Info("plugins stopped", slog.Int("count", len(m.plugins)))
 	m.plugins = nil
 }
 
@@ -310,6 +311,7 @@ func (m *Manager) loadPlugin(ctx context.Context, binaryPath string) (*PluginEnt
 	if m.memLimit != "" {
 		pluginCmd.Env = append(pluginCmd.Env, fmt.Sprintf("GOMEMLIMIT=%s", m.memLimit))
 	}
+	bindToServer(pluginCmd)
 
 	client := goplugin.NewClient(&goplugin.ClientConfig{
 		HandshakeConfig:  pluginsdk.HandshakeConfig,
