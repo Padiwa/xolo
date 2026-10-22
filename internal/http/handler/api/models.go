@@ -41,6 +41,9 @@ type openRouterModel struct {
 type modelDeclarations struct {
 	CapabilitiesDeclared bool   `json:"capabilities_declared"`
 	Currency             string `json:"currency,omitempty"`
+	// Kind tells the routes the model answers: "completion", or "decision" for
+	// /decisions only.
+	Kind model.ModelKind `json:"kind"`
 }
 
 type modelArchitecture struct {
@@ -376,9 +379,6 @@ func modelCard(t modelTraits) openRouterModel {
 	if caps.Vision {
 		inputModalities = append(inputModalities, "image")
 	}
-	if caps.Embeddings {
-		outputModalities = append(outputModalities, "embeddings")
-	}
 	if caps.Audio {
 		outputModalities = append(outputModalities, "audio")
 	}
@@ -391,14 +391,25 @@ func modelCard(t modelTraits) openRouterModel {
 		supportedParams = append(supportedParams, "reasoning", "include_reasoning")
 	}
 
+	// A model of another kind than completion outputs what its kind
+	// produces, vectors or probabilities, and takes none of the parameters
+	// of a completion.
+	kind := model.KindOrDefault(t.kind)
+	if kind != model.ModelKindCompletion {
+		outputModalities = []string{string(kind)}
+		supportedParams = []string{}
+	}
+
 	var contextLength *int
 	if t.contextLength > 0 {
 		cl := int(t.contextLength)
 		contextLength = &cl
 	}
 
+	// The token limit wraps the completion client only: on a model of
+	// another kind it limits nothing, so the card announces none.
 	var perLimits *perRequestLimits
-	if t.promptLimit > 0 || t.completionLimit > 0 {
+	if kind == model.ModelKindCompletion && (t.promptLimit > 0 || t.completionLimit > 0) {
 		perLimits = &perRequestLimits{
 			PromptTokens:     int(t.promptLimit),
 			CompletionTokens: int(t.completionLimit),
@@ -421,7 +432,7 @@ func modelCard(t modelTraits) openRouterModel {
 		},
 		PerRequestLimits: perLimits,
 		SupportedParams:  supportedParams,
-		Xolo:             modelDeclarations{CapabilitiesDeclared: t.declared, Currency: t.currency},
+		Xolo:             modelDeclarations{CapabilitiesDeclared: t.declared, Currency: t.currency, Kind: kind},
 	}
 }
 

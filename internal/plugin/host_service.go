@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -122,6 +123,11 @@ func (s *XoloHostService) ChatCompletion(ctx context.Context, req *proto.HostCha
 	res, err := s.completer.Complete(ctx, mreq)
 	if err != nil {
 		slog.WarnContext(ctx, "host service: chat completion failed", slog.String("model", req.Model), slog.Any("error", err))
+		// A model of another kind is the plugin's configuration mistake: a
+		// retry would fail the same way.
+		if errors.Is(err, model.ErrNotAConversationModel) {
+			return nil, status.Errorf(codes.InvalidArgument, "chat completion: %v", err)
+		}
 		return nil, status.Errorf(codes.Internal, "chat completion: %v", err)
 	}
 	return &proto.HostChatCompletionResponse{
@@ -185,6 +191,11 @@ func (s *XoloHostService) ListModels(ctx context.Context, req *proto.ListModelsF
 	}
 	protoModels := make([]*proto.ModelInfo, 0, len(models))
 	for _, m := range models {
+		// A plugin calls models through ChatCompletion, which only a
+		// completion model answers.
+		if m.Kind() != model.ModelKindCompletion {
+			continue
+		}
 		caps := m.Capabilities()
 		protoModels = append(protoModels, &proto.ModelInfo{
 			ProxyName:                  m.ProxyName(),
@@ -197,7 +208,6 @@ func (s *XoloHostService) ListModels(ctx context.Context, req *proto.ListModelsF
 			ContextLength:              m.ContextWindow(),
 			SupportsVision:             caps.Vision,
 			SupportsReasoning:          caps.Reasoning,
-			SupportsEmbeddings:         caps.Embeddings,
 			ActiveParamsBillions:       float32(m.ActiveParams()) / 1e9,
 		})
 	}

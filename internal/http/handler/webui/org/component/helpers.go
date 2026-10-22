@@ -633,3 +633,12 @@ func modelBaseURL(m model.LLMModel) string {
 	}
 	return m.BaseURL()
 }
+
+// modelKind is the kind of m, or for a new model the first kind its
+// provider's API serves: decision for a TypeSafe provider, chat otherwise.
+func modelKind(m model.LLMModel, p model.Provider) model.ModelKind {
+	if m != nil {
+		return m.Kind()
+	}
+	return model.DefaultProviderTypeKind(p.Type())
+}

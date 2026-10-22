@@ -113,7 +113,36 @@ templ ModelForm(vmodel ModelFormVModel) {
 								</div>
 								<div class="space-y-2">
 									@form.Label(form.LabelProps{}) {
-										Contexte & Sortie 
+										Nature
+									}
+									{{ kind := modelKind(vmodel.Model, vmodel.Provider) }}
+									if vmodel.Model == nil {
+										// The kind preselected from the provider's type: the
+										// server re-defaults it when the API type override
+										// serves another.
+										<input type="hidden" name="kind_default" value={ string(kind) }/>
+									}
+									@selectbox.SelectBox(selectbox.Props{ID: "kind"}) {
+										@selectbox.Trigger(selectbox.TriggerProps{Name: "kind", Disabled: readonly}) {
+											@selectbox.Value(selectbox.ValueProps{})
+										}
+										@selectbox.Content(selectbox.ContentProps{NoSearch: true}) {
+											@selectbox.Group() {
+												for _, k := range model.ModelKinds() {
+													@selectbox.Item(selectbox.ItemProps{Value: string(k), Selected: kind == k}) {
+														{ common.ModelKindLabel(k) }
+													}
+												}
+											}
+										}
+									}
+									@form.Description() {
+										Un modèle de <strong>complétion</strong> répond aux routes <code>/chat/completions</code> et <code>/messages</code>, un modèle d'<strong>embeddings</strong> à <code>/embeddings</code>. Un modèle de <strong>décision</strong> répond à <code>/decisions</code> : questions typées sur un état, réponses en probabilités (modèles Jev de TypeSafe, par le type <code>typesafe</code> ou <code>openrouter</code>). Les modèles virtuels et les middlewares ne servent que la complétion.
+									}
+								</div>
+								<div class="space-y-2">
+									@form.Label(form.LabelProps{}) {
+										Contexte & Sortie
 									}
 									<div class="grid grid-cols-2 gap-3">
 										<div class="space-y-2">
@@ -148,7 +177,6 @@ templ ModelForm(vmodel ModelFormVModel) {
 									{{ capVision := !vmodel.IsNew && vmodel.Model != nil && vmodel.Model.Capabilities().Vision }}
 									{{ capReasoning := !vmodel.IsNew && vmodel.Model != nil && vmodel.Model.Capabilities().Reasoning }}
 									{{ capAudio := !vmodel.IsNew && vmodel.Model != nil && vmodel.Model.Capabilities().Audio }}
-									{{ capEmbeddings := !vmodel.IsNew && vmodel.Model != nil && vmodel.Model.Capabilities().Embeddings }}
 									@form.ItemFlex() {
 										@switchcomp.Switch(switchcomp.Props{ID: "cap_tools", Name: "cap_tools", Checked: capTools, Disabled: readonly})
 										@form.Label(form.LabelProps{For: "cap_tools"}) {
@@ -171,12 +199,6 @@ templ ModelForm(vmodel ModelFormVModel) {
 										@switchcomp.Switch(switchcomp.Props{ID: "cap_audio", Name: "cap_audio", Checked: capAudio, Disabled: readonly})
 										@form.Label(form.LabelProps{For: "cap_audio"}) {
 											Audio 
-										}
-									}
-									@form.ItemFlex() {
-										@switchcomp.Switch(switchcomp.Props{ID: "cap_embeddings", Name: "cap_embeddings", Checked: capEmbeddings, Disabled: readonly})
-										@form.Label(form.LabelProps{For: "cap_embeddings"}) {
-											Embeddings 
 										}
 									}
 								</div>
