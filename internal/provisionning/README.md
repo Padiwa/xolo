@@ -348,8 +348,9 @@ carry no representation and no personal data:
 - `type` is `<resource_type>.created.v1`, `.updated.v1` or `.deleted.v1`, with
   `resource_type` one of `tenant`, `tenant_domain`, `organization`, `member`,
   `organization_membership`, `team`, `team_membership` and the business
-  families `provider`, `custom_role`, `virtual_model`, `middleware`,
-  `team_settings`, `application`, `quota` and `alert`. A team key is `{"tenant_id","organization_id","team_id"}`, a
+  families `provider`, `llm_model`, `custom_role`, `virtual_model`,
+  `middleware`, `personal_virtual_model`, `team_settings`, `application`,
+  `quota` and `alert`. A team key is `{"tenant_id","organization_id","team_id"}`, a
   team membership key adds `member_id`. A deletion carries no `etag`.
 - **One event per resource and per commit.** A no-op or a rolled back
   transaction publishes nothing. Within a commit, deletions come first, from
@@ -563,9 +564,11 @@ one: the same person signing in on two tenants owns two distinct accounts.
 
 ## Business resources
 
-Eight families specific to Xolo follow the same contract as the common
+Ten families specific to Xolo follow the same contract as the common
 families: unit reads with an `ETag`, paginated lists, conditional `PUT`s and
-events. The manifest announces `business_resources`.
+events. `llm_model` and `personal_virtual_model` are read-only: no `PUT` nor
+`DELETE` (`405`), see [LLM models](#llm-models) and
+[Personal models](#personal-models). The manifest announces `business_resources`.
 
 | Method | Route |
 |---|---|
@@ -574,6 +577,8 @@ events. The manifest announces `business_resources`.
 | `GET`, `GET`, `PUT`, `DELETE` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/applications[/{key}]` |
 | `GET`, `GET`, `PUT`, `DELETE` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/alerts[/{key}]` |
 | `GET`, `GET`, `PUT`, `DELETE` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/providers[/{key}]` |
+| `GET`, `GET` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/llm-models[/{key}]` |
+| `GET`, `GET` | `/v1/xolo/tenants/{tenantID}/members/{memberID}/personal-models[/{key}]` |
 | `GET`, `GET`, `PUT`, `DELETE` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/virtual-models[/{key}]` |
 | `GET`, `GET`, `PUT`, `DELETE` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/middlewares[/{key}]` |
 | `GET`, `GET`, `PUT` | `…/virtual-models/{key}/nodes[/{nodeID}]`, `…/middlewares/{key}/nodes[/{nodeID}]`, see [Virtual models and middlewares](#virtual-models-and-middlewares) |
@@ -593,7 +598,9 @@ only where shown.
 | `alert` | `{"name","description","scope","owner_id","query","aggregation","window_seconds","comparator","threshold","for_seconds","enabled"}` |
 | `virtual_model` | `{"name","description","catalog_overrides","graph"}`, `catalog_overrides` `null` or `{"contextWindow","maxOutputTokens","capabilities"}`, as in the web UI |
 | `middleware` | `{"name","description","enabled","priority","applies_to_all","targets":[{"kind","id"}],"graph"}` |
-| `provider` | `{"name","type","base_url","active","currency","cloud_tier","billing_mode","subscription_plan","retry_config","rate_limit_config"}`, the last three `null` or objects, plus the write-only `"api_key"` |
+| `llm_model` | `{"provider_id","proxy_name","kind","enabled"}`, read-only |
+| `personal_virtual_model` | `{"name","description","team_id","catalog_overrides","graph"}`, read-only, under a member |
+| `provider` | `{"name","type","base_url","active","currency","cloud_tier","billing_mode","subscription_plan","retry_config","rate_limit_config"}`, the last three `null` or objects, plus the write-only `"api_key"` and the optional `"request_headers"`: `null` or `{"headers":{"Name":"value"},"session_header":"x-opencode-session"}`, the headers a gateway requires (empty values and credential, cookie, framing and forwarding headers are refused) |
 
 - **Keys.** A new resource is created under a canonical UUID chosen by the
   client. A resource created from the web UI keeps its local identifier, which
@@ -691,7 +698,8 @@ their `PUT` or node by node:
   of them.
 - **Targets** of a middleware are `{"kind":"llm"|"virtual","id"}`, models or
   virtual models of the organization (`404 parent_not_found`), sorted and
-  deduplicated; they are kept, but ignored, when `applies_to_all` is set.
+  deduplicated; they are kept, but ignored, when `applies_to_all` is set. An
+  `llm` ID is the key of an [LLM model](#llm-models).
 - **Nodes have no revision of their own.** The node routes return the `ETag`
   of the pipeline, and a node `PUT` is conditioned by it: a node edit and a
   concurrent rewrite of the graph, through this API or the web UI, conflict
@@ -720,9 +728,76 @@ their `PUT` or node by node:
 - Known limits: deleting a virtual model or a middleware, here as in the web
   UI, leaves the team grants and attachments that designate it (#164); the
   web UI import keeps the node IDs of a bundle and does not check plugin
-  placements (#165); personal virtual models stay out of this API. A `graph`
-  that does not decode answers `400` here as on the internal API, a graph
-  that decodes but is refused answers `422` on both.
+  placements (#165). A `graph` that does not decode answers `400` here as on
+  the internal API, a graph that decodes but is refused answers `422` on
+  both.
+
+### LLM models
+
+The models of the providers of an organization are the read-only family
+`llm_model`: they are managed from the web UI, and the API exposes what a
+control plane needs to resolve the `llm` targets of a middleware and the
+`model_grants` of a team, whose `model_id` is their key.
+
+| Method | Route |
+|---|---|
+| `GET` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/llm-models` — paginated like the other collections |
+| `GET` | `/v1/xolo/tenants/{tenantID}/organizations/{orgID}/llm-models/{key}` — one model, with its `ETag` |
+
+```json
+{"provider_id":"…","proxy_name":"meta/llama","kind":"completion","enabled":true}
+```
+
+- `kind` is `completion`, `embeddings` or `decision`. Disabled models are
+  listed, with `enabled` `false`: a target or a grant may designate one, and
+  the gateway serves none of them.
+- **Name resolution.** `proxy_name` is the name of the model inside its
+  organization, without the organization slug nor a team segment. The gateway
+  resolves a requested name `<org>/<team>/<model>` by removing the team
+  segment, when it is the slug of a team of the organization, then
+  `<org>/<model>` by removing the organization slug; the rest, which may
+  itself contain `/`, is compared to the `proxy_name` of the enabled models.
+- Neither the upstream model, the base URL, the extra body, the pricing nor
+  the catalog are exposed: a change of them changes no `ETag` and publishes
+  no event. Creating, renaming, enabling, disabling or deleting a model
+  publishes `llm_model.created.v1`, `.updated.v1` or `.deleted.v1`; deleting a
+  provider publishes the deletion of its models before its own.
+- `PUT` and `DELETE` answer `405`. The family has no write authority: it is
+  not part of `XOLO_OWNERSHIP`, and only the local instance writes it.
+- Migration `202610230001` projects the existing models without publishing
+  any event; like the previous ones, it requires every server to be stopped.
+
+### Personal models
+
+The virtual models a member builds for themself, named `~/<name>`, are the
+read-only family `personal_virtual_model`. They hang from the member, not
+from an organization, and stay managed from the profile.
+
+| Method | Route |
+|---|---|
+| `GET` | `/v1/xolo/tenants/{tenantID}/members/{memberID}/personal-models` — paginated like the other collections |
+| `GET` | `/v1/xolo/tenants/{tenantID}/members/{memberID}/personal-models/{key}` — one model, with its `ETag` |
+
+```json
+{"name":"router","description":"","team_id":"…","catalog_overrides":null,"graph":{"nodes":[…],"edges":[…]}}
+```
+
+- The key of an item and of an event is
+  `{"tenant_id","member_id","resource_id"}`.
+- `team_id` is the team the requests are charged to, as picked by the member,
+  empty when they picked none; it may designate a team since deleted, which
+  refuses the requests until the member picks another one. `graph` is the
+  pipeline as for a virtual model, without the secrets of its plugin nodes,
+  which are neither returned nor listed.
+- **Name resolution.** The gateway resolves `~/<name>` against the models of
+  the member the request authenticates; `name` is that `<name>`.
+- Creating, changing or deleting a personal model publishes
+  `personal_virtual_model.created.v1`, `.updated.v1` or `.deleted.v1`;
+  deleting or purging a member publishes the deletion of its models. A
+  change of the secrets of its nodes alone publishes nothing.
+- `PUT` and `DELETE` answer `405`. The family has no write authority: it is
+  not part of `XOLO_OWNERSHIP`, and only the local instance writes it.
+- Migration `202610230001` projects the existing personal models too.
 
 ## Write authority, adoption and detachment
 
@@ -750,7 +825,7 @@ projection the write changes, cascades included: deleting a tenant whose
 members belong to another authority is refused as a whole, and nothing is
 removed nor published. The fields outside the contract stay local whatever the
 policy: platform roles, the currency and quota sharing of an organization,
-models, virtual models, middlewares and application tokens.
+LLM models and application tokens.
 Application accounts and API tokens remain usable, and reads keep their
 permissions. `GET /v1/xolo/ownership` returns the effective policy, and the
 manifest announces `ownership`.
@@ -1186,9 +1261,10 @@ In production, use a managed certificate authority (Vault, cert-manager, interna
 
 ## Out of scope for now
 
-- LLM models, personal virtual models, application tokens and event
-  settings. They all already have a `port.*Store`: exposing them means adding a
-  handler file and its DTOs, with no architectural change.
+- Writing LLM models and personal virtual models, which are read-only here;
+  application tokens and event settings. They all already have a
+  `port.*Store`: exposing them means adding a handler file and its DTOs, with
+  no architectural change.
 - Per-certificate scopes.
 - No generated OpenAPI specification.
 

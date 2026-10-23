@@ -33,11 +33,21 @@ const (
 	FamilyQuota       = "quota"
 	FamilyAlert       = "alert"
 	FamilyProvider    = "provider"
+	// FamilyLLMModel designates the models of a provider. It is read-only:
+	// models are managed from the web UI, the API only exposes the identifier
+	// that middleware targets and team grants designate, and the name a
+	// client sends.
+	FamilyLLMModel = "llm_model"
 	// FamilyVirtualModel and FamilyMiddleware hold a pipeline graph: a
 	// virtual model is exposed as a model of its own, a middleware wraps the
 	// models it targets.
 	FamilyVirtualModel = "virtual_model"
 	FamilyMiddleware   = "middleware"
+	// FamilyPersonalVirtualModel designates the virtual models a member
+	// builds for themself, named "~/<name>". It hangs from the member, not
+	// from an organization, and is read-only like FamilyLLMModel: members
+	// manage them from their profile.
+	FamilyPersonalVirtualModel = "personal_virtual_model"
 	// FamilyTeamSettings holds what a team carries beyond the common contract:
 	// description, budget sharing, model grants, middlewares and the roles of
 	// its members on the team scope. It exists exactly when its team does.
@@ -47,14 +57,20 @@ const (
 // CommonFamilies lists the families of the common contract, parents first.
 var CommonFamilies = []string{FamilyTenant, FamilyTenantDomain, FamilyOrganization, FamilyMember, FamilyOrganizationMembership, FamilyTeam, FamilyTeamMembership}
 
-// BusinessFamilies lists the business families, parents first: team grants
-// designate the models of providers and virtual models, and the middlewares,
-// team members hold roles, applications are bound to teams, quotas cap
-// applications and teams.
-var BusinessFamilies = []string{FamilyProvider, FamilyCustomRole, FamilyVirtualModel, FamilyMiddleware, FamilyTeamSettings, FamilyApplication, FamilyQuota, FamilyAlert}
+// BusinessFamilies lists the business families, parents first: models
+// belong to providers, middlewares target models and virtual models, team
+// grants designate them and the middlewares, team members hold roles,
+// applications are bound to teams, quotas cap applications and teams.
+var BusinessFamilies = []string{FamilyProvider, FamilyLLMModel, FamilyCustomRole, FamilyVirtualModel, FamilyMiddleware, FamilyPersonalVirtualModel, FamilyTeamSettings, FamilyApplication, FamilyQuota, FamilyAlert}
 
 // IsBusinessFamily tells whether family is a business family.
 func IsBusinessFamily(family string) bool { return slices.Contains(BusinessFamilies, family) }
+
+// IsReadOnlyFamily tells whether the API only reads family: its resources
+// are written locally, and published like the others.
+func IsReadOnlyFamily(family string) bool {
+	return family == FamilyLLMModel || family == FamilyPersonalVirtualModel
+}
 
 // CommonKey identifies a resource independently of its mutable representation.
 type CommonKey struct {
@@ -74,6 +90,8 @@ type CommonScope struct {
 	OrganizationID string `json:"o,omitempty"`
 	// TeamID is the parent of a team membership collection.
 	TeamID string `json:"m,omitempty"`
+	// MemberID is the parent of a personal virtual model collection.
+	MemberID string `json:"u,omitempty"`
 }
 
 // CommonItem is the projection of one resource.

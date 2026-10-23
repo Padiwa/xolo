@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/xolo-gateway/xolo/internal/core/model"
+	"github.com/xolo-gateway/xolo/internal/core/port"
 )
 
 // businessRoute describes the representation of a business family: the
@@ -23,6 +24,9 @@ type businessRoute struct {
 	// noDelete marks a family whose resource lives and dies with another:
 	// the settings of a team are removed with the team.
 	noDelete bool
+	// readOnly marks a family the API only reads: its resources are
+	// managed locally.
+	readOnly bool
 }
 
 var businessRoutes = []businessRoute{
@@ -40,25 +44,29 @@ var businessRoutes = []businessRoute{
 		required: []string{"name", "type", "base_url", "active", "currency", "cloud_tier", "billing_mode", "subscription_plan", "retry_config", "rate_limit_config"},
 		nullable: []string{"subscription_plan", "retry_config", "rate_limit_config", "request_headers"},
 		optional: []string{"api_key", "request_headers"}},
+	{family: model.FamilyLLMModel, readOnly: true},
 	{family: model.FamilyVirtualModel, required: []string{"name", "description", "catalog_overrides", "graph"}, nullable: []string{"catalog_overrides"}},
 	{family: model.FamilyMiddleware, required: []string{"name", "description", "enabled", "priority", "applies_to_all", "targets", "graph"}},
+	{family: model.FamilyPersonalVirtualModel, readOnly: true},
 }
 
 // businessCollections names the collection of each business family.
 var businessCollections = map[string]string{
-	model.FamilyCustomRole:   "roles",
-	model.FamilyTeamSettings: "team-settings",
-	model.FamilyApplication:  "applications",
-	model.FamilyQuota:        "quotas",
-	model.FamilyAlert:        "alerts",
-	model.FamilyProvider:     "providers",
-	model.FamilyVirtualModel: "virtual-models",
-	model.FamilyMiddleware:   "middlewares",
+	model.FamilyCustomRole:           "roles",
+	model.FamilyTeamSettings:         "team-settings",
+	model.FamilyApplication:          "applications",
+	model.FamilyQuota:                "quotas",
+	model.FamilyAlert:                "alerts",
+	model.FamilyProvider:             "providers",
+	model.FamilyLLMModel:             "llm-models",
+	model.FamilyVirtualModel:         "virtual-models",
+	model.FamilyMiddleware:           "middlewares",
+	model.FamilyPersonalVirtualModel: "personal-models",
 }
 
 // mountBusiness serves the business resources with the reads, conditions,
 // deletions and events of the common contract. Quotas hang from the tenant,
-// the others from an organization.
+// personal models from a member, the others from an organization.
 func (h *Handler) mountBusiness() {
 	const (
 		tenant = "/v1/xolo/tenants/{tenantID}"
@@ -66,11 +74,17 @@ func (h *Handler) mountBusiness() {
 	)
 	for _, route := range businessRoutes {
 		collection := org + "/" + businessCollections[route.family]
-		if route.family == model.FamilyQuota {
+		switch route.family {
+		case model.FamilyQuota:
 			collection = tenant + "/" + businessCollections[route.family]
+		case model.FamilyPersonalVirtualModel:
+			collection = tenant + "/members/{memberID}/" + businessCollections[route.family]
 		}
 		h.mux.HandleFunc("GET "+collection, h.handleBusinessList(route))
 		h.mux.HandleFunc("GET "+collection+"/{resourceID}", h.handleBusinessGet(route))
+		if route.readOnly {
+			continue
+		}
 		h.mux.HandleFunc("PUT "+collection+"/{resourceID}", h.handleBusinessPut(route))
 		if !route.noDelete {
 			h.mux.HandleFunc("DELETE "+collection+"/{resourceID}", h.handleBusinessDelete(route))
@@ -91,6 +105,15 @@ func businessScope(w http.ResponseWriter, r *http.Request, family string) (model
 		return model.CommonScope{}, false
 	}
 	scope := model.CommonScope{Family: family, TenantID: string(tenantID)}
+	if family == model.FamilyPersonalVirtualModel {
+		memberID, err := model.ParseUserID(r.PathValue("memberID"))
+		if err != nil {
+			writeInvalidID(w)
+			return model.CommonScope{}, false
+		}
+		scope.MemberID = string(memberID)
+		return scope, true
+	}
 	if family != model.FamilyQuota {
 		orgID, err := model.ParseOrgID(r.PathValue("orgID"))
 		if err != nil {
@@ -238,12 +261,16 @@ func (h *Handler) putBusiness(ctx context.Context, scope model.CommonScope, key 
 			return model.CommonItem{}, err
 		}
 		return h.provisioning.PutMiddleware(ctx, tenantID, orgID, key, condition, v)
-	default:
+	case model.FamilyProvider:
 		var v model.ProviderSettings
 		if err := decode(&v); err != nil {
 			return model.CommonItem{}, err
 		}
 		return h.provisioning.PutProvider(ctx, tenantID, orgID, key, condition, v)
+	default:
+		// A read-only family has no PUT route; refused here as well, so that
+		// it never reaches the decoding of another family.
+		return model.CommonItem{}, port.ErrInvalid
 	}
 }
 
