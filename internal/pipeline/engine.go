@@ -220,6 +220,16 @@ func (e *Engine) RunBackwardWithToolCalls(
 	// Iterate in reverse order.
 	for i := len(exec.ExecutedNodes) - 1; i >= 0; i-- {
 		en := exec.ExecutedNodes[i]
+		// Once the pass is out of time no node can complete on its context:
+		// the remaining ones are skipped, and said so once, instead of each
+		// failing and being logged as the node the deadline cut.
+		if err := ctx.Err(); err != nil {
+			slog.WarnContext(ctx, "pipeline: backward pass out of time, skipping the remaining nodes",
+				slog.Int("skipped", i+1),
+				slog.Any("error", err),
+			)
+			break
+		}
 		ex, ok := e.registry.Get(en.Node.Type)
 		if !ok {
 			continue
@@ -237,7 +247,16 @@ func (e *Engine) RunBackwardWithToolCalls(
 		if err != nil {
 			// Non-fatal: the response is still worth sending, just without
 			// whatever this node was going to change.
-			slog.WarnContext(ctx, "pipeline: backward pass failed for a node, keeping the response as it stands",
+			msg := "pipeline: backward pass failed for a node, keeping the response as it stands"
+			// A pass cut by its deadline is told apart: the node's rewrite,
+			// the pseudonymizer's restored values for instance, is then
+			// missing from the response, and only this line says why. The
+			// node's own error does not tell, a plugin reports the deadline as
+			// a gRPC status, so the context is checked instead.
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				msg = "pipeline: backward pass timed out for a node, keeping the response as it stands"
+			}
+			slog.WarnContext(ctx, msg,
 				slog.String("node", en.Node.ID),
 				slog.String("type", string(en.Node.Type)),
 				slog.Any("error", err),

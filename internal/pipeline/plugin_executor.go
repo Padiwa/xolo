@@ -282,6 +282,11 @@ func (e *PluginExecutor) Backward(ctx context.Context, in BackwardInput) (*Backw
 		NodeState:             in.NodeState,
 	})
 	if err != nil {
+		// A pass cut by its context goes up to the engine, which tells a
+		// timeout apart; any other failure stays the plugin's own.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return &BackwardResult{}, errors.Wrapf(err, "plugin %s PostResponse", data.PluginName)
+		}
 		slog.WarnContext(ctx, "plugin PostResponse failed",
 			slog.String("plugin", data.PluginName),
 			slog.Any("error", err))

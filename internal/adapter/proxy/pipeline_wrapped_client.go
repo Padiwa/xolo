@@ -4,10 +4,29 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/bornholm/genai/llm"
 	"github.com/xolo-gateway/xolo/internal/pipeline"
 )
+
+// DefaultBackwardTimeout bounds the backward pass of a response unless
+// XOLO_PROXY_PIPELINE_BACKWARD_TIMEOUT says otherwise. The pass runs detached
+// from the request, so the caller leaving cannot cut it short: a node that
+// hangs would otherwise hold its goroutine forever. A pass cut by the timeout
+// fails like any other, and the response goes out unmodified.
+const DefaultBackwardTimeout = 30 * time.Second
+
+// detachedBackwardContext returns the context a backward pass runs on: it
+// keeps ctx's values, outlives the caller and ends after the backward timeout
+// of the client, never when it is zero. Create it when the pass starts, not
+// before: the timeout bounds the pass, not the response it follows.
+func (c *PipelineWrappedClient) detachedBackwardContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if c.backwardTimeout <= 0 {
+		return context.WithCancel(context.WithoutCancel(ctx))
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), c.backwardTimeout)
+}
 
 // PipelineWrappedClient wraps an llm.Client to run the pipeline's backward pass
 // (post-response processing) after each LLM call.
@@ -16,6 +35,8 @@ type PipelineWrappedClient struct {
 	engine      *pipeline.Engine
 	forwardExec *pipeline.ForwardExecution
 	ec          pipeline.ExecutionContext
+
+	backwardTimeout time.Duration
 }
 
 // NewPipelineWrappedClient creates a PipelineWrappedClient.
@@ -25,14 +46,23 @@ func NewPipelineWrappedClient(
 	forwardExec *pipeline.ForwardExecution,
 	ec pipeline.ExecutionContext,
 ) *PipelineWrappedClient {
-	return &PipelineWrappedClient{inner: inner, engine: engine, forwardExec: forwardExec, ec: ec}
+	return &PipelineWrappedClient{inner: inner, engine: engine, forwardExec: forwardExec, ec: ec, backwardTimeout: DefaultBackwardTimeout}
 }
 
-// ChatCompletion calls the inner client and runs the backward pass on the result.
+// WithBackwardTimeout bounds the backward pass of each response, see
+// DefaultBackwardTimeout. Zero leaves it unbounded.
+func (c *PipelineWrappedClient) WithBackwardTimeout(timeout time.Duration) *PipelineWrappedClient {
+	c.backwardTimeout = timeout
+	return c
+}
+
+// ChatCompletion calls the inner client and runs the backward pass on the
+// result, on a context the caller leaving cannot cancel, as on the streaming
+// paths.
 func (c *PipelineWrappedClient) ChatCompletion(ctx context.Context, funcs ...llm.ChatCompletionOptionFunc) (llm.ChatCompletionResponse, error) {
 	resp, err := c.inner.ChatCompletion(ctx, funcs...)
 	if err != nil {
-		c.runBackward(ctx, "", nil, true)
+		c.runBackwardDetached(ctx, "", nil, true)
 		return resp, err
 	}
 
@@ -42,7 +72,9 @@ func (c *PipelineWrappedClient) ChatCompletion(ctx context.Context, funcs ...llm
 	}
 	tokens := extractResponseTokens(resp)
 
-	outcome, backErr := c.engine.RunBackwardWithToolCalls(ctx, c.forwardExec, content, encodeToolCalls(resp.ToolCalls()), tokens, false)
+	backCtx, cancelBack := c.detachedBackwardContext(ctx)
+	defer cancelBack()
+	outcome, backErr := c.engine.RunBackwardWithToolCalls(backCtx, c.forwardExec, content, encodeToolCalls(resp.ToolCalls()), tokens, false)
 	if backErr != nil {
 		slog.WarnContext(ctx, "pipeline backward pass failed", slog.Any("error", backErr))
 		return resp, nil
@@ -86,14 +118,18 @@ func (c *PipelineWrappedClient) ChatCompletionStream(ctx context.Context, funcs 
 		var buf bytes.Buffer
 		var lastTokens *pipeline.TokensUsed
 		calls := &streamedToolCalls{}
+		complete := false
+		var usage llm.ChatCompletionUsage
 
 		for chunk := range sourceCh {
 			chunks = append(chunks, chunk)
+			complete = complete || chunk.IsComplete()
 			if d := chunk.Delta(); d != nil {
 				buf.WriteString(d.Content())
 				calls.collect(d.ToolCalls())
 			}
 			if u := chunk.Usage(); u != nil {
+				usage = u
 				lastTokens = &pipeline.TokensUsed{
 					Prompt:     u.PromptTokens(),
 					Completion: u.CompletionTokens(),
@@ -102,7 +138,42 @@ func (c *PipelineWrappedClient) ChatCompletionStream(ctx context.Context, funcs 
 		}
 
 		content := buf.String()
-		outcome, backErr := c.engine.RunBackwardWithToolCalls(ctx, c.forwardExec, content, calls.json(), lastTokens, false)
+
+		// The backward pass runs on a context that outlives the request: a
+		// caller leaving mid-pass would otherwise fail the nodes' PostResponse
+		// with "context canceled", and nodes that record state would miss the
+		// response.
+		backCtx, cancelBack := c.detachedBackwardContext(ctx)
+		defer cancelBack()
+
+		// The caller went away: nothing will read the answer. The backward
+		// pass still runs so nodes that record state see it, told partial
+		// only when the provider did not finish it, as on the passthrough
+		// path: the caller leaving and the answer being cut are two things.
+		if ctx.Err() != nil {
+			if _, err := c.engine.RunBackwardWithToolCalls(backCtx, c.forwardExec, content, calls.json(), lastTokens, !complete); err != nil {
+				slog.WarnContext(ctx, "pipeline backward pass (stream) failed", slog.Any("error", err))
+			}
+			// The proxy still needs one chunk: on a stream closed empty it
+			// runs its error hooks only, and the usage the provider billed
+			// would never be recorded. One chunk carrying that usage lands in
+			// the empty buffer; the proxy then finds the caller gone and runs
+			// its post-response hooks with it. The send never blocks: the
+			// caller's context is dead, so emit would drop it, and a full
+			// buffer must not hold this goroutine with no reader.
+			last := llm.NewStreamChunkWithUsage(llm.NewStreamDelta(llm.RoleAssistant, ""), usage)
+			if complete {
+				last = llm.NewCompleteStreamChunk(usage)
+			}
+			select {
+			case outCh <- last:
+			default:
+				slog.WarnContext(ctx, "pipeline: no room for the usage chunk of an abandoned stream")
+			}
+			return
+		}
+
+		outcome, backErr := c.engine.RunBackwardWithToolCalls(backCtx, c.forwardExec, content, calls.json(), lastTokens, false)
 		modified := content
 		rewrittenCalls := []llm.ToolCallDelta(nil)
 		if backErr != nil {
@@ -112,9 +183,27 @@ func (c *PipelineWrappedClient) ChatCompletionStream(ctx context.Context, funcs 
 			rewrittenCalls = calls.rewritten(ctx, outcome.ToolCallsJSON)
 		}
 
+		// emit gives up once the caller is gone, instead of blocking this
+		// goroutine on a channel nobody reads anymore. The context is checked
+		// first: a select would otherwise pick at random between a free slot
+		// in the buffer and the cancellation.
+		emit := func(chunk llm.StreamChunk) bool {
+			if ctx.Err() != nil {
+				return false
+			}
+			select {
+			case outCh <- chunk:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
+
 		if modified == content && rewrittenCalls == nil {
 			for _, ch := range chunks {
-				outCh <- ch
+				if !emit(ch) {
+					return
+				}
 			}
 			return
 		}
@@ -131,12 +220,16 @@ func (c *PipelineWrappedClient) ChatCompletionStream(ctx context.Context, funcs 
 		for _, ch := range chunks {
 			d := ch.Delta()
 			if d == nil {
-				outCh <- ch
+				if !emit(ch) {
+					return
+				}
 				continue
 			}
 			hasToolCalls := rewrittenCalls != nil && len(d.ToolCalls()) > 0
 			if d.Content() == "" && !hasToolCalls {
-				outCh <- ch
+				if !emit(ch) {
+					return
+				}
 				continue
 			}
 
@@ -156,7 +249,9 @@ func (c *PipelineWrappedClient) ChatCompletionStream(ctx context.Context, funcs 
 					toolCallsEmitted = true
 				}
 			}
-			outCh <- &contentOverrideChunk{StreamChunk: ch, delta: override}
+			if !emit(&contentOverrideChunk{StreamChunk: ch, delta: override}) {
+				return
+			}
 		}
 	}()
 
@@ -175,8 +270,10 @@ func (c *PipelineWrappedClient) streamPassthrough(ctx context.Context, sourceCh 
 
 		var buf bytes.Buffer
 		var lastTokens *pipeline.TokensUsed
+		complete := false
 
 		for chunk := range sourceCh {
+			complete = complete || chunk.IsComplete()
 			buf.WriteString(chunkText(chunk))
 			if u := chunk.Usage(); u != nil {
 				lastTokens = &pipeline.TokensUsed{
@@ -191,7 +288,7 @@ func (c *PipelineWrappedClient) streamPassthrough(ctx context.Context, sourceCh 
 				// The caller is gone. Still run the backward pass below so
 				// nodes that record state (usage, quotas…) see the partial
 				// response instead of nothing.
-				c.runBackward(context.WithoutCancel(ctx), buf.String(), lastTokens, true)
+				c.runBackwardDetached(ctx, buf.String(), lastTokens, true)
 				return
 			}
 		}
@@ -204,7 +301,12 @@ func (c *PipelineWrappedClient) streamPassthrough(ctx context.Context, sourceCh 
 		// rewrite is ignored on this path anyway, but a node that only observes
 		// them — audit, metrics — sees them on the two other paths and not on
 		// this one. Worth revisiting the day such a node exists.
-		c.runBackward(ctx, buf.String(), lastTokens, false)
+		//
+		// The caller may leave right after the last chunk: the backward pass
+		// outlives it, as on the other paths. A caller leaving earlier makes
+		// the provider stop, and the source then ends without its completion
+		// chunk: the nodes are told the answer is partial.
+		c.runBackwardDetached(ctx, buf.String(), lastTokens, ctx.Err() != nil && !complete)
 	}()
 
 	return outCh
@@ -225,6 +327,14 @@ func (c *PipelineWrappedClient) runBackward(ctx context.Context, content string,
 	if _, err := c.engine.RunBackward(ctx, c.forwardExec, content, tokens, hadError); err != nil {
 		slog.WarnContext(ctx, "pipeline backward pass failed", slog.Any("error", err))
 	}
+}
+
+// runBackwardDetached runs the backward pass on a context detached from the
+// caller, see detachedBackwardContext.
+func (c *PipelineWrappedClient) runBackwardDetached(ctx context.Context, content string, tokens *pipeline.TokensUsed, hadError bool) {
+	backCtx, cancel := c.detachedBackwardContext(ctx)
+	defer cancel()
+	c.runBackward(backCtx, content, tokens, hadError)
 }
 
 func extractResponseTokens(resp llm.ChatCompletionResponse) *pipeline.TokensUsed {
