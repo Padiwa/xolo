@@ -206,6 +206,12 @@ func (h *Handler) loadModelUsages(ctx context.Context, userID model.UserID, memb
 	user := httpCtx.User(ctx)
 	isGlobalAdmin := user != nil && slices.Contains(user.Roles(), authz.RoleAdmin)
 
+	orgIDs := make([]model.OrgID, 0, len(memberships))
+	for _, m := range memberships {
+		orgIDs = append(orgIDs, m.OrgID())
+	}
+	cards := h.modelCards.NewResolver(ctx, orgIDs, "", userID)
+
 	var modelUsages []component.ModelUsage
 	for _, m := range memberships {
 		perms, err := h.roleStore.ResolveEffectivePermissions(ctx, userID, m.OrgID())
@@ -285,18 +291,25 @@ func (h *Handler) loadModelUsages(ctx context.Context, userID model.UserID, memb
 						slog.ErrorContext(ctx, "could not aggregate virtual model usage", slogx.Error(err))
 						modelAgg = nil
 					}
-					wrappedModel := &virtualModelAsLLMModel{vm: vm, org: org}
-					modelUsages = append(modelUsages, component.ModelUsage{
-						Model:     wrappedModel,
-						Org:       org,
-						Aggregate: modelAgg,
-						Names:     names,
-					})
+					modelUsages = append(modelUsages, virtualModelUsage(cards, vm, org, modelAgg, names))
 				}
 			}
 		}
 	}
 	return modelUsages
+}
+
+// virtualModelUsage describes a virtual model with its catalogue card: its
+// capabilities are undetermined when the card does not declare them.
+func virtualModelUsage(cards *service.ModelCardResolver, vm model.VirtualModel, org model.Organization, agg *port.UsageAggregate, names []string) component.ModelUsage {
+	card := cards.OrgModelCard(vm)
+	return component.ModelUsage{
+		Model:                    &virtualModelAsLLMModel{vm: vm, org: org, card: card},
+		Org:                      org,
+		Aggregate:                agg,
+		Names:                    names,
+		CapabilitiesUndetermined: !card.Declared,
+	}
 }
 
 func orgSlugOf(org model.Organization) string {
