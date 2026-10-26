@@ -155,8 +155,15 @@ func (ec ExecutionContext) SessionKey() string {
 	return ec.OrgID + "/" + ec.UserID
 }
 
-// FillTemplate replaces the PLACEHOLDERS of template with values, and reports
-// whether one of them was missing.
+// FillTemplateArgs substitutes placeholders inside the string values of a JSON
+// arguments template and returns the re-marshalled result.
+//
+// The template is parsed first, so a substituted value can never leave the
+// string it belongs to: a quote, a backslash or a newline in a user message is
+// escaped by the marshaller instead of closing that string and breaking the
+// JSON. For the same reason the operation cannot add or rename a key, so a
+// filter an administrator fixed in the template stays out of reach of the text
+// being substituted.
 //
 // The placeholders a template may use are the ones a tool's arguments are
 // mapped from:
@@ -169,18 +176,69 @@ func (ec ExecutionContext) SessionKey() string {
 // string: a retrieval tool called with an empty query answers with nothing,
 // which the model then has to make sense of. Lookups are not chained, so a
 // value holding "{{...}}" is never expanded again.
-func FillTemplate(template string, values map[string]string) (string, bool) {
+func FillTemplateArgs(template string, values map[string]string) (string, bool, error) {
+	if strings.TrimSpace(template) == "" {
+		return "{}", false, nil
+	}
+
+	var decoded any
+	if err := json.Unmarshal([]byte(template), &decoded); err != nil {
+		return "", false, errors.Wrap(err, "arguments template is not valid JSON")
+	}
+
 	missing := false
-	out := placeholders.ReplaceAllStringFunc(template, func(match string) string {
-		name := strings.TrimSpace(match[2 : len(match)-2])
-		value, ok := values[name]
-		if !ok || value == "" {
-			missing = true
-			return match
+	fill := func(s string) string {
+		return placeholders.ReplaceAllStringFunc(s, func(match string) string {
+			name := strings.TrimSpace(match[2 : len(match)-2])
+			value, ok := values[name]
+			if !ok || value == "" {
+				missing = true
+				return match
+			}
+			return value
+		})
+	}
+
+	filled, err := fillJSONStrings(decoded, fill)
+	if err != nil {
+		return "", false, err
+	}
+
+	encoded, err := json.Marshal(filled)
+	if err != nil {
+		return "", false, errors.Wrap(err, "re-encode fill arguments")
+	}
+	return string(encoded), missing, nil
+}
+
+// fillJSONStrings applies fill to every string of a decoded JSON value, leaving
+// the structure and its keys untouched.
+func fillJSONStrings(v any, fill func(string) string) (any, error) {
+	switch t := v.(type) {
+	case string:
+		return fill(t), nil
+	case map[string]any:
+		for key, item := range t {
+			filled, err := fillJSONStrings(item, fill)
+			if err != nil {
+				return nil, err
+			}
+			t[key] = filled
 		}
-		return value
-	})
-	return out, missing
+		return t, nil
+	case []any:
+		for i, item := range t {
+			filled, err := fillJSONStrings(item, fill)
+			if err != nil {
+				return nil, err
+			}
+			t[i] = filled
+		}
+		return t, nil
+	default:
+		// Numbers, booleans and null carry no text to substitute.
+		return v, nil
+	}
 }
 
 // TemplateValues builds the values FillTemplate substitutes from the request:
@@ -249,19 +307,24 @@ func (c *ToolLoopClient) prefetchConversationTools(ctx context.Context, messages
 
 // runConversationTool resolves one conversation tool into the text injected for
 // it, or an empty string when its arguments cannot be mapped from the request.
+//
+// A template the operator got wrong, or that user text makes unfillable, is
+// reported in the injected block rather than failing the request: a broken
+// prefetch should leave the model able to answer, like a tool call that failed.
 func (c *ToolLoopClient) runConversationTool(ctx context.Context, tool ConversationTool, values map[string]string) (string, error) {
-	arguments, missing := FillTemplate(tool.Arguments, values)
+	name := tool.Tool.Name()
+
+	arguments, missing, err := FillTemplateArgs(tool.Arguments, values)
+	if err != nil {
+		return conversationBlock(tool.Label, "the tool was not called: "+err.Error()), nil
+	}
 	if missing {
 		// The arguments name something this request does not carry (no user
 		// message to map a query from). Calling the tool anyway would ask the
 		// server a question nobody asked.
 		return "", nil
 	}
-	if strings.TrimSpace(arguments) == "" {
-		arguments = "{}"
-	}
 
-	name := tool.Tool.Name()
 	var params map[string]any
 	if err := json.Unmarshal([]byte(arguments), &params); err != nil {
 		return "", errors.Wrapf(err, "conversation tool %q: arguments are not a JSON object", name)

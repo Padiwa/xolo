@@ -45,6 +45,11 @@ type Connector struct {
 	// connector exists for. It is held only while no session exists, so calls
 	// on a live session never wait on it.
 	connectMu sync.Mutex
+	// onExpire, when set, runs once the connector has closed its session for
+	// good. A pool needs it to drop the entry it keeps for this connector:
+	// otherwise every conversation leaves one behind for the life of the
+	// process.
+	onExpire func()
 }
 
 // NewConnector returns a Connector opening sessions with cfg. idleTimeout <= 0
@@ -69,11 +74,21 @@ func (c *Connector) SetConfig(cfg Config) {
 	c.mu.Lock()
 	changed := cfg.AuthValue != c.cfg.AuthValue ||
 		cfg.AuthHeaderName != c.cfg.AuthHeaderName ||
-		cfg.Endpoint != c.cfg.Endpoint
+		cfg.Endpoint != c.cfg.Endpoint ||
+		cfg.Timeout != c.cfg.Timeout
 	c.cfg = cfg
 	if changed {
 		c.discardLocked()
 	}
+	c.mu.Unlock()
+}
+
+// OnExpire registers a callback run when the connector closes its session for
+// good (idle timeout, Reset, or Close). It runs at most once, from the goroutine
+// that closed the session, and must not block.
+func (c *Connector) OnExpire(f func()) {
+	c.mu.Lock()
+	c.onExpire = f
 	c.mu.Unlock()
 }
 
@@ -111,8 +126,15 @@ func (c *Connector) Do(ctx context.Context, fn func(*mcp.ClientSession) error) e
 
 // isSessionOver reports whether err is the session having ended rather than the
 // operation having failed.
+//
+// Two shapes say the session is over. A dropped transport closes the connection
+// (ErrConnectionClosed). A Streamable HTTP server that terminated the session
+// answers 404, which the SDK reports as ErrSessionMissing. Matching only the
+// first would treat the second as an ordinary failure: no retry, no Reset, and
+// the dead session would keep serving every later call of the conversation
+// until the idle timeout, which an active conversation never reaches.
 func isSessionOver(err error) bool {
-	return errors.Is(err, mcp.ErrConnectionClosed)
+	return errors.Is(err, mcp.ErrConnectionClosed) || errors.Is(err, mcp.ErrSessionMissing)
 }
 
 // acquire returns a session for one call, opening it when needed. Every
@@ -174,10 +196,6 @@ func (c *Connector) acquire(ctx context.Context) (*mcp.ClientSession, error) {
 		_ = session.Close()
 		return existing, nil
 	}
-	if c.session != nil {
-		// Another caller's session is over: ours replaces it.
-		c.discardLocked()
-	}
 	c.session = session
 	c.inFlight = 1
 	c.lastUsed = c.now()
@@ -208,8 +226,9 @@ func (c *Connector) Reset() {
 	c.mu.Unlock()
 }
 
-// Close closes the current session and stops the Connector. The Connector stays
-// usable: a later Do opens a new session.
+// Close closes the current session and marks the Connector terminal: a later Do
+// returns an error rather than opening a new session. It is what a plugin calls
+// when it shuts down, not a way to recycle a connector.
 func (c *Connector) Close() {
 	c.mu.Lock()
 	c.closed = true
@@ -229,8 +248,13 @@ func usable(session *mcp.ClientSession) bool {
 
 // discardLocked closes the current session, if any. The caller holds c.mu.
 func (c *Connector) discardLocked() {
-	session, stop := c.session, c.stop
-	c.session, c.stop, c.inFlight = nil, nil, 0
+	session, stop, onExpire := c.session, c.stop, c.onExpire
+	c.session, c.stop, c.inFlight, c.onExpire = nil, nil, 0, nil
+	if onExpire != nil {
+		// Fired only when a session actually existed: Cancel on an already
+		// empty connector must not evict a live entry from its pool.
+		defer onExpire()
+	}
 	if session == nil {
 		return
 	}

@@ -4,10 +4,12 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/xolo-gateway/xolo/internal/adapter/mcpclient"
 	proto "github.com/xolo-gateway/xolo/pkg/pluginsdk/proto"
 )
 
@@ -261,5 +263,152 @@ func TestPlugin_SeparateConversationsSeparateSessions(t *testing.T) {
 
 	if got := sessions.Load(); got != 2 {
 		t.Errorf("expected one session per conversation (2), saw %d", got)
+	}
+}
+
+// countingAuthServer echoes back the Authorization header it received, so a test
+// can tell which credential a pooled session is actually sending.
+func newEchoAuthServer(t *testing.T) (*httptest.Server, func() string) {
+	t.Helper()
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "v1"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "echo", Description: "echoes the auth header"}, func(_ context.Context, _ *mcp.CallToolRequest, _ echoInput) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil, nil
+	})
+
+	var mu sync.Mutex
+	var last string
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			mu.Lock()
+			last = auth
+			mu.Unlock()
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() {
+		srv.CloseClientConnections()
+		srv.Close()
+	})
+	return srv, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return last
+	}
+}
+
+// TestPlugin_PooledConnectorPicksUpRotatedSecret is the review's first finding:
+// SetConfig was never called, so a pooled connector kept the credential it was
+// created with. A rotated secret must reach the session.
+func TestPlugin_PooledConnectorPicksUpRotatedSecret(t *testing.T) {
+	srv, lastAuth := newEchoAuthServer(t)
+
+	p := newTestPlugin(t)
+	ctx := context.Background()
+	// The header name is what makes the stored secret be sent at all.
+	reqCtx := requestContext(srv.URL, `,"authHeaderName":"Authorization"`)
+
+	call := func() {
+		t.Helper()
+		if _, err := p.CallTool(ctx, &proto.CallToolInput{
+			Ctx:           reqCtx,
+			Name:          "echo",
+			ArgumentsJson: `{"text":"hi"}`,
+		}); err != nil {
+			t.Fatalf("CallTool: %v", err)
+		}
+	}
+
+	// The secret is read from the host store on every call.
+	setSecret := func(value string) {
+		t.Helper()
+		if err := p.getHostClient().SetSecret(ctx, "org-1", "mcp-bridge", "node-1", secretKeyAuthValue, value); err != nil {
+			t.Fatalf("SetSecret: %v", err)
+		}
+	}
+
+	setSecret("Bearer first")
+	call()
+	if got := lastAuth(); got != "Bearer first" {
+		t.Fatalf("expected the first secret to be sent, got %q", got)
+	}
+
+	setSecret("Bearer rotated")
+	call()
+	if got := lastAuth(); got != "Bearer rotated" {
+		t.Errorf("expected the rotated secret on the same pooled session, got %q", got)
+	}
+}
+
+// TestPlugin_PoolIsPrunedWhenASessionExpires checks the pool does not grow for
+// the life of the process: a connector whose session was closed must leave.
+func TestPlugin_PoolIsPrunedWhenASessionExpires(t *testing.T) {
+	srv := newResourceMCPServer(t, nil)
+
+	p := newTestPlugin(t)
+	ctx := context.Background()
+	reqCtx := requestContext(srv.URL, "")
+
+	if _, err := p.CallTool(ctx, &proto.CallToolInput{
+		Ctx:           reqCtx,
+		Name:          "echo",
+		ArgumentsJson: `{"text":"hi"}`,
+	}); err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+
+	p.mu.Lock()
+	before := len(p.sessions)
+	connectors := make([]*mcpclient.Connector, 0, before)
+	for _, c := range p.sessions {
+		connectors = append(connectors, c)
+	}
+	p.mu.Unlock()
+	if before != 1 {
+		t.Fatalf("expected one pooled connector, got %d", before)
+	}
+
+	// Expiring a connector must remove its entry, not leave a dead one behind.
+	for _, c := range connectors {
+		c.Reset()
+	}
+
+	p.mu.Lock()
+	after := len(p.sessions)
+	p.mu.Unlock()
+	if after != 0 {
+		t.Errorf("expected the expired connector to leave the pool, %d entries remain", after)
+	}
+}
+
+// TestPlugin_SessionKeyIncludesIdentity is the review's security finding: the
+// session id comes from the client, so two callers sending the same value must
+// still get two sessions rather than sharing one and its credentials.
+func TestPlugin_SessionKeyIncludesIdentity(t *testing.T) {
+	srv := newResourceMCPServer(t, nil)
+
+	p := newTestPlugin(t)
+	ctx := context.Background()
+
+	first := requestContext(srv.URL, "")
+	second := requestContext(srv.URL, "")
+	second.UserId = "user-2" // same session id, different caller
+
+	for _, reqCtx := range []*proto.RequestContext{first, second} {
+		if _, err := p.CallTool(ctx, &proto.CallToolInput{
+			Ctx:           reqCtx,
+			Name:          "echo",
+			ArgumentsJson: `{"text":"hi"}`,
+		}); err != nil {
+			t.Fatalf("CallTool: %v", err)
+		}
+	}
+
+	p.mu.Lock()
+	pooled := len(p.sessions)
+	p.mu.Unlock()
+	if pooled != 2 {
+		t.Errorf("expected one session per caller despite the shared session id, got %d", pooled)
 	}
 }

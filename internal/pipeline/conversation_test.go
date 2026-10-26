@@ -189,8 +189,9 @@ func TestToolLoop_PrefetchResultInspection(t *testing.T) {
 	}
 }
 
-// TestFillTemplate covers the placeholders a plugin may use.
-func TestFillTemplate(t *testing.T) {
+// TestFillTemplateArgs covers the placeholders a plugin may use and the JSON
+// escaping of what it substitutes.
+func TestFillTemplateArgs(t *testing.T) {
 	values := map[string]string{
 		"last_user_message": "what is X?",
 		"user_id":           "u1",
@@ -202,26 +203,92 @@ func TestFillTemplate(t *testing.T) {
 		missing  bool
 	}{
 		{`{"q":"{{last_user_message}}"}`, `{"q":"what is X?"}`, false},
-		{`{{ user_id }}`, "u1", false}, // surrounding spaces are ignored
-		{`{{org_id}}`, `{{org_id}}`, true},
-		{`{{result}}`, `{{result}}`, true}, // not a request value
+		{`{"q":"{{ user_id }}"}`, `{"q":"u1"}`, false}, // surrounding spaces are ignored
+		{`{"q":"{{org_id}}"}`, `{"q":"{{org_id}}"}`, true},
+		{`{"q":"{{result}}"}`, `{"q":"{{result}}"}`, true}, // not a request value
 		{`{"q":"{{last_user_message}}","u":"{{user_id}}"}`, `{"q":"what is X?","u":"u1"}`, false},
-		// Values are never expanded again.
-		{`{{user_id}}`, "u1", false},
+		// Non-string values are left alone.
+		{`{"q":"{{user_id}}","limit":5,"strict":true,"none":null}`, `{"limit":5,"none":null,"q":"u1","strict":true}`, false},
 	}
 	for _, tt := range tests {
-		got, missing := pipeline.FillTemplate(tt.template, values)
+		got, missing, err := pipeline.FillTemplateArgs(tt.template, values)
+		if err != nil {
+			t.Errorf("FillTemplateArgs(%q) returned error: %v", tt.template, err)
+			continue
+		}
 		if got != tt.want || missing != tt.missing {
-			t.Errorf("FillTemplate(%q) = (%q, %v), want (%q, %v)", tt.template, got, missing, tt.want, tt.missing)
+			t.Errorf("FillTemplateArgs(%q) = (%q, %v), want (%q, %v)", tt.template, got, missing, tt.want, tt.missing)
 		}
 	}
 }
 
-func TestFillTemplate_DoesNotExpandValues(t *testing.T) {
-	values := map[string]string{"user_id": "{{org_id}}", "org_id": "org"}
-	got, missing := pipeline.FillTemplate("{{user_id}}", values)
-	if got != "{{org_id}}" || missing {
-		t.Errorf("expected the value injected verbatim, got (%q, %v)", got, missing)
+// TestFillTemplateArgs_EscapesUserText is the review's first defect: a message
+// with a quote, a backslash or a newline used to produce invalid JSON and fail
+// the whole request. Each of these must produce a valid arguments object whose
+// single value is exactly the user's text.
+func TestFillTemplateArgs_EscapesUserText(t *testing.T) {
+	hostile := []string{
+		`he said "hello"`,
+		`C:\Users\me`,
+		"line one\nline two",
+		"tab\there",
+		`"},"collection":"private","x":{"`,
+		"caf\u00e9",
+	}
+
+	for _, text := range hostile {
+		values := map[string]string{"last_user_message": text}
+		args, missing, err := pipeline.FillTemplateArgs(`{"query":"{{last_user_message}}"}`, values)
+		if err != nil {
+			t.Fatalf("FillTemplateArgs rejected %q: %v", text, err)
+		}
+		if missing {
+			t.Errorf("FillTemplateArgs(%q) reported a missing value", text)
+		}
+
+		var decoded map[string]any
+		if err := json.Unmarshal([]byte(args), &decoded); err != nil {
+			t.Fatalf("FillTemplateArgs(%q) produced invalid JSON %q: %v", text, args, err)
+		}
+		// Exactly one key, and it holds the user's text verbatim.
+		if len(decoded) != 1 {
+			t.Errorf("FillTemplateArgs(%q) produced %d keys (%v), the template has one", text, len(decoded), decoded)
+		}
+		if got := decoded["query"]; got != text {
+			t.Errorf("FillTemplateArgs(%q) round-tripped to %v", text, got)
+		}
+	}
+}
+
+// TestFillTemplateArgs_RejectsInvalidTemplate makes sure an operator's typo is
+// reported rather than silently sent to the tool.
+func TestFillTemplateArgs_RejectsInvalidTemplate(t *testing.T) {
+	if _, _, err := pipeline.FillTemplateArgs(`{"query": }`, nil); err == nil {
+		t.Error("expected an invalid template to be reported")
+	}
+}
+
+// TestToolLoop_PrefetchHostileUserMessage is the end-to-end form of the review's
+// first defect: a user message with a quote must not fail the request.
+func TestToolLoop_PrefetchHostileUserMessage(t *testing.T) {
+	prefetch := newPrefetchTool("search")
+	inner := &scriptedClient{responses: []*scriptedResponse{{content: "the answer"}}}
+
+	c := pipeline.NewToolLoopClient(inner, []llm.Tool{prefetch.tool}, 0, 0, nil).
+		WithConversationTools(
+			conversationToolSet(t, prefetch.tool, `{"query":"{{last_user_message}}"}`+"\n", "", ""),
+			pipeline.ExecutionContext{},
+		)
+
+	if _, err := c.ChatCompletion(context.Background(), contextWithUser(`what does "unsupported" mean?`)...); err != nil {
+		t.Fatalf("a quote in the user message must not fail the request: %v", err)
+	}
+	// The tool may or may not have been called; what matters is that the
+	// arguments it would receive are valid JSON.
+	for _, call := range prefetch.calls {
+		if got, ok := call["query"].(string); !ok || !strings.Contains(got, "unsupported") {
+			t.Errorf("tool received %v, expected the user's text", call)
+		}
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -156,5 +157,127 @@ func TestConnector_RetriesOnceOnADeadSession(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("expected the call to be retried on a fresh session: %v", err)
+	}
+}
+
+// newForgetfulServer starts an MCP server that can be told to forget one
+// session, answering 404 to any request carrying it. That is how the
+// specification says a server reports a session it terminated, and the SDK
+// surfaces it as ErrSessionMissing, not ErrConnectionClosed.
+//
+// Only the named session is refused: a real server terminates specific
+// sessions, so refusing every session id would also break the reconnect the
+// retry performs.
+func newForgetfulServer(t *testing.T) (srv *httptest.Server, forget func() bool, counter *sessionCounter) {
+	t.Helper()
+
+	counter = &sessionCounter{ids: map[string]struct{}{}}
+	forgotten := &atomic.Pointer[string]{}
+	lastSeen := &atomic.Pointer[string]{}
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return newGreetServer(t) }, nil)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+		counter.observe(r)
+		id := r.Header.Get("Mcp-Session-Id")
+		if id == "" {
+			handler.ServeHTTP(w, r)
+			return
+		}
+		lastSeen.Store(&id)
+		if want := forgotten.Load(); want != nil && *want == id {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	})
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(func() {
+		server.CloseClientConnections()
+		server.Close()
+	})
+	forget = func() bool {
+		seen := lastSeen.Load()
+		if seen == nil {
+			return false
+		}
+		forgotten.Store(seen)
+		return true
+	}
+	return server, forget, counter
+}
+
+func newGreetServer(t *testing.T) *mcp.Server {
+	t.Helper()
+	server := mcp.NewServer(&mcp.Implementation{Name: "test-server", Version: "v1"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "greet", Description: "greets someone"}, greet)
+	return server
+}
+
+// TestConnector_RetriesOnceOnASessionMissing is the review's third defect: a
+// server that terminated the session answers 404, reported as
+// ErrSessionMissing, which is not ErrConnectionClosed. Without matching it, the
+// call was treated as an ordinary failure: no retry, and the dead session kept
+// serving the conversation.
+func TestConnector_RetriesOnceOnASessionMissing(t *testing.T) {
+	srv, forget, _ := newForgetfulServer(t)
+
+	connector := mcpclient.NewConnector(mcpclient.Config{Endpoint: srv.URL + "/mcp"}, time.Minute)
+	defer connector.Close()
+
+	ctx := context.Background()
+	if err := connector.Do(ctx, func(session *mcp.ClientSession) error {
+		_, _, err := mcpclient.CallToolText(ctx, session, "greet", `{"name":"a"}`)
+		return err
+	}); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+
+	// The server terminates the session the conversation has been using.
+	if !forget() {
+		t.Fatal("no session id was observed")
+	}
+
+	err := connector.Do(ctx, func(session *mcp.ClientSession) error {
+		_, _, callErr := mcpclient.CallToolText(ctx, session, "greet", `{"name":"b"}`)
+		return callErr
+	})
+	if err != nil {
+		t.Fatalf("a session the server forgot must be retried, not surfaced: %v", err)
+	}
+}
+
+// TestConnector_OnExpireFiresOnce checks the callback a pool uses to drop its
+// entry: it runs when the session is closed for good, and only then.
+func TestConnector_OnExpireFiresOnce(t *testing.T) {
+	srv, _ := newCountingServer(t)
+
+	connector := mcpclient.NewConnector(mcpclient.Config{Endpoint: srv.URL + "/mcp"}, time.Minute)
+	defer connector.Close()
+
+	var fired atomic.Int64
+	connector.OnExpire(func() { fired.Add(1) })
+
+	ctx := context.Background()
+	if err := connector.Do(ctx, func(session *mcp.ClientSession) error {
+		_, _, err := mcpclient.CallToolText(ctx, session, "greet", `{"name":"a"}`)
+		return err
+	}); err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if got := fired.Load(); got != 0 {
+		t.Fatalf("OnExpire fired %d times while the session was live", got)
+	}
+
+	connector.Reset()
+	if got := fired.Load(); got != 1 {
+		t.Errorf("expected OnExpire to fire once on Reset, fired %d times", got)
+	}
+
+	// A second Reset has no session left to close: no second callback.
+	connector.Reset()
+	if got := fired.Load(); got != 1 {
+		t.Errorf("expected OnExpire not to fire without a session, fired %d times", got)
 	}
 }

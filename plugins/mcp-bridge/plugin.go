@@ -60,30 +60,64 @@ func (p *Plugin) getHostClient() pluginsdk.HostClient {
 // connector returns the session holder of one conversation on one endpoint,
 // creating it on first use.
 //
-// The key is the conversation (the proxy's session header, or the caller
-// identity when the client sends none) plus the node and the endpoint: the same
-// user talking on two pipelines, or with two MCP servers, gets two sessions,
-// which is what the servers expect.
+// The key mixes the caller identity, the conversation, the node and the
+// endpoint. The identity is part of it even though the conversation usually
+// encodes it: the session id comes from the client, so two callers sending the
+// same value would otherwise be handed one MCP session, and with it the first
+// caller's credentials and whatever the server holds for that session.
+//
+// The credentials are pushed into the connector on every call, not only when
+// it is created: an OAuth token expires and a static secret gets rotated, and a
+// pooled session keeps sending whatever it was opened with.
 func (p *Plugin) connector(ec sessionScope, cfg Config) *mcpclient.Connector {
-	key := strings.Join([]string{ec.key, ec.nodeID, cfg.Endpoint}, "\x00")
+	key := strings.Join([]string{ec.orgID, ec.userID, ec.key, ec.nodeID, cfg.Endpoint}, "\x00")
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.sessions == nil {
-		p.sessions = map[string]*mcpclient.Connector{}
-	}
-	if c, ok := p.sessions[key]; ok {
-		return c
-	}
 	connCfg := mcpclient.Config{
 		Endpoint:       cfg.Endpoint,
 		AuthHeaderName: ec.authHeaderName,
 		AuthValue:      ec.authValue,
 		Timeout:        time.Duration(cfg.TimeoutSeconds) * time.Second,
 	}
+
+	p.mu.Lock()
+	if p.sessions == nil {
+		p.sessions = map[string]*mcpclient.Connector{}
+	}
+	existing, found := p.sessions[key]
+	p.mu.Unlock()
+
+	if found {
+		// SetConfig outside p.mu: it can close the session, whose expiry
+		// callback takes p.mu. Holding the pool lock here would deadlock the
+		// two against each other.
+		existing.SetConfig(connCfg)
+		return existing
+	}
+
 	c := mcpclient.NewConnector(connCfg, idleTimeout)
+	// A connector whose session was closed for good is no longer the one this
+	// key resolves to: drop the entry, or every conversation would leave one
+	// behind for the life of the process.
+	c.OnExpire(func() { p.forget(key, c) })
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// Another caller may have created one while this one was being built.
+	if current, ok := p.sessions[key]; ok {
+		return current
+	}
 	p.sessions[key] = c
 	return c
+}
+
+// forget removes a connector from the pool, unless the key resolved to another
+// one meanwhile.
+func (p *Plugin) forget(key string, c *mcpclient.Connector) {
+	p.mu.Lock()
+	if current, ok := p.sessions[key]; ok && current == c {
+		delete(p.sessions, key)
+	}
+	p.mu.Unlock()
 }
 
 // Close closes every pooled MCP session.
@@ -108,6 +142,8 @@ func (p *Plugin) Close() {
 // sessionScope is everything the key of a conversation session is made of,
 // resolved from the request.
 type sessionScope struct {
+	orgID          string
+	userID         string
 	key            string
 	nodeID         string
 	authHeaderName string
@@ -149,6 +185,8 @@ func (p *Plugin) connect(ctx context.Context, reqCtx *proto.RequestContext) (Con
 	}
 
 	connector := p.connector(sessionScope{
+		orgID:          reqCtx.GetOrgId(),
+		userID:         reqCtx.GetUserId(),
 		key:            sessionKey(reqCtx),
 		nodeID:         reqCtx.GetNodeId(),
 		authHeaderName: authHeaderName,
