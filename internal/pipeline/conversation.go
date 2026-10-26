@@ -204,6 +204,14 @@ func FillTemplateArgs(template string, values map[string]string) (string, bool, 
 		return "", false, err
 	}
 
+	// A tool call takes a JSON object of named arguments. A template that is
+	// valid JSON but not an object (a bare string, an array, a number) parses
+	// fine and would fail later, in the middle of a request, with a message
+	// about the tool rather than about the configuration.
+	if _, ok := filled.(map[string]any); !ok {
+		return "", false, errors.New("arguments template must be a JSON object")
+	}
+
 	encoded, err := json.Marshal(filled)
 	if err != nil {
 		return "", false, errors.Wrap(err, "re-encode fill arguments")
@@ -285,6 +293,13 @@ func (c *ToolLoopClient) prefetchConversationTools(ctx context.Context, messages
 	for _, v := range c.conversation.Values {
 		if v.Content == "" {
 			continue
+		}
+		// A resource read from an MCP server is content the operator does not
+		// control, exactly like a tool result: it goes through the same
+		// inspectors, or the surface prompt-guard exists for would be the one
+		// nobody watches.
+		if blocked, reason := c.inspectToolResult(ctx, v.Label, v.Content); blocked {
+			return "", &RejectionError{Reason: reason}
 		}
 		blocks = append(blocks, conversationBlock(v.Label, v.Content))
 	}

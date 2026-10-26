@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/xolo-gateway/xolo/internal/adapter/mcpclient"
@@ -341,9 +342,11 @@ func TestPlugin_PooledConnectorPicksUpRotatedSecret(t *testing.T) {
 	}
 }
 
-// TestPlugin_PoolIsPrunedWhenASessionExpires checks the pool does not grow for
-// the life of the process: a connector whose session was closed must leave.
-func TestPlugin_PoolIsPrunedWhenASessionExpires(t *testing.T) {
+// TestPlugin_PoolKeepsConnectorAcrossSessionReset pins the behaviour the second
+// review found wrong: expiring the session must not evict the pooled connector,
+// because Do resets the session on the ordinary dead-session-retry path and
+// connector() refreshes credentials on every request.
+func TestPlugin_PoolKeepsConnectorAcrossSessionReset(t *testing.T) {
 	srv := newResourceMCPServer(t, nil)
 
 	p := newTestPlugin(t)
@@ -359,27 +362,39 @@ func TestPlugin_PoolIsPrunedWhenASessionExpires(t *testing.T) {
 	}
 
 	p.mu.Lock()
-	before := len(p.sessions)
-	connectors := make([]*mcpclient.Connector, 0, before)
+	connectors := make([]*mcpclient.Connector, 0, len(p.sessions))
 	for _, c := range p.sessions {
 		connectors = append(connectors, c)
 	}
 	p.mu.Unlock()
-	if before != 1 {
-		t.Fatalf("expected one pooled connector, got %d", before)
+	if len(connectors) != 1 {
+		t.Fatalf("expected one pooled connector, got %d", len(connectors))
 	}
 
-	// Expiring a connector must remove its entry, not leave a dead one behind.
-	for _, c := range connectors {
-		c.Reset()
-	}
+	// Resetting the session is what the retry path does; the entry must stay,
+	// or every retry would rebuild a connector and a session.
+	connectors[0].Reset()
 
 	p.mu.Lock()
 	after := len(p.sessions)
 	p.mu.Unlock()
-	if after != 0 {
-		t.Errorf("expected the expired connector to leave the pool, %d entries remain", after)
+	if after != 1 {
+		t.Errorf("a session reset must keep the pooled connector, %d entries remain", after)
 	}
+
+	// Closing the connector does remove it: that is a real retirement.
+	connectors[0].Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		p.mu.Lock()
+		remaining := len(p.sessions)
+		p.mu.Unlock()
+		if remaining == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Error("a closed connector must leave the pool")
 }
 
 // TestPlugin_SessionKeyIncludesIdentity is the review's security finding: the

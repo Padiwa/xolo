@@ -248,12 +248,64 @@ func TestConnector_RetriesOnceOnASessionMissing(t *testing.T) {
 	}
 }
 
-// TestConnector_OnExpireFiresOnce checks the callback a pool uses to drop its
-// entry: it runs when the session is closed for good, and only then.
-func TestConnector_OnExpireFiresOnce(t *testing.T) {
+// TestConnector_OnExpireOnlyOnRetirement pins down when a pool should drop its
+// entry. Reset and SetConfig close the current session to open another one on
+// the same connector, which the pool still serves: firing there evicted a live
+// connector on the ordinary dead-session-retry and credential-rotation paths.
+// Only idle expiry and Close retire it.
+func TestConnector_OnExpireOnlyOnRetirement(t *testing.T) {
 	srv, _ := newCountingServer(t)
 
 	connector := mcpclient.NewConnector(mcpclient.Config{Endpoint: srv.URL + "/mcp"}, time.Minute)
+	defer connector.Close()
+
+	var fired atomic.Int64
+	connector.OnExpire(func() { fired.Add(1) })
+
+	ctx := context.Background()
+	call := func() {
+		t.Helper()
+		if err := connector.Do(ctx, func(session *mcp.ClientSession) error {
+			_, _, err := mcpclient.CallToolText(ctx, session, "greet", `{"name":"a"}`)
+			return err
+		}); err != nil {
+			t.Fatalf("call: %v", err)
+		}
+	}
+
+	call()
+	if got := fired.Load(); got != 0 {
+		t.Fatalf("OnExpire fired %d times while the session was live", got)
+	}
+
+	// Reset replaces the session, it does not retire the connector.
+	connector.Reset()
+	if got := fired.Load(); got != 0 {
+		t.Errorf("Reset must not retire the connector, OnExpire fired %d times", got)
+	}
+	call()
+
+	// Neither does a credential refresh.
+	connector.SetConfig(mcpclient.Config{Endpoint: srv.URL + "/mcp", AuthValue: "rotated"})
+	if got := fired.Load(); got != 0 {
+		t.Errorf("SetConfig must not retire the connector, OnExpire fired %d times", got)
+	}
+
+	// Close does.
+	connector.Close()
+	waitFor(t, func() bool { return fired.Load() == 1 })
+	if got := fired.Load(); got != 1 {
+		t.Errorf("expected OnExpire to fire once on Close, fired %d times", got)
+	}
+}
+
+// TestConnector_OnExpireOnIdleTimeout checks the other retirement path: a
+// connector left unused is closed and releases its pool entry.
+func TestConnector_OnExpireOnIdleTimeout(t *testing.T) {
+	srv, _ := newCountingServer(t)
+
+	// A short idle timeout keeps the test fast; expire ticks at a quarter of it.
+	connector := mcpclient.NewConnector(mcpclient.Config{Endpoint: srv.URL + "/mcp"}, 200*time.Millisecond)
 	defer connector.Close()
 
 	var fired atomic.Int64
@@ -266,18 +318,22 @@ func TestConnector_OnExpireFiresOnce(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("call: %v", err)
 	}
-	if got := fired.Load(); got != 0 {
-		t.Fatalf("OnExpire fired %d times while the session was live", got)
-	}
 
-	connector.Reset()
+	waitFor(t, func() bool { return fired.Load() == 1 })
 	if got := fired.Load(); got != 1 {
-		t.Errorf("expected OnExpire to fire once on Reset, fired %d times", got)
+		t.Errorf("expected OnExpire to fire once on idle expiry, fired %d times", got)
 	}
+}
 
-	// A second Reset has no session left to close: no second callback.
-	connector.Reset()
-	if got := fired.Load(); got != 1 {
-		t.Errorf("expected OnExpire not to fire without a session, fired %d times", got)
+// waitFor polls cond for a couple of seconds, failing the test if it never holds.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
+	t.Fatal("condition not met within the deadline")
 }

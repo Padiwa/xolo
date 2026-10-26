@@ -45,10 +45,15 @@ type Connector struct {
 	// connector exists for. It is held only while no session exists, so calls
 	// on a live session never wait on it.
 	connectMu sync.Mutex
-	// onExpire, when set, runs once the connector has closed its session for
-	// good. A pool needs it to drop the entry it keeps for this connector:
-	// otherwise every conversation leaves one behind for the life of the
-	// process.
+	// onExpire, when set, runs once the connector has been retired for good:
+	// idle expiry, or Close. A pool needs it to drop the entry it keeps for
+	// this connector, or every conversation leaves one behind for the life of
+	// the process.
+	//
+	// It deliberately does not run on Reset or SetConfig: those close the
+	// current session to open another one on the same connector, which the pool
+	// still serves. Firing there would evict a live connector on the normal
+	// dead-session-retry and credential-rotation paths.
 	onExpire func()
 }
 
@@ -81,6 +86,15 @@ func (c *Connector) SetConfig(cfg Config) {
 		c.discardLocked()
 	}
 	c.mu.Unlock()
+}
+
+// Sessionless reports whether the connector holds no session, which is the case
+// for one whose connection attempt failed. A pool uses it to drop an entry that
+// has nothing to expire and would otherwise stay forever.
+func (c *Connector) Sessionless() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.session == nil
 }
 
 // OnExpire registers a callback run when the connector closes its session for
@@ -169,11 +183,13 @@ func (c *Connector) acquire(ctx context.Context) (*mcp.ClientSession, error) {
 		return session, nil
 	}
 	closed := c.closed
+	// Read under the lock: SetConfig writes it on every request, so reading it
+	// here unlocked would race with the very refresh the connector exists for.
+	cfg := c.cfg
 	c.mu.Unlock()
 	if closed {
 		return nil, errors.New("mcpclient: connector closed")
 	}
-	cfg := c.cfg
 
 	session, err := Connect(ctx, cfg)
 	if err != nil {
@@ -232,7 +248,7 @@ func (c *Connector) Reset() {
 func (c *Connector) Close() {
 	c.mu.Lock()
 	c.closed = true
-	c.discardLocked()
+	c.retireLocked()
 	c.mu.Unlock()
 }
 
@@ -246,15 +262,11 @@ func usable(session *mcp.ClientSession) bool {
 	return session.InitializeResult() != nil
 }
 
-// discardLocked closes the current session, if any. The caller holds c.mu.
+// discardLocked closes the current session, if any, keeping the connector
+// usable: the next call opens another one. The caller holds c.mu.
 func (c *Connector) discardLocked() {
-	session, stop, onExpire := c.session, c.stop, c.onExpire
-	c.session, c.stop, c.inFlight, c.onExpire = nil, nil, 0, nil
-	if onExpire != nil {
-		// Fired only when a session actually existed: Cancel on an already
-		// empty connector must not evict a live entry from its pool.
-		defer onExpire()
-	}
+	session, stop := c.session, c.stop
+	c.session, c.stop, c.inFlight = nil, nil, 0
 	if session == nil {
 		return
 	}
@@ -265,6 +277,19 @@ func (c *Connector) discardLocked() {
 	// keep the session open. The MCP session fails its in-flight calls with
 	// ErrConnectionClosed, which Do turns into one retry.
 	go func() { _ = session.Close() }()
+}
+
+// retireLocked closes the current session and notifies the pool that this
+// connector is gone for good. The caller holds c.mu.
+func (c *Connector) retireLocked() {
+	onExpire := c.onExpire
+	c.onExpire = nil
+	c.discardLocked()
+	if onExpire != nil {
+		// Deferred: the callback takes the pool's lock, which must not be
+		// taken while c.mu is held (the pool calls SetConfig, which takes c.mu).
+		go onExpire()
+	}
 }
 
 // expire closes the session once it has been idle for idleTimeout.
@@ -283,7 +308,7 @@ func (c *Connector) expire(stop chan struct{}) {
 				return
 			}
 			if c.inFlight == 0 && c.now().Sub(c.lastUsed) >= c.idleTimeout {
-				c.discardLocked()
+				c.retireLocked()
 				c.mu.Unlock()
 				return
 			}

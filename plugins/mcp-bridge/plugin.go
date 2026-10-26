@@ -32,6 +32,9 @@ type Plugin struct {
 	// sessions holds one MCP session per server of a conversation, so the tool
 	// rounds of a request share it instead of opening a session each time.
 	sessions map[string]*mcpclient.Connector
+	// keys is the reverse index, so a connector's expiry can clear its own
+	// entry without any caller having to rebuild the key.
+	keys map[*mcpclient.Connector]string
 }
 
 // oauthClient returns the client shared by the tool calls and the UI.
@@ -70,7 +73,7 @@ func (p *Plugin) getHostClient() pluginsdk.HostClient {
 // it is created: an OAuth token expires and a static secret gets rotated, and a
 // pooled session keeps sending whatever it was opened with.
 func (p *Plugin) connector(ec sessionScope, cfg Config) *mcpclient.Connector {
-	key := strings.Join([]string{ec.orgID, ec.userID, ec.key, ec.nodeID, cfg.Endpoint}, "\x00")
+	key := poolKey(ec, cfg.Endpoint)
 
 	connCfg := mcpclient.Config{
 		Endpoint:       cfg.Endpoint,
@@ -82,6 +85,7 @@ func (p *Plugin) connector(ec sessionScope, cfg Config) *mcpclient.Connector {
 	p.mu.Lock()
 	if p.sessions == nil {
 		p.sessions = map[string]*mcpclient.Connector{}
+		p.keys = map[*mcpclient.Connector]string{}
 	}
 	existing, found := p.sessions[key]
 	p.mu.Unlock()
@@ -95,10 +99,11 @@ func (p *Plugin) connector(ec sessionScope, cfg Config) *mcpclient.Connector {
 	}
 
 	c := mcpclient.NewConnector(connCfg, idleTimeout)
+	p.keys[c] = key
 	// A connector whose session was closed for good is no longer the one this
 	// key resolves to: drop the entry, or every conversation would leave one
 	// behind for the life of the process.
-	c.OnExpire(func() { p.forget(key, c) })
+	c.OnExpire(func() { p.forgetKey(c) })
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -110,12 +115,37 @@ func (p *Plugin) connector(ec sessionScope, cfg Config) *mcpclient.Connector {
 	return c
 }
 
-// forget removes a connector from the pool, unless the key resolved to another
-// one meanwhile.
-func (p *Plugin) forget(key string, c *mcpclient.Connector) {
+// dropIfSessionless removes a pooled connector that never managed to open a
+// session.
+//
+// A connector only retires itself once it has a session to close, so one whose
+// first Connect failed would sit in the pool for the life of the process:
+// nothing to expire, and no other path deleting it. Called when a call failed to
+// obtain a session at all.
+func (p *Plugin) dropIfSessionless(c *mcpclient.Connector) {
+	if !c.Sessionless() {
+		return
+	}
+	p.forgetKey(c)
+}
+
+// poolKey names the pool entry of one conversation on one endpoint. The caller
+// identity is part of it even though the conversation usually encodes it: the
+// session id comes from the client, so two callers sending the same value would
+// otherwise be handed one MCP session, and with it the first caller's
+// credentials and whatever the server holds for that session.
+func poolKey(ec sessionScope, endpoint string) string {
+	return strings.Join([]string{ec.orgID, ec.userID, ec.key, ec.nodeID, endpoint}, "\x00")
+}
+
+// forgetKey removes a connector from the pool, whichever entry holds it.
+func (p *Plugin) forgetKey(c *mcpclient.Connector) {
 	p.mu.Lock()
-	if current, ok := p.sessions[key]; ok && current == c {
-		delete(p.sessions, key)
+	if key, ok := p.keys[c]; ok {
+		if current, still := p.sessions[key]; still && current == c {
+			delete(p.sessions, key)
+		}
+		delete(p.keys, c)
 	}
 	p.mu.Unlock()
 }
@@ -132,6 +162,7 @@ func (p *Plugin) Close() {
 		connectors = append(connectors, c)
 	}
 	p.sessions = nil
+	p.keys = nil
 	p.mu.Unlock()
 
 	for _, c := range connectors {
@@ -365,6 +396,7 @@ func (p *Plugin) CallTool(ctx context.Context, in *proto.CallToolInput) (*proto.
 		return callErr
 	})
 	if err != nil {
+		p.dropIfSessionless(connector)
 		return nil, err
 	}
 	return &proto.CallToolOutput{ResultText: text, IsError: isError}, nil
