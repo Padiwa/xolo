@@ -99,19 +99,26 @@ func (p *Plugin) connector(ec sessionScope, cfg Config) *mcpclient.Connector {
 	}
 
 	c := mcpclient.NewConnector(connCfg, idleTimeout)
-	p.keys[c] = key
-	// A connector whose session was closed for good is no longer the one this
-	// key resolves to: drop the entry, or every conversation would leave one
-	// behind for the life of the process.
+	// Registered before the connector is published, and on an object nobody
+	// else holds yet: a callback taking p.mu must never be installed while
+	// p.mu is held.
 	c.OnExpire(func() { p.forgetKey(c) })
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	// Another caller may have created one while this one was being built.
 	if current, ok := p.sessions[key]; ok {
+		p.mu.Unlock()
+		// Ours was never published: no entry to clear, and closing it is what
+		// stops it from lingering with a live expiry callback.
+		c.Close()
 		return current
 	}
+	// Both maps are written in this one critical section: p.keys is read and
+	// deleted under p.mu elsewhere, and concurrent map writes abort the whole
+	// plugin process rather than the request.
 	p.sessions[key] = c
+	p.keys[c] = key
+	p.mu.Unlock()
 	return c
 }
 
@@ -287,10 +294,12 @@ func (p *Plugin) ListTools(ctx context.Context, in *proto.ListToolsInput) (*prot
 				InputSchemaJson: info.InputSchemaJSON,
 			})
 		}
-		values = readResources(ctx, session, cfg.Resources)
-		return nil
+		var readErr error
+		values, readErr = readResources(ctx, session, cfg.Resources)
+		return readErr
 	})
 	if err != nil {
+		p.dropIfSessionless(connector)
 		return nil, err
 	}
 
@@ -310,15 +319,24 @@ func (p *Plugin) ListTools(ctx context.Context, in *proto.ListToolsInput) (*prot
 // should still let the conversation through, with a note the operator will see
 // in the model's answer. Nothing is read from a server that does not advertise
 // the resources capability — asking would only produce an error.
-func readResources(ctx context.Context, session *mcp.ClientSession, refs []string) []*proto.ConversationValue {
+// readResources reads the configured resources on the session ListTools opened.
+//
+// A session that died is returned as an error rather than turned into text: the
+// caller runs inside Connector.Do, whose one retry only happens when the session
+// error escapes. A resource that is merely absent or unsupported stays text, so
+// a configuration naming a renamed resource does not fail the request.
+func readResources(ctx context.Context, session *mcp.ClientSession, refs []string) ([]*proto.ConversationValue, error) {
 	if len(refs) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	values := make([]*proto.ConversationValue, 0, len(refs))
 	for _, ref := range refs {
 		info, err := mcpclient.FindResource(ctx, session, ref)
 		if err != nil {
+			if mcpclient.IsSessionOver(err) {
+				return nil, err
+			}
 			values = append(values, &proto.ConversationValue{
 				Label:   "MCP resource " + ref,
 				Content: "the resource could not be read: " + err.Error(),
@@ -327,6 +345,9 @@ func readResources(ctx context.Context, session *mcp.ClientSession, refs []strin
 		}
 		text, err := mcpclient.ReadResourceText(ctx, session, info.URI)
 		if err != nil {
+			if mcpclient.IsSessionOver(err) {
+				return nil, err
+			}
 			values = append(values, &proto.ConversationValue{
 				Label:   "MCP resource " + ref,
 				Content: "the resource could not be read: " + err.Error(),
@@ -339,7 +360,7 @@ func readResources(ctx context.Context, session *mcp.ClientSession, refs []strin
 		}
 		values = append(values, &proto.ConversationValue{Label: label, Content: text})
 	}
-	return values
+	return values, nil
 }
 
 // conversationTools declares the tool the node asks the host to resolve before

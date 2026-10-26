@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -425,5 +426,52 @@ func TestPlugin_SessionKeyIncludesIdentity(t *testing.T) {
 	p.mu.Unlock()
 	if pooled != 2 {
 		t.Errorf("expected one session per caller despite the shared session id, got %d", pooled)
+	}
+}
+
+// TestPlugin_PoolConcurrentFirstRequests exercises the pool under the condition
+// that broke it: several requests hitting different conversations at once, so
+// each builds a connector. Writing p.keys outside p.mu made this a fatal
+// "concurrent map writes", which aborts the whole plugin process rather than
+// one request. Run with -race to catch the regression.
+func TestPlugin_PoolConcurrentFirstRequests(t *testing.T) {
+	srv := newResourceMCPServer(t, nil)
+
+	p := newTestPlugin(t)
+	ctx := context.Background()
+
+	const callers = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, callers)
+	for i := range callers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// A distinct session id per caller: distinct pool keys, all created
+			// concurrently on a cold pool.
+			reqCtx := requestContext(srv.URL, "")
+			reqCtx.SessionId = fmt.Sprintf("session-%d", i)
+			_, err := p.CallTool(ctx, &proto.CallToolInput{
+				Ctx:           reqCtx,
+				Name:          "echo",
+				ArgumentsJson: `{"text":"hi"}`,
+			})
+			errs <- err
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent CallTool: %v", err)
+		}
+	}
+
+	p.mu.Lock()
+	pooled := len(p.sessions)
+	indexed := len(p.keys)
+	p.mu.Unlock()
+	if pooled != callers || indexed != callers {
+		t.Errorf("expected %d sessions and %d keys, got %d and %d", callers, callers, pooled, indexed)
 	}
 }

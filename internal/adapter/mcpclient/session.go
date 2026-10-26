@@ -45,6 +45,9 @@ type Connector struct {
 	// connector exists for. It is held only while no session exists, so calls
 	// on a live session never wait on it.
 	connectMu sync.Mutex
+	// generation increases on every credential change, so a handshake that
+	// started before a SetConfig can tell its session carries the former ones.
+	generation uint64
 	// onExpire, when set, runs once the connector has been retired for good:
 	// idle expiry, or Close. A pool needs it to drop the entry it keeps for
 	// this connector, or every conversation leaves one behind for the life of
@@ -83,10 +86,15 @@ func (c *Connector) SetConfig(cfg Config) {
 		cfg.Timeout != c.cfg.Timeout
 	c.cfg = cfg
 	if changed {
+		c.generation++
 		c.discardLocked()
 	}
 	c.mu.Unlock()
 }
+
+// errCredentialsChanged reports a handshake whose credentials were replaced
+// before it completed. Callers may retry: the next attempt uses the new ones.
+var errCredentialsChanged = errors.New("mcpclient: credentials changed while connecting")
 
 // Sessionless reports whether the connector holds no session, which is the case
 // for one whose connection attempt failed. A pool uses it to drop an entry that
@@ -97,9 +105,14 @@ func (c *Connector) Sessionless() bool {
 	return c.session == nil
 }
 
-// OnExpire registers a callback run when the connector closes its session for
-// good (idle timeout, Reset, or Close). It runs at most once, from the goroutine
-// that closed the session, and must not block.
+// OnExpire registers a callback run when the connector is retired: on idle
+// expiry or on Close. It runs at most once, from a goroutine of its own, and must
+// not block.
+//
+// It deliberately does not run on Reset or SetConfig. Those close the current
+// session to open another one on the same connector, which a pool still serves;
+// firing there would evict a live entry on the ordinary dead-session-retry and
+// credential-rotation paths.
 func (c *Connector) OnExpire(f func()) {
 	c.mu.Lock()
 	c.onExpire = f
@@ -115,12 +128,17 @@ func (c *Connector) OnExpire(f func()) {
 // on its own.
 func (c *Connector) Do(ctx context.Context, fn func(*mcp.ClientSession) error) error {
 	session, err := c.acquire(ctx)
+	if errors.Is(err, errCredentialsChanged) {
+		// The handshake raced a credential refresh: retrying is the whole point
+		// of reporting it rather than handing out a session on stale ones.
+		session, err = c.acquire(ctx)
+	}
 	if err != nil {
 		return err
 	}
 
 	err = fn(session)
-	if err == nil || !isSessionOver(err) {
+	if err == nil || !IsSessionOver(err) {
 		c.done()
 		return err
 	}
@@ -138,8 +156,11 @@ func (c *Connector) Do(ctx context.Context, fn func(*mcp.ClientSession) error) e
 	return fn(retry)
 }
 
-// isSessionOver reports whether err is the session having ended rather than the
+// IsSessionOver reports whether err is the session having ended rather than the
 // operation having failed.
+//
+// It is exported for callers that run inside Connector.Do and must let such an
+// error escape so the one retry happens, instead of degrading it to text.
 //
 // Two shapes say the session is over. A dropped transport closes the connection
 // (ErrConnectionClosed). A Streamable HTTP server that terminated the session
@@ -147,7 +168,7 @@ func (c *Connector) Do(ctx context.Context, fn func(*mcp.ClientSession) error) e
 // first would treat the second as an ordinary failure: no retry, no Reset, and
 // the dead session would keep serving every later call of the conversation
 // until the idle timeout, which an active conversation never reaches.
-func isSessionOver(err error) bool {
+func IsSessionOver(err error) bool {
 	return errors.Is(err, mcp.ErrConnectionClosed) || errors.Is(err, mcp.ErrSessionMissing)
 }
 
@@ -183,9 +204,11 @@ func (c *Connector) acquire(ctx context.Context) (*mcp.ClientSession, error) {
 		return session, nil
 	}
 	closed := c.closed
-	// Read under the lock: SetConfig writes it on every request, so reading it
-	// here unlocked would race with the very refresh the connector exists for.
+	// Read under the lock: SetConfig writes them on every request, so reading
+	// them here unlocked would race with the very refresh the connector exists
+	// for.
 	cfg := c.cfg
+	generation := c.generation
 	c.mu.Unlock()
 	if closed {
 		return nil, errors.New("mcpclient: connector closed")
@@ -201,6 +224,15 @@ func (c *Connector) acquire(ctx context.Context) (*mcp.ClientSession, error) {
 		c.mu.Unlock()
 		_ = session.Close()
 		return nil, errors.New("mcpclient: connector closed")
+	}
+	if c.generation != generation {
+		// The credentials were replaced while this session was being opened:
+		// installing it would send the former ones, which is exactly what
+		// SetConfig exists to prevent. Drop it and let the caller retry on the
+		// new credentials rather than hand out a session pinned to the old.
+		c.mu.Unlock()
+		_ = session.Close()
+		return nil, errCredentialsChanged
 	}
 	if c.session != nil {
 		// Unreachable while connectMu is held: kept so a future change to the
