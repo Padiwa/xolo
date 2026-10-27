@@ -297,11 +297,15 @@ func (c *ToolLoopClient) prefetchConversationTools(ctx context.Context, messages
 		// A resource read from an MCP server is content the operator does not
 		// control, exactly like a tool result: it goes through the same
 		// inspectors, or the surface prompt-guard exists for would be the one
-		// nobody watches.
-		if blocked, reason := c.inspectToolResult(ctx, v.Label, v.Content); blocked {
+		// nobody watches. The whole block is inspected, label included: for a
+		// resource the label is built from the server's own name and URI, so it
+		// is as untrusted as the body, and injecting it unchecked would let a
+		// server slip instructions past the inspector through the title.
+		block := conversationBlock(v.Label, v.Content)
+		if blocked, reason := c.inspectToolResult(ctx, v.Label, block); blocked {
 			return "", &RejectionError{Reason: reason}
 		}
-		blocks = append(blocks, conversationBlock(v.Label, v.Content))
+		blocks = append(blocks, block)
 	}
 
 	values := c.ec.TemplateValues(messages)

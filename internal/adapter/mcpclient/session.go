@@ -338,9 +338,15 @@ func (c *Connector) discardLocked() {
 	go func() { _ = session.Close() }()
 }
 
-// retireLocked closes the current session and notifies the pool that this
-// connector is gone for good. The caller holds c.mu.
+// retireLocked closes the current session, marks the connector terminal and
+// notifies the pool that it is gone for good. The caller holds c.mu.
+//
+// Marking it is what keeps retirement from being undone: a request that fetched
+// the connector from the pool just before it expired would otherwise acquire it
+// again and open a fresh session on an entry the callback is removing, leaving
+// two connectors and two MCP sessions for one conversation.
 func (c *Connector) retireLocked() {
+	c.closed = true
 	onExpire := c.onExpire
 	c.onExpire = nil
 	c.discardLocked()

@@ -105,6 +105,13 @@ func (p *Plugin) connector(ec sessionScope, cfg Config) *mcpclient.Connector {
 	c.OnExpire(func() { p.forgetKey(c) })
 
 	p.mu.Lock()
+	// Close nils both maps. Re-create them rather than write into a nil map:
+	// a shutdown landing between the two critical sections would otherwise
+	// panic here and abort the plugin process instead of failing one request.
+	if p.sessions == nil {
+		p.sessions = map[string]*mcpclient.Connector{}
+		p.keys = map[*mcpclient.Connector]string{}
+	}
 	// Another caller may have created one while this one was being built.
 	if current, ok := p.sessions[key]; ok {
 		p.mu.Unlock()
