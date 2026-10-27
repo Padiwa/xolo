@@ -96,6 +96,16 @@ func (c *Connector) SetConfig(cfg Config) {
 // before it completed. Callers may retry: the next attempt uses the new ones.
 var errCredentialsChanged = errors.New("mcpclient: credentials changed while connecting")
 
+// Terminal reports whether the connector has been retired and can no longer
+// open a session. A pool must treat such a connector as a miss and build a new
+// one: handing it out would fail the request with "connector closed" because
+// retirement is deliberately terminal.
+func (c *Connector) Terminal() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
 // Sessionless reports whether the connector holds no session, which is the case
 // for one whose connection attempt failed. A pool uses it to drop an entry that
 // has nothing to expire and would otherwise stay forever.
@@ -325,7 +335,11 @@ func usable(session *mcp.ClientSession) bool {
 // usable: the next call opens another one. The caller holds c.mu.
 func (c *Connector) discardLocked() {
 	session, stop := c.session, c.stop
-	c.session, c.stop, c.inFlight = nil, nil, 0
+	// inFlight is deliberately not reset: a caller may still be mid-call on the
+	// session being closed here, and its done() has to find a counter to
+	// decrement. Zeroing it would make the expiry guard (inFlight == 0) observe
+	// a session with a live call on it and retire it early.
+	c.session, c.stop = nil, nil
 	if session == nil {
 		return
 	}

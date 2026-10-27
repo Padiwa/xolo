@@ -91,11 +91,19 @@ func (p *Plugin) connector(ec sessionScope, cfg Config) *mcpclient.Connector {
 	p.mu.Unlock()
 
 	if found {
-		// SetConfig outside p.mu: it can close the session, whose expiry
-		// callback takes p.mu. Holding the pool lock here would deadlock the
-		// two against each other.
-		existing.SetConfig(connCfg)
-		return existing
+		// A connector retired between this lookup and now (its idle timer fired,
+		// or Close ran) cannot open a session any more: treating it as a hit
+		// would fail the request with "connector closed" at the idle boundary.
+		// It is a pool miss, so fall through and build a fresh one.
+		if existing.Terminal() {
+			p.forgetKey(existing)
+		} else {
+			// SetConfig outside p.mu: it can close the session, whose expiry
+			// callback takes p.mu. Holding the pool lock here would deadlock the
+			// two against each other.
+			existing.SetConfig(connCfg)
+			return existing
+		}
 	}
 
 	c := mcpclient.NewConnector(connCfg, idleTimeout)
@@ -136,15 +144,25 @@ func (p *Plugin) connector(ec sessionScope, cfg Config) *mcpclient.Connector {
 // first Connect failed would sit in the pool for the life of the process:
 // nothing to expire, and no other path deleting it. Called when a call failed to
 // obtain a session at all.
+//
+// The liveness check and the eviction happen under p.mu in one step: checking
+// here and evicting in a second call would let a concurrent request open a
+// session on the very connector being dropped, leaving it unreachable from the
+// pool and diverging the conversation onto a second session.
 func (p *Plugin) dropIfSessionless(c *mcpclient.Connector) {
-	// Sessionless is checked here, and that is only sound because the caller has
-	// released the connector: a request that opened a session on it meanwhile
-	// means it is no longer sessionless, and dropping it would leave a live
-	// connector unreachable from the pool, so the next request would open a
-	// second session for the same conversation.
-	if c.Sessionless() {
-		p.forgetKey(c)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	key, ok := p.keys[c]
+	if !ok {
+		return
 	}
+	if current, still := p.sessions[key]; still && current == c && !c.Sessionless() {
+		// Another request reached it and opened a session: it is live.
+		return
+	}
+	delete(p.sessions, key)
+	delete(p.keys, c)
+	c.Close()
 }
 
 // poolKey names the pool entry of one conversation on one endpoint. The caller

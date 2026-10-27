@@ -27,6 +27,13 @@ func ListResourceInfos(ctx context.Context, session *mcp.ClientSession) ([]Resou
 	var infos []ResourceInfo
 	params := &mcp.ListResourcesParams{}
 	for {
+		// The server drives this loop, and a request context frequently has no
+		// deadline: without these two guards a server that answers an endless
+		// or self-repeating cursor would keep the request alive indefinitely,
+		// issuing one HTTP call per iteration.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		result, err := session.ListResources(ctx, params)
 		if err != nil {
 			return nil, errors.Wrap(err, "list MCP resources")
@@ -41,6 +48,9 @@ func ListResourceInfos(ctx context.Context, session *mcp.ClientSession) ([]Resou
 		}
 		if result.NextCursor == "" {
 			return infos, nil
+		}
+		if result.NextCursor == params.Cursor {
+			return nil, errors.Errorf("MCP server repeated the resource cursor %q", result.NextCursor)
 		}
 		params.Cursor = result.NextCursor
 	}

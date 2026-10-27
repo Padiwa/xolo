@@ -519,3 +519,44 @@ func TestPlugin_NoSessionHeaderOpensOneSessionPerRequest(t *testing.T) {
 	}
 	_ = sessions.Load()
 }
+
+// TestPlugin_RetiredConnectorIsReplacedNotReturned is the review's high finding:
+// a connector retired by its idle timer between the pool lookup and the call
+// made the request fail with "connector closed", because retirement is terminal
+// and SetConfig does not revive one. It must be a pool miss instead.
+func TestPlugin_RetiredConnectorIsReplacedNotReturned(t *testing.T) {
+	srv := newResourceMCPServer(t, nil)
+
+	p := newTestPlugin(t)
+	ctx := context.Background()
+	reqCtx := requestContext(srv.URL, "")
+
+	call := func() {
+		t.Helper()
+		if _, err := p.CallTool(ctx, &proto.CallToolInput{
+			Ctx:           reqCtx,
+			Name:          "echo",
+			ArgumentsJson: `{"text":"hi"}`,
+		}); err != nil {
+			t.Fatalf("CallTool: %v", err)
+		}
+	}
+
+	call()
+
+	// Retire the pooled connector the way the idle timer does. Its pool entry is
+	// removed asynchronously, so the next request can still find it.
+	p.mu.Lock()
+	connectors := make([]*mcpclient.Connector, 0, len(p.sessions))
+	for _, c := range p.sessions {
+		connectors = append(connectors, c)
+	}
+	p.mu.Unlock()
+	if len(connectors) != 1 {
+		t.Fatalf("expected one pooled connector, got %d", len(connectors))
+	}
+	connectors[0].Close()
+
+	// Must open a fresh session rather than fail the request.
+	call()
+}
