@@ -34,6 +34,7 @@ type PluginEntry struct {
 type Manager struct {
 	dir               string
 	memLimit          string        // GOMEMLIMIT value passed to plugin subprocesses, empty = no limit
+	maxMessageSize    int           // bound, in bytes, of every gRPC message exchanged with a plugin
 	restartCooldown   time.Duration // minimum delay between two consecutive restarts of the same plugin
 	providerStore     port.ProviderStore
 	virtualModelStore port.VirtualModelStore
@@ -44,10 +45,13 @@ type Manager struct {
 
 // NewManager creates a Manager that will scan dir for plugin binaries.
 // memLimit is passed as GOMEMLIMIT to each plugin subprocess; empty string disables it.
+// maxMessageSize bounds every gRPC message exchanged with a plugin, in both
+// directions; zero or less selects pluginsdk.DefaultMaxMessageSize.
 // restartCooldown is the minimum interval between consecutive restarts of a given plugin.
 func NewManager(
 	dir string,
 	memLimit string,
+	maxMessageSize int,
 	restartCooldown time.Duration,
 	providerStore port.ProviderStore,
 	virtualModelStore port.VirtualModelStore,
@@ -55,9 +59,13 @@ func NewManager(
 	eventEmitter port.EventEmitter,
 	secretKey string,
 ) *Manager {
+	if maxMessageSize <= 0 {
+		maxMessageSize = pluginsdk.DefaultMaxMessageSize
+	}
 	return &Manager{
 		dir:               dir,
 		memLimit:          memLimit,
+		maxMessageSize:    maxMessageSize,
 		restartCooldown:   restartCooldown,
 		providerStore:     providerStore,
 		virtualModelStore: virtualModelStore,
@@ -301,16 +309,25 @@ func isWithinDir(path, dir string) bool {
 	return len(rel) > 0 && rel[0] != '.'
 }
 
-func (m *Manager) loadPlugin(ctx context.Context, binaryPath string) (*PluginEntry, error) {
+// pluginEnv returns the environment of a plugin subprocess: the server's own,
+// plus the settings the plugin must share with the host.
+func (m *Manager) pluginEnv(ctx context.Context) []string {
 	// Forward the current log level to the plugin subprocess so its slog
 	// logger applies the same level without needing hclog conversion.
-	pluginCmd := exec.Command(binaryPath)
-	pluginCmd.Env = append(os.Environ(),
+	env := append(os.Environ(),
 		fmt.Sprintf("XOLO_LOGGER_LEVEL=%d", currentSlogLevelInt(ctx)),
+		// Both sides of the plugin boundary must accept the same messages.
+		fmt.Sprintf("%s=%d", pluginsdk.MaxMessageSizeEnv, m.maxMessageSize),
 	)
 	if m.memLimit != "" {
-		pluginCmd.Env = append(pluginCmd.Env, fmt.Sprintf("GOMEMLIMIT=%s", m.memLimit))
+		env = append(env, fmt.Sprintf("GOMEMLIMIT=%s", m.memLimit))
 	}
+	return env
+}
+
+func (m *Manager) loadPlugin(ctx context.Context, binaryPath string) (*PluginEntry, error) {
+	pluginCmd := exec.Command(binaryPath)
+	pluginCmd.Env = m.pluginEnv(ctx)
 	bindToServer(pluginCmd)
 
 	client := goplugin.NewClient(&goplugin.ClientConfig{
@@ -318,6 +335,7 @@ func (m *Manager) loadPlugin(ctx context.Context, binaryPath string) (*PluginEnt
 		Plugins:          pluginsdk.PluginMap,
 		Cmd:              pluginCmd,
 		AllowedProtocols: []goplugin.Protocol{goplugin.ProtocolGRPC},
+		GRPCDialOptions:  pluginsdk.GRPCDialOptions(m.maxMessageSize),
 		Logger: hclog.New(&hclog.LoggerOptions{
 			Name:   filepath.Base(binaryPath),
 			Level:  slogLevelToHCLog(ctx),
@@ -371,8 +389,9 @@ func (m *Manager) initialize(ctx context.Context, client proto.XoloPluginClient,
 	// AcceptAndServe blocks until the plugin connects, so it must run in a goroutine.
 	// We call it before client.Initialize so the listener is ready when the plugin
 	// calls broker.Dial inside its Initialize handler.
+	newServer := pluginsdk.GRPCServerFactory(m.maxMessageSize)
 	go broker.AcceptAndServe(brokerID, func(opts []grpc.ServerOption) *grpc.Server {
-		s := grpc.NewServer(opts...)
+		s := newServer(opts)
 		proto.RegisterXoloHostServiceServer(s, hostSvc)
 		return s
 	})
