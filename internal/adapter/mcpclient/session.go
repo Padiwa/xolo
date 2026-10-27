@@ -143,10 +143,11 @@ func (c *Connector) Do(ctx context.Context, fn func(*mcp.ClientSession) error) e
 		return err
 	}
 
-	// The session is over: drop it (a concurrent caller may already have) and
-	// try once on a new one.
+	// The session is over: drop it, unless a concurrent caller already replaced
+	// it (ours is then stale and theirs must be left alone), and try once on a
+	// new one.
 	c.done()
-	c.Reset()
+	c.discardIf(session)
 
 	retry, retryErr := c.acquire(ctx)
 	if retryErr != nil {
@@ -266,6 +267,22 @@ func (c *Connector) done() {
 	c.mu.Unlock()
 }
 
+// discardIf closes the current session only when it is still the one given,
+// and reports whether it did.
+//
+// A retry that failed on a session must not discard the replacement another
+// caller installed meanwhile: doing so would close the session that caller is
+// already retrying on, and its own retry would then fail.
+func (c *Connector) discardIf(failed *mcp.ClientSession) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.session == nil || c.session != failed {
+		return false
+	}
+	c.discardLocked()
+	return true
+}
+
 // Reset closes the current session so the next call opens a new one: a plugin
 // calls it when the credentials behind the settings changed.
 func (c *Connector) Reset() {
@@ -280,8 +297,18 @@ func (c *Connector) Reset() {
 func (c *Connector) Close() {
 	c.mu.Lock()
 	c.closed = true
+	session := c.session
 	c.retireLocked()
 	c.mu.Unlock()
+
+	// The retirement path closes the session from a goroutine, which is right on
+	// the request path (a caller gone must not wait) and wrong on shutdown: a
+	// process exiting right after Close would leave the server holding the
+	// stream this method exists to release. Closing again is harmless, the
+	// session's Close is idempotent.
+	if session != nil {
+		_ = session.Close()
+	}
 }
 
 // usable reports whether session can serve a call now.

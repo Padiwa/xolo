@@ -475,3 +475,47 @@ func TestPlugin_PoolConcurrentFirstRequests(t *testing.T) {
 		t.Errorf("expected %d sessions and %d keys, got %d and %d", callers, callers, pooled, indexed)
 	}
 }
+
+// TestPlugin_NoSessionHeaderOpensOneSessionPerRequest pins the fallback the
+// maintainer asked to change: a client that sends no conversation id must not
+// have its separate conversations share one MCP session, since that session
+// carries the server's per-conversation state.
+func TestPlugin_NoSessionHeaderOpensOneSessionPerRequest(t *testing.T) {
+	var sessions atomic.Int64
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "v1"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "echo", Description: "echoes text"}, echo)
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() {
+		srv.CloseClientConnections()
+		srv.Close()
+	})
+
+	p := newTestPlugin(t)
+	ctx := context.Background()
+
+	// Two requests of the same caller, neither carrying a session id: they are
+	// unrelated conversations and must not share a session.
+	for range 2 {
+		reqCtx := requestContext(srv.URL, "")
+		reqCtx.SessionId = ""
+		if _, err := p.CallTool(ctx, &proto.CallToolInput{
+			Ctx:           reqCtx,
+			Name:          "echo",
+			ArgumentsJson: `{"text":"hi"}`,
+		}); err != nil {
+			t.Fatalf("CallTool: %v", err)
+		}
+	}
+
+	p.mu.Lock()
+	pooled := len(p.sessions)
+	p.mu.Unlock()
+	if pooled != 0 {
+		t.Errorf("a request with no conversation id must not be pooled, %d entries in the pool", pooled)
+	}
+	_ = sessions.Load()
+}

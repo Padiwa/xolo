@@ -130,10 +130,14 @@ func (p *Plugin) connector(ec sessionScope, cfg Config) *mcpclient.Connector {
 // nothing to expire, and no other path deleting it. Called when a call failed to
 // obtain a session at all.
 func (p *Plugin) dropIfSessionless(c *mcpclient.Connector) {
-	if !c.Sessionless() {
-		return
+	// Sessionless is checked here, and that is only sound because the caller has
+	// released the connector: a request that opened a session on it meanwhile
+	// means it is no longer sessionless, and dropping it would leave a live
+	// connector unreachable from the pool, so the next request would open a
+	// second session for the same conversation.
+	if c.Sessionless() {
+		p.forgetKey(c)
 	}
-	p.forgetKey(c)
 }
 
 // poolKey names the pool entry of one conversation on one endpoint. The caller
@@ -148,13 +152,15 @@ func poolKey(ec sessionScope, endpoint string) string {
 // forgetKey removes a connector from the pool, whichever entry holds it.
 func (p *Plugin) forgetKey(c *mcpclient.Connector) {
 	p.mu.Lock()
-	if key, ok := p.keys[c]; ok {
-		if current, still := p.sessions[key]; still && current == c {
-			delete(p.sessions, key)
-		}
-		delete(p.keys, c)
+	defer p.mu.Unlock()
+	key, ok := p.keys[c]
+	if !ok {
+		return
 	}
-	p.mu.Unlock()
+	if current, still := p.sessions[key]; still && current == c {
+		delete(p.sessions, key)
+	}
+	delete(p.keys, c)
 }
 
 // Close closes every pooled MCP session.
@@ -191,13 +197,17 @@ type sessionScope struct {
 // connect resolves the node's configuration and credentials, and returns the
 // connector holding the conversation's session. The caller runs its work
 // through its Do, which opens the session and replaces it when it died.
-func (p *Plugin) connect(ctx context.Context, reqCtx *proto.RequestContext) (Config, *mcpclient.Connector, error) {
+//
+// pooled reports whether the connector belongs to the shared pool. When it does
+// not (no conversation id, so nothing to key it on), the caller owns it and has
+// to close it once done.
+func (p *Plugin) connect(ctx context.Context, reqCtx *proto.RequestContext) (cfgOut Config, connector *mcpclient.Connector, pooled bool, err error) {
 	cfg, err := parseConfig(reqCtx.GetConfigJson())
 	if err != nil {
-		return Config{}, nil, errors.Wrap(err, "parse config")
+		return Config{}, nil, false, errors.Wrap(err, "parse config")
 	}
 	if cfg.Endpoint == "" {
-		return Config{}, nil, errors.New("mcp-bridge: endpoint not configured")
+		return Config{}, nil, false, errors.New("mcp-bridge: endpoint not configured")
 	}
 
 	authHeaderName := cfg.AuthHeaderName
@@ -205,44 +215,57 @@ func (p *Plugin) connect(ctx context.Context, reqCtx *proto.RequestContext) (Con
 	if cfg.AuthMode == AuthModeOAuth {
 		hc := p.getHostClient()
 		if hc == nil {
-			return cfg, nil, errors.WithStack(ErrNotAuthorized)
+			return cfg, nil, false, errors.WithStack(ErrNotAuthorized)
 		}
 		token, err := p.oauthClient().accessToken(ctx, hc, "mcp-bridge", reqCtx.GetNodeId(), reqCtx.GetUserId(), cfg.Endpoint)
 		if err != nil {
-			return cfg, nil, err
+			return cfg, nil, false, err
 		}
 		authHeaderName, authValue = "Authorization", "Bearer "+token
 	} else if hc := p.getHostClient(); hc != nil {
 		v, found, err := hc.GetSecret(ctx, reqCtx.GetSecretScopeId(), "mcp-bridge", reqCtx.GetNodeId(), secretKeyAuthValue)
 		if err != nil {
-			return Config{}, nil, errors.Wrap(err, "get auth secret")
+			return Config{}, nil, false, errors.Wrap(err, "get auth secret")
 		}
 		if found {
 			authValue = v
 		}
 	}
 
-	connector := p.connector(sessionScope{
+	connCfg := mcpclient.Config{
+		Endpoint:       cfg.Endpoint,
+		AuthHeaderName: authHeaderName,
+		AuthValue:      authValue,
+		Timeout:        time.Duration(cfg.TimeoutSeconds) * time.Second,
+	}
+
+	// A request with no conversation id has nothing to key a session on: it gets
+	// one of its own, closed once the call is done, rather than sharing the
+	// caller's state across unrelated conversations.
+	if sessionKey(reqCtx) == "" {
+		return cfg, mcpclient.NewConnector(connCfg, idleTimeout), false, nil
+	}
+
+	return cfg, p.connector(sessionScope{
 		orgID:          reqCtx.GetOrgId(),
 		userID:         reqCtx.GetUserId(),
 		key:            sessionKey(reqCtx),
 		nodeID:         reqCtx.GetNodeId(),
 		authHeaderName: authHeaderName,
 		authValue:      authValue,
-	}, cfg)
-
-	return cfg, connector, nil
+	}, cfg), true, nil
 }
 
-// sessionKey names the conversation a request belongs to. The host sets
-// NodeId per node, and the proxy's session header per conversation; without
-// one, the caller identity is the closest stable scope there is, which at
-// least keeps a user's tool rounds on one session.
+// sessionKey names the conversation a request belongs to, or empty when the
+// client sent no conversation id.
+//
+// An empty key is not a reason to invent one. Falling back to the caller
+// identity would make every conversation of a user share one MCP session: two
+// tabs, or an agent and an interactive prompt, would read and write the same
+// server-side state, which is a regression against the one-session-per-call it
+// replaced. A request with no conversation is served by a session of its own.
 func sessionKey(reqCtx *proto.RequestContext) string {
-	if reqCtx.GetSessionId() != "" {
-		return reqCtx.GetSessionId()
-	}
-	return reqCtx.GetOrgId() + "/" + reqCtx.GetUserId()
+	return reqCtx.GetSessionId()
 }
 
 func (p *Plugin) Describe(_ context.Context, _ *proto.DescribeRequest) (*proto.PluginDescriptor, error) {
@@ -262,7 +285,7 @@ func (p *Plugin) Describe(_ context.Context, _ *proto.DescribeRequest) (*proto.P
 }
 
 func (p *Plugin) ListTools(ctx context.Context, in *proto.ListToolsInput) (*proto.ListToolsOutput, error) {
-	cfg, connector, err := p.connect(ctx, in.GetCtx())
+	cfg, connector, pooled, err := p.connect(ctx, in.GetCtx())
 	if errors.Is(err, ErrNotAuthorized) {
 		// The user has to authorize the server first: the only tool offered
 		// gives the link to do so.
@@ -277,6 +300,10 @@ func (p *Plugin) ListTools(ctx context.Context, in *proto.ListToolsInput) (*prot
 	}
 	if err != nil {
 		return nil, err
+	}
+	if !pooled {
+		// Nothing else keys a session for this request: it owns the connector.
+		defer connector.Close()
 	}
 
 	var tools []*proto.ToolDescriptor
@@ -311,20 +338,17 @@ func (p *Plugin) ListTools(ctx context.Context, in *proto.ListToolsInput) (*prot
 	}, nil
 }
 
-// readResources reads the resources the node names in its configuration, on the
-// session ListTools already opened.
-//
-// A resource that cannot be read is reported in the injected text rather than
-// failing the request: a configuration naming a resource the server renamed
-// should still let the conversation through, with a note the operator will see
-// in the model's answer. Nothing is read from a server that does not advertise
-// the resources capability — asking would only produce an error.
 // readResources reads the configured resources on the session ListTools opened.
 //
-// A session that died is returned as an error rather than turned into text: the
-// caller runs inside Connector.Do, whose one retry only happens when the session
-// error escapes. A resource that is merely absent or unsupported stays text, so
-// a configuration naming a renamed resource does not fail the request.
+// A resource that is absent, renamed by the server, or on a server without the
+// resources capability becomes text in the injected block: a configuration
+// mistake should let the conversation through, with a note the operator sees in
+// the model's answer, and asking a server that advertised nothing would only
+// produce an error.
+//
+// A session that died is returned as an error instead, never turned into text:
+// the caller runs inside Connector.Do, whose one retry only happens when the
+// session error escapes.
 func readResources(ctx context.Context, session *mcp.ClientSession, refs []string) ([]*proto.ConversationValue, error) {
 	if len(refs) == 0 {
 		return nil, nil
@@ -398,7 +422,7 @@ func conversationTools(cfg Config, tools []*proto.ToolDescriptor) []*proto.ToolC
 }
 
 func (p *Plugin) CallTool(ctx context.Context, in *proto.CallToolInput) (*proto.CallToolOutput, error) {
-	cfg, connector, err := p.connect(ctx, in.GetCtx())
+	cfg, connector, pooled, err := p.connect(ctx, in.GetCtx())
 	if errors.Is(err, ErrNotAuthorized) {
 		return &proto.CallToolOutput{
 			ResultText: "L'utilisateur doit d'abord autoriser l'accès au serveur MCP en ouvrant ce lien, puis renouveler sa demande : " + connectURL(cfg, in.GetCtx().GetNodeId()),
@@ -407,6 +431,11 @@ func (p *Plugin) CallTool(ctx context.Context, in *proto.CallToolInput) (*proto.
 	}
 	if err != nil {
 		return nil, err
+	}
+	if !pooled {
+		// A per-request connector: closed on return, or it outlives the request
+		// that created it with nobody holding a reference to it.
+		defer connector.Close()
 	}
 
 	var text string
