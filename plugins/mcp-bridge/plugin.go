@@ -91,19 +91,18 @@ func (p *Plugin) connector(ec sessionScope, cfg Config) *mcpclient.Connector {
 	p.mu.Unlock()
 
 	if found {
-		// A connector retired between this lookup and now (its idle timer fired,
-		// or Close ran) cannot open a session any more: treating it as a hit
-		// would fail the request with "connector closed" at the idle boundary.
-		// It is a pool miss, so fall through and build a fresh one.
-		if existing.Terminal() {
-			p.forgetKey(existing)
-		} else {
-			// SetConfig outside p.mu: it can close the session, whose expiry
-			// callback takes p.mu. Holding the pool lock here would deadlock the
-			// two against each other.
-			existing.SetConfig(connCfg)
+		// A connector can be retired between this lookup and now (its idle timer
+		// fired, or Close ran), and retirement is terminal: handing it out would
+		// fail the request with ErrConnectorClosed at the idle boundary. The
+		// check cannot be atomic with the hand-out, because SetConfig has to run
+		// outside p.mu (it can close a session, whose expiry callback takes
+		// p.mu). So the decision is taken after SetConfig, and a connector the
+		// ticker retired in between is treated as a pool miss.
+		existing.SetConfig(connCfg)
+		if !existing.Terminal() {
 			return existing
 		}
+		p.forgetKey(existing)
 	}
 
 	c := mcpclient.NewConnector(connCfg, idleTimeout)

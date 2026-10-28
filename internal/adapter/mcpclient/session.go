@@ -99,6 +99,14 @@ func (c *Connector) SetConfig(cfg Config) {
 // before it completed. Callers may retry: the next attempt uses the new ones.
 var errCredentialsChanged = errors.New("mcpclient: credentials changed while connecting")
 
+// ErrConnectorClosed reports a connector that has been retired and can no longer
+// open a session.
+//
+// It is exported because a pool has to recognise it: a connector can be retired
+// between the moment the pool hands it out and the moment a call reaches
+// acquire, and the only sound recovery is to drop it and build a fresh one.
+var ErrConnectorClosed = errors.New("mcpclient: connector closed")
+
 // Terminal reports whether the connector has been retired and can no longer
 // open a session. A pool must treat such a connector as a miss and build a new
 // one: handing it out would fail the request with "connector closed" because
@@ -244,7 +252,7 @@ func (c *Connector) acquire(ctx context.Context) (*mcp.ClientSession, error) {
 		c.mu.Unlock()
 	}()
 	if closed {
-		return nil, errors.New("mcpclient: connector closed")
+		return nil, ErrConnectorClosed
 	}
 
 	session, err := Connect(ctx, cfg)
@@ -256,7 +264,7 @@ func (c *Connector) acquire(ctx context.Context) (*mcp.ClientSession, error) {
 	if c.closed {
 		c.mu.Unlock()
 		_ = session.Close()
-		return nil, errors.New("mcpclient: connector closed")
+		return nil, ErrConnectorClosed
 	}
 	if c.generation != generation {
 		// The credentials were replaced while this session was being opened:
