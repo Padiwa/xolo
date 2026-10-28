@@ -9,6 +9,7 @@ import (
 	"github.com/caarlos0/env/v11"
 	"github.com/pkg/errors"
 	"github.com/xolo-gateway/xolo/internal/core/model"
+	"github.com/xolo-gateway/xolo/internal/i18n"
 )
 
 type Config struct {
@@ -29,6 +30,9 @@ type Config struct {
 	Ownership model.OwnershipPolicy `env:"OWNERSHIP" envSeparator:"," envKeyValSeparator:"="`
 	// SecretKey is a 32-byte hex string used for AES-GCM encryption of provider API keys.
 	SecretKey string `env:"SECRET_KEY"`
+	// DefaultLocale is the canonical tag of the language used when neither
+	// the locale cookie nor Accept-Language selects a supported one.
+	DefaultLocale string `env:"DEFAULT_LOCALE" envDefault:"fr"`
 }
 
 func Parse() (*Config, error) {
@@ -105,6 +109,19 @@ func nonEmptyTrimmed(values []string) []string {
 	return out
 }
 
+// validateDefaultLocale refuses a language without a catalog, which would
+// otherwise only fail when the first page renders.
+func validateDefaultLocale(value string) error {
+	locales, err := i18n.Load()
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	if _, ok := locales.Lookup(value); !ok {
+		return errors.Errorf("XOLO_DEFAULT_LOCALE must be one of %v, got %q", locales.Supported(), value)
+	}
+	return nil
+}
+
 // secretKeyBytes is the key length AES-GCM is used with throughout the
 // codebase. Anything shorter silently downgrades the cipher; anything invalid
 // only surfaces at the first encryption, long after start-up.
@@ -143,6 +160,10 @@ func (c *Config) Validate() error {
 	c.HTTP.BaseURL = normalizeBaseURL(c.HTTP.BaseURL)
 
 	if err := validateSecretKey(c.SecretKey); err != nil {
+		return errors.WithStack(err)
+	}
+
+	if err := validateDefaultLocale(c.DefaultLocale); err != nil {
 		return errors.WithStack(err)
 	}
 
