@@ -187,11 +187,25 @@ func FillTemplateArgs(template string, values map[string]string) (string, bool, 
 	}
 
 	missing := false
+	unknown := ""
 	fill := func(s string) string {
 		return placeholders.ReplaceAllStringFunc(s, func(match string) string {
 			name := strings.TrimSpace(match[2 : len(match)-2])
-			value, ok := values[name]
-			if !ok || value == "" {
+			if !TemplatePlaceholders[name] {
+				// A name no request can supply: a configuration typo, not a
+				// value this request happens to lack. Reported apart, or the
+				// prefetch would be silently disabled and the operator would
+				// never learn why the tool stopped firing.
+				if unknown == "" {
+					unknown = name
+				}
+				missing = true
+				return match
+			}
+			value := values[name]
+			if value == "" {
+				// A known key with nothing to fill it: the request genuinely
+				// does not carry it (no display name, no session header).
 				missing = true
 				return match
 			}
@@ -202,6 +216,9 @@ func FillTemplateArgs(template string, values map[string]string) (string, bool, 
 	filled, err := fillJSONStrings(decoded, fill)
 	if err != nil {
 		return "", false, err
+	}
+	if unknown != "" {
+		return "", false, errors.Errorf("unknown placeholder %q in the arguments template", unknown)
 	}
 
 	// A tool call takes a JSON object of named arguments. A template that is
@@ -250,7 +267,9 @@ func fillJSONStrings(v any, fill func(string) string) (any, error) {
 }
 
 // TemplateValues builds the values FillTemplate substitutes from the request:
-// the caller identity, the conversation key and the last user message.
+// the caller identity, the conversation key and the last user message. Every key
+// here must also appear in TemplatePlaceholders, which is what tells a typo from
+// a value the request genuinely lacks.
 func (ec ExecutionContext) TemplateValues(messages []llm.Message) map[string]string {
 	return map[string]string{
 		"last_user_message": lastUserMessageText(messages),
@@ -276,6 +295,18 @@ func lastUserMessageText(messages []llm.Message) string {
 }
 
 var placeholders = regexp.MustCompile(`\{\{[^{}]*\}\}`)
+
+// TemplatePlaceholders is the vocabulary a template may use: every name
+// TemplateValues supplies. It is checked instead of the map handed to
+// FillTemplateArgs, so a partial map still tells a typo from a value this
+// request genuinely lacks.
+var TemplatePlaceholders = map[string]bool{
+	"last_user_message": true,
+	"user_id":           true,
+	"org_id":            true,
+	"display_name":      true,
+	"session_id":        true,
+}
 
 // prefetchConversationTools runs the conversation tools due on this request and
 // returns the message carrying their results, or an empty text when there is

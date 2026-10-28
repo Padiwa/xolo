@@ -205,7 +205,8 @@ func TestFillTemplateArgs(t *testing.T) {
 		{`{"q":"{{last_user_message}}"}`, `{"q":"what is X?"}`, false},
 		{`{"q":"{{ user_id }}"}`, `{"q":"u1"}`, false}, // surrounding spaces are ignored
 		{`{"q":"{{org_id}}"}`, `{"q":"{{org_id}}"}`, true},
-		{`{"q":"{{result}}"}`, `{"q":"{{result}}"}`, true}, // not a request value
+		// {{result}} belongs to a result_template, never to the arguments: in an
+		// arguments template it is a typo and is reported as such.
 		{`{"q":"{{last_user_message}}","u":"{{user_id}}"}`, `{"q":"what is X?","u":"u1"}`, false},
 		// Non-string values are left alone.
 		{`{"q":"{{user_id}}","limit":5,"strict":true,"none":null}`, `{"limit":5,"none":null,"q":"u1","strict":true}`, false},
@@ -376,4 +377,30 @@ func (b labelBlocker) InspectToolResult(_ context.Context, _, content string) (b
 		return true, "injection in the resource label", nil
 	}
 	return false, "", nil
+}
+
+// TestFillTemplateArgs_DistinguishesUnknownFromEmpty pins the distinction the
+// review found missing: a placeholder no request can supply is a configuration
+// typo and must be reported, while a known key this request does not carry is
+// the documented "skip the prefetch" case. Conflating them disabled the prefetch
+// silently and the operator never learned why the tool stopped firing.
+func TestFillTemplateArgs_DistinguishesUnknownFromEmpty(t *testing.T) {
+	values := map[string]string{
+		"last_user_message": "what is X?",
+		"display_name":      "", // known, honestly empty for this caller
+	}
+
+	// A typo: reported as an error, so runConversationTool injects it.
+	if _, _, err := pipeline.FillTemplateArgs(`{"q":"{{last_user_mesage}}"}`, values); err == nil {
+		t.Error("expected an unknown placeholder to be reported as an error")
+	} else if !strings.Contains(err.Error(), "last_user_mesage") {
+		t.Errorf("the error should name the offending placeholder, got %v", err)
+	}
+
+	// A known key with no value: not an error, just nothing to map.
+	if _, missing, err := pipeline.FillTemplateArgs(`{"q":"{{display_name}}"}`, values); err != nil {
+		t.Errorf("a known-but-empty placeholder must not be an error, got %v", err)
+	} else if !missing {
+		t.Error("expected the known-but-empty placeholder to be reported as missing")
+	}
 }
