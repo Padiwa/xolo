@@ -449,3 +449,41 @@ func TestToolLoop_MissingPlaceholderIsReported(t *testing.T) {
 		t.Errorf("the skip should be reported in the injected block, got %v", injected)
 	}
 }
+
+// TestToolLoop_PrefetchMergesIntoTheUserTurn asserts the role contract the
+// review asked to pin: the prefetched block joins the trailing user message
+// rather than adding a second consecutive user turn, which providers enforcing
+// strict alternation reject and the others silently fold into the user's text.
+func TestToolLoop_PrefetchMergesIntoTheUserTurn(t *testing.T) {
+	prefetch := newPrefetchTool("search")
+	inner := &scriptedClient{responses: []*scriptedResponse{{content: "the answer"}}}
+
+	c := pipeline.NewToolLoopClient(inner, []llm.Tool{prefetch.tool}, 0, 0, nil).
+		WithConversationTools(
+			conversationToolSet(t, prefetch.tool, `{"query":"{{last_user_message}}"}`, "Docs", ""),
+			pipeline.ExecutionContext{},
+		)
+
+	if _, err := c.ChatCompletion(context.Background(), contextWithUser("hello there")...); err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+
+	sent := inner.calls[0]
+	// Same number of messages as the request: nothing appended.
+	if len(sent) != 2 {
+		t.Fatalf("expected the 2 request messages with the block merged, got %d", len(sent))
+	}
+	// No two consecutive user turns.
+	for i := 1; i < len(sent); i++ {
+		if sent[i].Role() == llm.RoleUser && sent[i-1].Role() == llm.RoleUser {
+			t.Errorf("messages %d and %d are both user turns", i-1, i)
+		}
+	}
+	last := sent[len(sent)-1]
+	if last.Role() != llm.RoleUser {
+		t.Errorf("expected the block attached to the user turn, last role is %q", last.Role())
+	}
+	if !strings.Contains(last.Content(), "hello there") || !strings.Contains(last.Content(), "Docs") {
+		t.Errorf("expected the user text and the block merged, got %q", last.Content())
+	}
+}

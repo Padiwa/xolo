@@ -72,6 +72,30 @@ func (c *ToolLoopClient) WithConversationTools(conversation *ConversationTools, 
 	return c
 }
 
+// injectPrefetched places the prefetched block in the conversation.
+//
+// It is merged into the trailing user turn rather than appended as its own
+// message: a second consecutive user message is rejected by providers enforcing
+// strict alternation (Anthropic Messages among them) and silently folded into the
+// user's text by the others. The block then reads as context attached to the
+// request, which is what it is.
+//
+// With no trailing user turn to attach it to, it becomes a user message of its
+// own: the alternative is dropping what the operator configured.
+func injectPrefetched(messages []llm.Message, block string) []llm.Message {
+	if block == "" {
+		return messages
+	}
+	if n := len(messages); n > 0 && messages[n-1].Role() == llm.RoleUser {
+		merged := llm.NewMessage(llm.RoleUser, messages[n-1].Content()+"\n\n"+block)
+		out := make([]llm.Message, len(messages))
+		copy(out, messages)
+		out[n-1] = merged
+		return out
+	}
+	return append(messages, llm.NewMessage(llm.RoleUser, block))
+}
+
 func (c *ToolLoopClient) toolByName(name string) llm.Tool {
 	for _, t := range c.tools {
 		if t.Name() == name {
@@ -125,9 +149,7 @@ func (c *ToolLoopClient) ChatCompletion(ctx context.Context, funcs ...llm.ChatCo
 	if err != nil {
 		return nil, err
 	}
-	if prefetched != "" {
-		messages = append(messages, llm.NewMessage(llm.RoleUser, prefetched))
-	}
+	messages = injectPrefetched(messages, prefetched)
 
 	for i := 0; i < c.maxIterations; i++ {
 		// A caller gone during a tool round needs no further turn.
@@ -218,9 +240,7 @@ func (c *ToolLoopClient) ChatCompletionStream(ctx context.Context, funcs ...llm.
 	if err != nil {
 		return nil, err
 	}
-	if prefetched != "" {
-		messages = append(messages, llm.NewMessage(llm.RoleUser, prefetched))
-	}
+	messages = injectPrefetched(messages, prefetched)
 
 	// emit gives up once the caller is gone, instead of blocking this
 	// goroutine on a channel nobody reads anymore. The context is checked

@@ -23,7 +23,6 @@ func newResourceMCPServer(t *testing.T, resources map[string]string) *httptest.S
 	mcp.AddTool(server, &mcp.Tool{Name: "echo", Description: "echoes text"}, echo)
 
 	for uri, text := range resources {
-		text := text
 		server.AddResource(
 			&mcp.Resource{URI: uri, Name: uri, MIMEType: "text/plain"},
 			func(_ context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
@@ -558,5 +557,47 @@ func TestPlugin_RetiredConnectorIsReplacedNotReturned(t *testing.T) {
 	connectors[0].Close()
 
 	// Must open a fresh session rather than fail the request.
+	call()
+}
+
+// TestPlugin_ConnectorRetiredBetweenLookupAndCall is the review's blocking
+// finding: the idle ticker can retire a connector after connector() has checked
+// Terminal() and before the call reaches it. Since retirement is terminal and
+// SetConfig cannot revive one, the request must rebuild instead of failing with
+// "connector closed".
+func TestPlugin_ConnectorRetiredBetweenLookupAndCall(t *testing.T) {
+	srv := newResourceMCPServer(t, nil)
+
+	p := newTestPlugin(t)
+	ctx := context.Background()
+	reqCtx := requestContext(srv.URL, "")
+
+	call := func() {
+		t.Helper()
+		if _, err := p.CallTool(ctx, &proto.CallToolInput{
+			Ctx:           reqCtx,
+			Name:          "echo",
+			ArgumentsJson: `{"text":"hi"}`,
+		}); err != nil {
+			t.Fatalf("CallTool: %v", err)
+		}
+	}
+
+	call()
+
+	// Retire the pooled connector without removing its pool entry, which is
+	// exactly the state the ticker leaves during its window.
+	p.mu.Lock()
+	connectors := make([]*mcpclient.Connector, 0, len(p.sessions))
+	for _, c := range p.sessions {
+		connectors = append(connectors, c)
+	}
+	p.mu.Unlock()
+	if len(connectors) != 1 {
+		t.Fatalf("expected one pooled connector, got %d", len(connectors))
+	}
+	connectors[0].Close()
+
+	// The pool still resolves the retired connector: the call must rebuild.
 	call()
 }

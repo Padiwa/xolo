@@ -224,6 +224,18 @@ func (c *Connector) acquire(ctx context.Context) (*mcp.ClientSession, error) {
 	// Only one caller opens a session at a time: the others wait here and then
 	// find the one it opened. Holding c.mu itself through the handshake would
 	// serialize every call, including those on a live session.
+	// Counted before taking connectMu: a caller queued here is committed to this
+	// connector just as much as one in a handshake, and a pool that evicted it
+	// would close the connector under it.
+	c.mu.Lock()
+	c.connecting++
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.connecting--
+		c.mu.Unlock()
+	}()
+
 	c.connectMu.Lock()
 	defer c.connectMu.Unlock()
 
@@ -242,15 +254,7 @@ func (c *Connector) acquire(ctx context.Context) (*mcp.ClientSession, error) {
 	// for.
 	cfg := c.cfg
 	generation := c.generation
-	c.connecting++
 	c.mu.Unlock()
-	// Every exit below must release it, including the ones that return a
-	// session: Sessionless means "no session and none being opened".
-	defer func() {
-		c.mu.Lock()
-		c.connecting--
-		c.mu.Unlock()
-	}()
 	if closed {
 		return nil, ErrConnectorClosed
 	}

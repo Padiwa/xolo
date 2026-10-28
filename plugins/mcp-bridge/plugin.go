@@ -136,41 +136,6 @@ func (p *Plugin) connector(ec sessionScope, cfg Config) *mcpclient.Connector {
 	return c
 }
 
-// dropIfSessionless removes a pooled connector that never managed to open a
-// session.
-//
-// A connector only retires itself once it has a session to close, so one whose
-// first Connect failed would sit in the pool for the life of the process:
-// nothing to expire, and no other path deleting it. Called when a call failed to
-// obtain a session at all.
-//
-// The liveness check and the eviction happen under p.mu in one step: checking
-// here and evicting in a second call would let a concurrent request open a
-// session on the very connector being dropped, leaving it unreachable from the
-// pool and diverging the conversation onto a second session.
-func (p *Plugin) dropIfSessionless(c *mcpclient.Connector) {
-	p.mu.Lock()
-	key, ok := p.keys[c]
-	if !ok {
-		p.mu.Unlock()
-		return
-	}
-	if current, still := p.sessions[key]; still && current == c && !c.Sessionless() {
-		// Another request reached it and opened a session (or is opening one):
-		// it is live.
-		p.mu.Unlock()
-		return
-	}
-	delete(p.sessions, key)
-	delete(p.keys, c)
-	p.mu.Unlock()
-
-	// Closed outside the pool lock: Close is a network exchange, and holding
-	// p.mu through it would block every request of every conversation behind
-	// one unresponsive MCP server.
-	c.Close()
-}
-
 // poolKey names the pool entry of one conversation on one endpoint. The caller
 // identity is part of it even though the conversation usually encodes it: the
 // session id comes from the client, so two callers sending the same value would
@@ -178,6 +143,45 @@ func (p *Plugin) dropIfSessionless(c *mcpclient.Connector) {
 // credentials and whatever the server holds for that session.
 func poolKey(ec sessionScope, endpoint string) string {
 	return strings.Join([]string{ec.orgID, ec.userID, ec.key, ec.nodeID, endpoint}, "\x00")
+}
+
+// doWithRebuild runs fn on connector, rebuilding it once when the pool handed
+// out one the idle ticker retired in between.
+//
+// The window cannot be closed by a check: retirement is terminal, it can happen
+// between any check and the call, and the pool lock cannot be held across
+// SetConfig (which closes a session, whose expiry callback takes that lock). So
+// the failure is caught where it surfaces, and the caller asks for a fresh
+// connector once.
+func (p *Plugin) doWithRebuild(ctx context.Context, reqCtx *proto.RequestContext, connector *mcpclient.Connector, pooled bool, fn func(*mcp.ClientSession) error) error {
+	if !pooled {
+		// A per-request connector: closed on return, or it outlives the request
+		// that created it with nobody holding a reference.
+		defer connector.Close()
+	}
+
+	err := connector.Do(ctx, fn)
+	if pooled && connector.Sessionless() {
+		// The connection never succeeded: the pool entry has nothing to expire
+		// and would stay for the life of the process.
+		p.forgetKey(connector)
+	}
+	if !errors.Is(err, mcpclient.ErrConnectorClosed) || !pooled {
+		return err
+	}
+
+	// Retired between the pool lookup and the call: drop the entry and build a
+	// fresh connector.
+	p.forgetKey(connector)
+
+	_, fresh, freshPooled, freshErr := p.connect(ctx, reqCtx)
+	if freshErr != nil {
+		return freshErr
+	}
+	if !freshPooled {
+		defer fresh.Close()
+	}
+	return fresh.Do(ctx, fn)
 }
 
 // forgetKey removes a connector from the pool, whichever entry holds it.
@@ -332,14 +336,9 @@ func (p *Plugin) ListTools(ctx context.Context, in *proto.ListToolsInput) (*prot
 	if err != nil {
 		return nil, err
 	}
-	if !pooled {
-		// Nothing else keys a session for this request: it owns the connector.
-		defer connector.Close()
-	}
-
 	var tools []*proto.ToolDescriptor
 	var values []*proto.ConversationValue
-	err = connector.Do(ctx, func(session *mcp.ClientSession) error {
+	err = p.doWithRebuild(ctx, in.GetCtx(), connector, pooled, func(session *mcp.ClientSession) error {
 		infos, err := mcpclient.ListToolInfos(ctx, session, cfg.ToolFilter)
 		if err != nil {
 			return err
@@ -357,7 +356,6 @@ func (p *Plugin) ListTools(ctx context.Context, in *proto.ListToolsInput) (*prot
 		return readErr
 	})
 	if err != nil {
-		p.dropIfSessionless(connector)
 		return nil, err
 	}
 
@@ -463,21 +461,14 @@ func (p *Plugin) CallTool(ctx context.Context, in *proto.CallToolInput) (*proto.
 	if err != nil {
 		return nil, err
 	}
-	if !pooled {
-		// A per-request connector: closed on return, or it outlives the request
-		// that created it with nobody holding a reference to it.
-		defer connector.Close()
-	}
-
 	var text string
 	var isError bool
-	err = connector.Do(ctx, func(session *mcp.ClientSession) error {
+	err = p.doWithRebuild(ctx, in.GetCtx(), connector, pooled, func(session *mcp.ClientSession) error {
 		var callErr error
 		text, isError, callErr = mcpclient.CallToolText(ctx, session, in.Name, in.ArgumentsJson)
 		return callErr
 	})
 	if err != nil {
-		p.dropIfSessionless(connector)
 		return nil, err
 	}
 	return &proto.CallToolOutput{ResultText: text, IsError: isError}, nil
