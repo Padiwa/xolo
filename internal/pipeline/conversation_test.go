@@ -404,3 +404,48 @@ func TestFillTemplateArgs_DistinguishesUnknownFromEmpty(t *testing.T) {
 		t.Error("expected the known-but-empty placeholder to be reported as missing")
 	}
 }
+
+// TestFillTemplateArgs_PreservesLargeIntegers pins the review's numeric finding:
+// decoding through `any` routed every number through float64, so an id above
+// 2^53 was rounded and re-encoded in exponential form before reaching the tool.
+func TestFillTemplateArgs_PreservesLargeIntegers(t *testing.T) {
+	const bigID = "9007199254740993" // 2^53 + 1, not representable as a float64
+	template := `{"q":"{{user_id}}","id":` + bigID + `,"limit":10}`
+
+	args, _, err := pipeline.FillTemplateArgs(template, map[string]string{"user_id": "u1"})
+	if err != nil {
+		t.Fatalf("FillTemplateArgs: %v", err)
+	}
+	if !strings.Contains(args, bigID) {
+		t.Errorf("the large integer was altered: %s", args)
+	}
+	if strings.Contains(args, "e+") {
+		t.Errorf("the large integer was re-encoded in exponential form: %s", args)
+	}
+}
+
+// TestToolLoop_MissingPlaceholderIsReported pins the other half: a known
+// placeholder this request cannot fill used to skip the prefetch silently, so
+// the node looked enabled while nothing ever fired.
+func TestToolLoop_MissingPlaceholderIsReported(t *testing.T) {
+	prefetch := newPrefetchTool("search")
+	inner := &scriptedClient{responses: []*scriptedResponse{{content: "the answer"}}}
+
+	// display_name is empty in this execution context.
+	c := pipeline.NewToolLoopClient(inner, []llm.Tool{prefetch.tool}, 0, 0, nil).
+		WithConversationTools(
+			conversationToolSet(t, prefetch.tool, `{"query":"{{display_name}}"}`, "Docs", ""),
+			pipeline.ExecutionContext{OrgID: "org", UserID: "user"},
+		)
+
+	if _, err := c.ChatCompletion(context.Background(), contextWithUser("hello")...); err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+	if len(prefetch.calls) != 0 {
+		t.Error("the tool must not be called without a query to map")
+	}
+	injected := lastMessage(inner.calls[0])
+	if injected == nil || !strings.Contains(injected.Content(), "was not called") {
+		t.Errorf("the skip should be reported in the injected block, got %v", injected)
+	}
+}

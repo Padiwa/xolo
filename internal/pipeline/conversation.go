@@ -181,8 +181,13 @@ func FillTemplateArgs(template string, values map[string]string) (string, bool, 
 		return "{}", false, nil
 	}
 
+	// UseNumber so a large integer in the template (an id, a nanosecond
+	// timestamp) reaches the tool as written instead of being rounded through
+	// float64 and re-encoded in exponential form.
+	decoder := json.NewDecoder(strings.NewReader(template))
+	decoder.UseNumber()
 	var decoded any
-	if err := json.Unmarshal([]byte(template), &decoded); err != nil {
+	if err := decoder.Decode(&decoded); err != nil {
 		return "", false, errors.Wrap(err, "arguments template is not valid JSON")
 	}
 
@@ -371,12 +376,18 @@ func (c *ToolLoopClient) runConversationTool(ctx context.Context, tool Conversat
 	if missing {
 		// The arguments name something this request does not carry (no user
 		// message to map a query from). Calling the tool anyway would ask the
-		// server a question nobody asked.
-		return "", nil
+		// server a question nobody asked, so the prefetch is skipped, but the
+		// model is told: otherwise the node shows the prefetch enabled in the
+		// interface while nothing ever fires, and nobody learns why.
+		return conversationBlock(tool.Label, "the tool was not called: the request carries no value for one of its arguments"), nil
 	}
 
+	// UseNumber again: unmarshalling the re-encoded arguments would redo the
+	// float64 round trip FillTemplateArgs just avoided.
+	decoder := json.NewDecoder(strings.NewReader(arguments))
+	decoder.UseNumber()
 	var params map[string]any
-	if err := json.Unmarshal([]byte(arguments), &params); err != nil {
+	if err := decoder.Decode(&params); err != nil {
 		return "", errors.Wrapf(err, "conversation tool %q: arguments are not a JSON object", name)
 	}
 
