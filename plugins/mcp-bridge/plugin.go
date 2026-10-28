@@ -151,17 +151,24 @@ func (p *Plugin) connector(ec sessionScope, cfg Config) *mcpclient.Connector {
 // pool and diverging the conversation onto a second session.
 func (p *Plugin) dropIfSessionless(c *mcpclient.Connector) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	key, ok := p.keys[c]
 	if !ok {
+		p.mu.Unlock()
 		return
 	}
 	if current, still := p.sessions[key]; still && current == c && !c.Sessionless() {
-		// Another request reached it and opened a session: it is live.
+		// Another request reached it and opened a session (or is opening one):
+		// it is live.
+		p.mu.Unlock()
 		return
 	}
 	delete(p.sessions, key)
 	delete(p.keys, c)
+	p.mu.Unlock()
+
+	// Closed outside the pool lock: Close is a network exchange, and holding
+	// p.mu through it would block every request of every conversation behind
+	// one unresponsive MCP server.
 	c.Close()
 }
 

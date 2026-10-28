@@ -337,3 +337,45 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 	t.Fatal("condition not met within the deadline")
 }
+
+// TestConnector_SessionlessWhileConnecting checks the predicate a pool uses to
+// evict: a connector whose handshake is in flight holds no session yet, but it
+// is about to, and evicting it would leave the caller retrying on a connector
+// the pool no longer holds.
+func TestConnector_SessionlessWhileConnecting(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Hold the handshake so the connector stays "connecting".
+		<-release
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	c := mcpclient.NewConnector(mcpclient.Config{Endpoint: srv.URL}, time.Minute)
+	defer c.Close()
+
+	// A connector that never tried to connect is sessionless.
+	if !c.Sessionless() {
+		t.Error("a connector that never connected should be sessionless")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = c.Do(t.Context(), func(*mcp.ClientSession) error { return nil })
+	}()
+
+	// While the handshake is blocked, it must not look evictable.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !c.Sessionless() {
+			close(release)
+			<-done
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
+	<-done
+	t.Error("a connector mid-handshake must not be reported sessionless")
+}

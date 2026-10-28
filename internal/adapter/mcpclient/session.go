@@ -39,7 +39,10 @@ type Connector struct {
 	inFlight int
 	lastUsed time.Time
 	closed   bool
-	stop     chan struct{}
+	// connecting counts the handshakes in flight, so Sessionless can tell a
+	// failed connection from one still in progress.
+	connecting int
+	stop       chan struct{}
 	// connectMu serializes the opens: two callers finding no session at the
 	// same instant would otherwise each open one, defeating the very reuse the
 	// connector exists for. It is held only while no session exists, so calls
@@ -106,13 +109,16 @@ func (c *Connector) Terminal() bool {
 	return c.closed
 }
 
-// Sessionless reports whether the connector holds no session, which is the case
-// for one whose connection attempt failed. A pool uses it to drop an entry that
-// has nothing to expire and would otherwise stay forever.
+// Sessionless reports whether the connector holds no session and none is being
+// opened.
+//
+// A connector is sessionless only when its connection attempt failed: one whose
+// handshake is in flight also has no session yet, but it is about to, and a pool
+// that evicted it would leave the caller retrying on a connector nobody holds.
 func (c *Connector) Sessionless() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.session == nil
+	return c.session == nil && c.connecting == 0
 }
 
 // OnExpire registers a callback run when the connector is retired: on idle
@@ -164,7 +170,15 @@ func (c *Connector) Do(ctx context.Context, fn func(*mcp.ClientSession) error) e
 		return retryErr
 	}
 	defer c.done()
-	return fn(retry)
+
+	retryErr = fn(retry)
+	if IsSessionOver(retryErr) {
+		// The replacement died too. Discarding it is what stops the next call of
+		// the conversation from retrying on a session already known to be dead;
+		// the error still goes back, there is no second retry.
+		c.discardIf(retry)
+	}
+	return retryErr
 }
 
 // IsSessionOver reports whether err is the session having ended rather than the
@@ -220,7 +234,15 @@ func (c *Connector) acquire(ctx context.Context) (*mcp.ClientSession, error) {
 	// for.
 	cfg := c.cfg
 	generation := c.generation
+	c.connecting++
 	c.mu.Unlock()
+	// Every exit below must release it, including the ones that return a
+	// session: Sessionless means "no session and none being opened".
+	defer func() {
+		c.mu.Lock()
+		c.connecting--
+		c.mu.Unlock()
+	}()
 	if closed {
 		return nil, errors.New("mcpclient: connector closed")
 	}
@@ -256,7 +278,9 @@ func (c *Connector) acquire(ctx context.Context) (*mcp.ClientSession, error) {
 		return existing, nil
 	}
 	c.session = session
-	c.inFlight = 1
+	// Increment, not assign: callers may still be running on a session this one
+	// replaced, and their done() has to find a count that includes them.
+	c.inFlight++
 	c.lastUsed = c.now()
 	c.stop = make(chan struct{})
 	stop := c.stop
