@@ -89,9 +89,12 @@ func TestFindResource(t *testing.T) {
 	}
 	defer session.Close()
 
-	ctx := context.Background()
+	infos, err := mcpclient.ListResourceInfos(context.Background(), session)
+	if err != nil {
+		t.Fatalf("ListResourceInfos: %v", err)
+	}
 	for _, ref := range []string{"file:///contexte/procedure.md", "procedure"} {
-		info, err := mcpclient.FindResource(ctx, session, ref)
+		info, err := mcpclient.FindResource(infos, ref)
 		if err != nil {
 			t.Fatalf("FindResource(%q): %v", ref, err)
 		}
@@ -100,7 +103,7 @@ func TestFindResource(t *testing.T) {
 		}
 	}
 
-	if _, err := mcpclient.FindResource(ctx, session, "does-not-exist"); err == nil {
+	if _, err := mcpclient.FindResource(infos, "does-not-exist"); err == nil {
 		t.Error("expected an unknown resource to be reported")
 	}
 }
@@ -158,13 +161,35 @@ func TestListResourceInfos_WithoutCapability(t *testing.T) {
 // cycles its pagination instead of ending it. Comparing with the previous cursor
 // alone lets an A -> B -> A alternation loop forever, and request contexts often
 // carry no overall deadline.
+func TestListResourceInfos_StopsOnCursorCycle(t *testing.T) {
+	cursors := []string{"A", "B"}
+	served := listEndlessResources(t, func(page int) string { return cursors[page%len(cursors)] })
+	if served < 2 {
+		t.Errorf("the loop never paged (served %d), the test proves nothing", served)
+	}
+}
+
+// TestListResourceInfos_StopsOnFreshCursors pins the page cap: a server that
+// hands out a new cursor on every page never repeats one, so only a bound on
+// the number of pages ends the listing.
+func TestListResourceInfos_StopsOnFreshCursors(t *testing.T) {
+	served := listEndlessResources(t, func(page int) string { return fmt.Sprintf("cursor-%d", page) })
+	if served < 3 {
+		t.Errorf("the loop stopped after %d pages, before any cursor could repeat: the test proves nothing", served)
+	}
+}
+
+// listEndlessResources lists the resources of a fake server whose pagination
+// never ends, the next cursor of each page being given by next. It fails the
+// test unless the listing stops with an error, and returns the pages served.
 //
 // The fake answers initialize (so the resources capability is advertised) and
-// then hands out an endless two-cursor cycle.
-func TestListResourceInfos_StopsOnCursorCycle(t *testing.T) {
+// then one resource per page.
+func listEndlessResources(t *testing.T, next func(page int) string) int {
+	t.Helper()
+
 	var mu sync.Mutex
 	pages := 0
-	cursors := []string{"A", "B"}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -183,16 +208,16 @@ func TestListResourceInfos_StopsOnCursorCycle(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch req.Method {
 		case "initialize":
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":` + id + `,"result":{"protocolVersion":"2025-06-18","capabilities":{"resources":{}},"serverInfo":{"name":"cycle","version":"v1"}}}`))
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":` + id + `,"result":{"protocolVersion":"2025-06-18","capabilities":{"resources":{}},"serverInfo":{"name":"endless","version":"v1"}}}`))
 		case "resources/list":
 			mu.Lock()
-			next := cursors[pages%len(cursors)]
+			cursor := next(pages)
 			pages++
 			n := pages
 			mu.Unlock()
 			_, _ = fmt.Fprintf(w,
 				`{"jsonrpc":"2.0","id":%s,"result":{"resources":[{"uri":"file:///r%d","name":"r%d"}],"nextCursor":%q}}`,
-				id, n, n, next)
+				id, n, n, cursor)
 		default:
 			// notifications/initialized and anything else: an empty result.
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":` + id + `,"result":{}}`))
@@ -220,12 +245,11 @@ func TestListResourceInfos_StopsOnCursorCycle(t *testing.T) {
 		served := pages
 		mu.Unlock()
 		if err == nil {
-			t.Errorf("expected a cycling cursor to be reported after %d pages", served)
+			t.Errorf("expected an endless pagination to be reported after %d pages", served)
 		}
-		if served < 2 {
-			t.Errorf("the loop never paged (served %d), the test proves nothing", served)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("ListResourceInfos looped on a cycling cursor")
+		return served
+	case <-time.After(30 * time.Second):
+		t.Fatal("ListResourceInfos looped on an endless pagination")
+		return 0
 	}
 }

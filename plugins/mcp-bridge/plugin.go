@@ -384,12 +384,24 @@ func readResources(ctx context.Context, session *mcp.ClientSession, refs []strin
 	}
 
 	values := make([]*proto.ConversationValue, 0, len(refs))
+	// One listing for every reference: the catalogue is paginated and read on
+	// the request path, so it must not be walked once per configured resource.
+	infos, err := mcpclient.ListResourceInfos(ctx, session)
+	if err != nil {
+		if mcpclient.IsSessionOver(err) {
+			return nil, err
+		}
+		for _, ref := range refs {
+			values = append(values, &proto.ConversationValue{
+				Label:   "MCP resource " + ref,
+				Content: "the resource could not be read: " + err.Error(),
+			})
+		}
+		return values, nil
+	}
 	for _, ref := range refs {
-		info, err := mcpclient.FindResource(ctx, session, ref)
+		info, err := mcpclient.FindResource(infos, ref)
 		if err != nil {
-			if mcpclient.IsSessionOver(err) {
-				return nil, err
-			}
 			values = append(values, &proto.ConversationValue{
 				Label:   "MCP resource " + ref,
 				Content: "the resource could not be read: " + err.Error(),

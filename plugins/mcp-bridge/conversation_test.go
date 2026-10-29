@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -128,6 +130,55 @@ func TestPlugin_MissingResourceIsReported(t *testing.T) {
 	}
 	if out.ConversationValues[0].GetContent() == "" {
 		t.Error("expected the missing resource reported in the injected text")
+	}
+}
+
+// TestPlugin_ResourcesListedOnce makes sure several configured resources are
+// resolved against a single resources/list: walking the whole catalogue once per
+// reference would multiply the paginated listing on the request path.
+func TestPlugin_ResourcesListedOnce(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "v1"}, nil)
+	for _, uri := range []string{"file:///a.md", "file:///b.md", "file:///c.md"} {
+		server.AddResource(
+			&mcp.Resource{URI: uri, Name: uri, MIMEType: "text/plain"},
+			func(_ context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+				return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{
+					URI: uri, MIMEType: "text/plain", Text: uri,
+				}}}, nil
+			},
+		)
+	}
+
+	var lists atomic.Int32
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			body, _ := io.ReadAll(r.Body)
+			_ = r.Body.Close()
+			if bytes.Contains(body, []byte(`"resources/list"`)) {
+				lists.Add(1)
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		mcpHandler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() {
+		srv.CloseClientConnections()
+		srv.Close()
+	})
+
+	p := newTestPlugin(t)
+	reqCtx := requestContext(srv.URL, `,"resources":["file:///a.md","file:///b.md","file:///c.md"]`)
+
+	out, err := p.ListTools(context.Background(), &proto.ListToolsInput{Ctx: reqCtx})
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	if len(out.ConversationValues) != 3 {
+		t.Fatalf("expected the three resources injected, got %v", out.ConversationValues)
+	}
+	if n := lists.Load(); n != 1 {
+		t.Errorf("expected a single resources/list for three references, got %d", n)
 	}
 }
 

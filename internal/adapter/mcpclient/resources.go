@@ -18,6 +18,11 @@ type ResourceInfo struct {
 	MIMEType    string
 }
 
+// maxResourcePages bounds the pages a single listing follows. The cursor
+// guard only catches a repeated cursor: a server that hands out a fresh one on
+// every page (a counter, a random string) would otherwise be paged forever.
+const maxResourcePages = 256
+
 // ListResourceInfos lists the resources the server exposes. A server without
 // the resources capability answers with none, which is not an error.
 func ListResourceInfos(ctx context.Context, session *mcp.ClientSession) ([]ResourceInfo, error) {
@@ -30,11 +35,14 @@ func ListResourceInfos(ctx context.Context, session *mcp.ClientSession) ([]Resou
 	// that alternates two cursors (A -> B -> A) passes a last-cursor comparison
 	// forever, and request contexts frequently carry no overall deadline.
 	seen := map[string]bool{}
-	for {
+	for page := 0; ; page++ {
 		// The server drives this loop, and a request context frequently has no
-		// deadline: without these two guards a server that answers an endless
-		// or self-repeating cursor would keep the request alive indefinitely,
+		// deadline: without these guards a server that answers an endless or
+		// self-repeating cursor would keep the request alive indefinitely,
 		// issuing one HTTP call per iteration.
+		if page >= maxResourcePages {
+			return nil, errors.Errorf("MCP server paginated its resources past %d pages", maxResourcePages)
+		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -61,14 +69,12 @@ func ListResourceInfos(ctx context.Context, session *mcp.ClientSession) ([]Resou
 	}
 }
 
-// FindResource resolves a configured reference to a resource the server
-// exposes. The reference is matched against the URI first, then against the
-// name, so a configuration can say "readme" as well as "file:///readme.md".
-func FindResource(ctx context.Context, session *mcp.ClientSession, ref string) (*ResourceInfo, error) {
-	infos, err := ListResourceInfos(ctx, session)
-	if err != nil {
-		return nil, err
-	}
+// FindResource resolves a configured reference against a listing made by
+// ListResourceInfos. The reference is matched against the URI first, then
+// against the name, so a configuration can say "readme" as well as
+// "file:///readme.md". It takes the listing rather than the session so that
+// resolving several references costs a single listing.
+func FindResource(infos []ResourceInfo, ref string) (*ResourceInfo, error) {
 	for i, r := range infos {
 		if r.URI == ref {
 			return &infos[i], nil
