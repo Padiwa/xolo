@@ -196,6 +196,28 @@ func TestLookupAcceptsOnlySupportedCanonicalTags(t *testing.T) {
 	}
 }
 
+func TestClosestServesTheNearestSupportedLanguage(t *testing.T) {
+	bundle, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for tag, want := range map[string]language.Tag{
+		"fr":         language.French,
+		"fr-CA":      language.French,
+		"es-419":     language.Spanish,
+		"en-Latn-US": language.English,
+	} {
+		if got, ok := bundle.Closest(tag); !ok || got != want {
+			t.Errorf("Closest(%q)=%v,%v, want %v", tag, got, ok, want)
+		}
+	}
+	for _, tag := range []string{"", "pt-BR", "de", "it", "not a tag"} {
+		if got, ok := bundle.Closest(tag); ok {
+			t.Errorf("Closest(%q)=%v", tag, got)
+		}
+	}
+}
+
 func TestPluralFormsFollowCLDR(t *testing.T) {
 	bundle, err := load(fstest.MapFS{
 		"en.json": {Data: []byte(`{"locale.name":"English","items":{"one":"%d item","other":"%d items"}}`)},
