@@ -26,6 +26,10 @@ func ListResourceInfos(ctx context.Context, session *mcp.ClientSession) ([]Resou
 	}
 	var infos []ResourceInfo
 	params := &mcp.ListResourcesParams{}
+	// Every cursor seen during this listing, not just the previous one: a server
+	// that alternates two cursors (A -> B -> A) passes a last-cursor comparison
+	// forever, and request contexts frequently carry no overall deadline.
+	seen := map[string]bool{}
 	for {
 		// The server drives this loop, and a request context frequently has no
 		// deadline: without these two guards a server that answers an endless
@@ -49,9 +53,10 @@ func ListResourceInfos(ctx context.Context, session *mcp.ClientSession) ([]Resou
 		if result.NextCursor == "" {
 			return infos, nil
 		}
-		if result.NextCursor == params.Cursor {
+		if seen[result.NextCursor] {
 			return nil, errors.Errorf("MCP server repeated the resource cursor %q", result.NextCursor)
 		}
+		seen[result.NextCursor] = true
 		params.Cursor = result.NextCursor
 	}
 }

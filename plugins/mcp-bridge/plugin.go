@@ -154,18 +154,21 @@ func poolKey(ec sessionScope, endpoint string) string {
 // the failure is caught where it surfaces, and the caller asks for a fresh
 // connector once.
 func (p *Plugin) doWithRebuild(ctx context.Context, reqCtx *proto.RequestContext, connector *mcpclient.Connector, pooled bool, fn func(*mcp.ClientSession) error) error {
-	if !pooled {
-		// A per-request connector: closed on return, or it outlives the request
-		// that created it with nobody holding a reference.
-		defer connector.Close()
+	// One attempt, with the pool upkeep every attempt needs: a per-request
+	// connector closed, a connector that never managed to open a session evicted
+	// (nothing would ever expire it).
+	attempt := func(c *mcpclient.Connector, isPooled bool) error {
+		if !isPooled {
+			defer c.Close()
+		}
+		err := c.Do(ctx, fn)
+		if isPooled && c.Sessionless() {
+			p.forgetKey(c)
+		}
+		return err
 	}
 
-	err := connector.Do(ctx, fn)
-	if pooled && connector.Sessionless() {
-		// The connection never succeeded: the pool entry has nothing to expire
-		// and would stay for the life of the process.
-		p.forgetKey(connector)
-	}
+	err := attempt(connector, pooled)
 	if !errors.Is(err, mcpclient.ErrConnectorClosed) || !pooled {
 		return err
 	}
@@ -178,10 +181,7 @@ func (p *Plugin) doWithRebuild(ctx context.Context, reqCtx *proto.RequestContext
 	if freshErr != nil {
 		return freshErr
 	}
-	if !freshPooled {
-		defer fresh.Close()
-	}
-	return fresh.Do(ctx, fn)
+	return attempt(fresh, freshPooled)
 }
 
 // forgetKey removes a connector from the pool, whichever entry holds it.

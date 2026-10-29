@@ -560,44 +560,53 @@ func TestPlugin_RetiredConnectorIsReplacedNotReturned(t *testing.T) {
 	call()
 }
 
-// TestPlugin_ConnectorRetiredBetweenLookupAndCall is the review's blocking
-// finding: the idle ticker can retire a connector after connector() has checked
-// Terminal() and before the call reaches it. Since retirement is terminal and
-// SetConfig cannot revive one, the request must rebuild instead of failing with
-// "connector closed".
-func TestPlugin_ConnectorRetiredBetweenLookupAndCall(t *testing.T) {
+// TestPlugin_RebuildsOnErrConnectorClosed exercises the rebuild branch of
+// doWithRebuild directly.
+//
+// Retiring the connector before a normal call() does not reach it: connector()
+// re-checks Terminal() after SetConfig and treats a retired entry as a pool miss.
+// The branch exists for the state the idle ticker leaves between connector()
+// returning it and Do reaching acquire(), so the test drives that state by hand.
+func TestPlugin_RebuildsOnErrConnectorClosed(t *testing.T) {
 	srv := newResourceMCPServer(t, nil)
 
 	p := newTestPlugin(t)
 	ctx := context.Background()
 	reqCtx := requestContext(srv.URL, "")
 
-	call := func() {
-		t.Helper()
-		if _, err := p.CallTool(ctx, &proto.CallToolInput{
-			Ctx:           reqCtx,
-			Name:          "echo",
-			ArgumentsJson: `{"text":"hi"}`,
-		}); err != nil {
-			t.Fatalf("CallTool: %v", err)
-		}
+	// Populate the pool.
+	if _, err := p.CallTool(ctx, &proto.CallToolInput{
+		Ctx:           reqCtx,
+		Name:          "echo",
+		ArgumentsJson: `{"text":"hi"}`,
+	}); err != nil {
+		t.Fatalf("CallTool: %v", err)
 	}
 
-	call()
-
-	// Retire the pooled connector without removing its pool entry, which is
-	// exactly the state the ticker leaves during its window.
 	p.mu.Lock()
-	connectors := make([]*mcpclient.Connector, 0, len(p.sessions))
+	var stale *mcpclient.Connector
 	for _, c := range p.sessions {
-		connectors = append(connectors, c)
+		stale = c
 	}
 	p.mu.Unlock()
-	if len(connectors) != 1 {
-		t.Fatalf("expected one pooled connector, got %d", len(connectors))
+	if stale == nil {
+		t.Fatal("no pooled connector")
 	}
-	connectors[0].Close()
 
-	// The pool still resolves the retired connector: the call must rebuild.
-	call()
+	// Retire it: this is the connector the pool hands out just before the ticker
+	// wins the race, so Do reports ErrConnectorClosed.
+	stale.Close()
+
+	var runs int
+	err := p.doWithRebuild(ctx, reqCtx, stale, true, func(session *mcp.ClientSession) error {
+		runs++
+		_, _, callErr := mcpclient.CallToolText(ctx, session, "echo", `{"text":"hi"}`)
+		return callErr
+	})
+	if err != nil {
+		t.Fatalf("doWithRebuild must rebuild instead of surfacing ErrConnectorClosed, got %v", err)
+	}
+	if runs != 1 {
+		t.Errorf("expected fn to run once on the fresh connector, ran %d times", runs)
+	}
 }

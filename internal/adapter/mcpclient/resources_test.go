@@ -2,9 +2,14 @@ package mcpclient_test
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/xolo-gateway/xolo/internal/adapter/mcpclient"
@@ -146,5 +151,81 @@ func TestListResourceInfos_WithoutCapability(t *testing.T) {
 	}
 	if len(infos) != 0 {
 		t.Errorf("expected no resources, got %v", infos)
+	}
+}
+
+// TestListResourceInfos_StopsOnCursorCycle pins the guard against a server that
+// cycles its pagination instead of ending it. Comparing with the previous cursor
+// alone lets an A -> B -> A alternation loop forever, and request contexts often
+// carry no overall deadline.
+//
+// The fake answers initialize (so the resources capability is advertised) and
+// then hands out an endless two-cursor cycle.
+func TestListResourceInfos_StopsOnCursorCycle(t *testing.T) {
+	var mu sync.Mutex
+	pages := 0
+	cursors := []string{"A", "B"}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		_ = json.Unmarshal(body, &req)
+		id := string(req.ID)
+		if id == "" {
+			id = "1"
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		switch req.Method {
+		case "initialize":
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":` + id + `,"result":{"protocolVersion":"2025-06-18","capabilities":{"resources":{}},"serverInfo":{"name":"cycle","version":"v1"}}}`))
+		case "resources/list":
+			mu.Lock()
+			next := cursors[pages%len(cursors)]
+			pages++
+			n := pages
+			mu.Unlock()
+			_, _ = fmt.Fprintf(w,
+				`{"jsonrpc":"2.0","id":%s,"result":{"resources":[{"uri":"file:///r%d","name":"r%d"}],"nextCursor":%q}}`,
+				id, n, n, next)
+		default:
+			// notifications/initialized and anything else: an empty result.
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":` + id + `,"result":{}}`))
+		}
+	})
+
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		session, err := mcpclient.Connect(context.Background(), mcpclient.Config{Endpoint: srv.URL})
+		if err != nil {
+			done <- err
+			return
+		}
+		defer session.Close()
+		_, err = mcpclient.ListResourceInfos(context.Background(), session)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		mu.Lock()
+		served := pages
+		mu.Unlock()
+		if err == nil {
+			t.Errorf("expected a cycling cursor to be reported after %d pages", served)
+		}
+		if served < 2 {
+			t.Errorf("the loop never paged (served %d), the test proves nothing", served)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ListResourceInfos looped on a cycling cursor")
 	}
 }
