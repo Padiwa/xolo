@@ -31,7 +31,7 @@ type XoloSubscriptionEnforcer struct {
 	orgStore      port.OrgStore
 	state         *SubscriptionStateDetailed
 	evaluators    map[model.PlanConstraintKind]constraintEvaluator
-	upstream      *upstreamModelCache
+	models        *orgModelCache
 }
 
 func NewXoloSubscriptionEnforcer(
@@ -49,7 +49,7 @@ func NewXoloSubscriptionEnforcer(
 			model.ConstraintRollingWindow: newRollingWindowEvaluator(usageStore, fairShare),
 			model.ConstraintConcurrency:   &concurrencyEvaluator{state: state},
 		},
-		upstream: newUpstreamModelCache(upstreamModelsCacheTTL),
+		models: newOrgModelCache(upstreamModelsCacheTTL),
 	}
 }
 
@@ -96,9 +96,17 @@ func (e *XoloSubscriptionEnforcer) PreRequest(ctx context.Context, req *genaiPro
 		MemberCount: memberCount,
 		Currency:    p.Currency(),
 	}
-	if plan.HasPerModelConstraint() {
-		scope.UpstreamModel = m.RealModel()
-		scope.ModelIDs = e.upstreamModelIDs(ctx, m)
+	if plan.HasPerModelConstraint() || plan.HasSharedConstraint() {
+		// Read once for both: a failure is not cached, and reading it twice
+		// would double both the load on a struggling store and the metric.
+		models, ok := e.orgModels(ctx, orgID)
+		if plan.HasPerModelConstraint() {
+			scope.UpstreamModel = m.RealModel()
+			scope.ModelIDs = upstreamModelIDs(models, ok, m)
+		}
+		// On a failure the usage is weighed without the models, each at the
+		// constraint's highest rate: the plan closes early rather than late.
+		scope.Models = models
 	}
 
 	// Check cooldowns first (fast path, no DB).
@@ -191,7 +199,9 @@ const defaultExhaustionCooldown = 5 * time.Minute
 // constraints of such a plan stay open: a 429 there cannot be told apart from
 // one model's exhaustion, and closing them would lock every model out for it.
 // Otherwise every constraint of the plan does, the provider being the only
-// thing the 429 can be pinned on.
+// thing the 429 can be pinned on. A shared constraint is provider-wide in this
+// respect: it goes into cooldown for every model, unless the plan also meters
+// per model, where it stays open like the other provider-wide ones.
 func (e *XoloSubscriptionEnforcer) markExhausted(ctx context.Context, req *genaiProxy.ProxyRequest, header http.Header) {
 	orgID := OrgIDFromMeta(req.Metadata)
 	m, p := e.resolveTarget(ctx, req)
@@ -259,24 +269,32 @@ func cooldownModel(c model.PlanConstraint, upstreamModel string) string {
 
 // upstreamModelIDs lists the models of the provider that target the same
 // upstream model as m: the provider meters them as one, whatever proxy name
-// they are published under. The grouping is cached for upstreamModelsCacheTTL.
-// On a store error it falls back to m alone, uncached, which undercounts only
-// when the model has aliases; PlanModelGroupingFailures counts those requests.
-func (e *XoloSubscriptionEnforcer) upstreamModelIDs(ctx context.Context, m model.LLMModel) []model.LLMModelID {
-	now := time.Now()
-	if ids, ok := e.upstream.get(m.ID(), now); ok {
-		return ids
-	}
-	models, err := e.providerStore.ListLLMModels(ctx, m.OrgID())
-	if err != nil {
-		metrics.PlanModelGroupingFailures.With(prometheus.Labels{metrics.LabelOrg: string(m.OrgID())}).Inc()
-		slog.WarnContext(ctx, "subscription enforcer: could not list models, metering the requested model alone",
-			slog.Any("error", err), slog.String("model", string(m.ID())))
+// they are published under. When the models could not be listed (ok false) it
+// falls back to m alone, which undercounts only when the model has aliases.
+func upstreamModelIDs(models []model.LLMModel, ok bool, m model.LLMModel) []model.LLMModelID {
+	if !ok {
 		return []model.LLMModelID{m.ID()}
 	}
-	ids := model.UpstreamModelIDs(models, m)
-	e.upstream.put(m.ID(), ids, now)
-	return ids
+	return model.UpstreamModelIDs(models, m)
+}
+
+// orgModels lists the models of an organization, cached for
+// upstreamModelsCacheTTL. A store error is not cached and reports false;
+// PlanModelGroupingFailures counts the requests it affects.
+func (e *XoloSubscriptionEnforcer) orgModels(ctx context.Context, orgID model.OrgID) ([]model.LLMModel, bool) {
+	now := time.Now()
+	if models, ok := e.models.get(orgID, now); ok {
+		return models, true
+	}
+	models, err := e.providerStore.ListLLMModels(ctx, orgID)
+	if err != nil {
+		metrics.PlanModelGroupingFailures.With(prometheus.Labels{metrics.LabelOrg: string(orgID)}).Inc()
+		slog.WarnContext(ctx, "subscription enforcer: could not list models, metering without them",
+			slog.Any("error", err), slog.String("org", string(orgID)))
+		return nil, false
+	}
+	e.models.put(orgID, models, now)
+	return models, true
 }
 
 // resolveTarget returns the model a request targets and its provider, or nils
