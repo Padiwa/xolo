@@ -331,7 +331,7 @@ func scenarioUsageStorePlanUsage(t *testing.T, store *xologorm.Store) {
 		t.Errorf("expected no subscription usage for user B, got tokens=%d value=%d", userTokens, userValue)
 	}
 
-	earliest, err := store.EarliestPlanUsageSince(ctx, model.PlanUsageScope{OrgID: f.orgID, ProviderID: f.providerID}, since)
+	earliest, err := store.EarliestPlanUsageSince(ctx, model.PlanUsageScope{OrgID: f.orgID, ProviderID: f.providerID}, "", since)
 	if err != nil {
 		t.Fatalf("EarliestPlanUsageSince: %v", err)
 	}
@@ -339,13 +339,62 @@ func scenarioUsageStorePlanUsage(t *testing.T, store *xologorm.Store) {
 		t.Error("expected a non-zero earliest subscription usage")
 	}
 
+	// Restricted to a user, only their records count: user B has none.
+	earliest, err = store.EarliestPlanUsageSince(ctx, model.PlanUsageScope{OrgID: f.orgID, ProviderID: f.providerID}, f.userB, since)
+	if err != nil {
+		t.Fatalf("EarliestPlanUsageSince (user B): %v", err)
+	}
+	if !earliest.IsZero() {
+		t.Errorf("expected a zero time for user B, got %v", earliest)
+	}
+
 	// No subscription usage in the window: a zero time, not an error.
-	earliest, err = store.EarliestPlanUsageSince(ctx, model.PlanUsageScope{OrgID: f.orgID, ProviderID: f.providerID}, time.Now().Add(time.Hour))
+	earliest, err = store.EarliestPlanUsageSince(ctx, model.PlanUsageScope{OrgID: f.orgID, ProviderID: f.providerID}, "", time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("EarliestPlanUsageSince (future): %v", err)
 	}
 	if !earliest.IsZero() {
 		t.Errorf("expected a zero time outside the window, got %v", earliest)
+	}
+
+	// Once user B consumes after user A, each reads their own oldest record:
+	// user B's is the later one, which the organization-wide read never returns.
+	orgEarliest, err := store.EarliestPlanUsageSince(ctx, model.PlanUsageScope{OrgID: f.orgID, ProviderID: f.providerID}, "", since)
+	if err != nil {
+		t.Fatalf("EarliestPlanUsageSince (org): %v", err)
+	}
+	// Past the precision of every backend's timestamps, so the two records
+	// cannot share an instant.
+	time.Sleep(2 * time.Millisecond)
+	later := model.NewUsageRecord(f.userB, "", f.orgID, "", f.providerID, f.modelID,
+		"fast", "", 100, 10, 50, 0, "USD", model.CostSourceComputed, "")
+	later.SetPlanCovered(true)
+	later.SetProviderCost(250)
+	if err := store.RecordUsage(ctx, later); err != nil {
+		t.Fatalf("RecordUsage (user B): %v", err)
+	}
+
+	userB, err := store.EarliestPlanUsageSince(ctx, model.PlanUsageScope{OrgID: f.orgID, ProviderID: f.providerID}, f.userB, since)
+	if err != nil {
+		t.Fatalf("EarliestPlanUsageSince (user B, after): %v", err)
+	}
+	if !userB.After(orgEarliest) {
+		t.Errorf("user B's earliest = %v, want their own record, after the organization's %v", userB, orgEarliest)
+	}
+
+	userA, err := store.EarliestPlanUsageSince(ctx, model.PlanUsageScope{OrgID: f.orgID, ProviderID: f.providerID}, f.userA, since)
+	if err != nil {
+		t.Fatalf("EarliestPlanUsageSince (user A): %v", err)
+	}
+	if !userA.Equal(orgEarliest) {
+		t.Errorf("user A's earliest = %v, want the organization's %v: theirs is the oldest record", userA, orgEarliest)
+	}
+	orgAfter, err := store.EarliestPlanUsageSince(ctx, model.PlanUsageScope{OrgID: f.orgID, ProviderID: f.providerID}, "", since)
+	if err != nil {
+		t.Fatalf("EarliestPlanUsageSince (org, after): %v", err)
+	}
+	if !orgAfter.Equal(orgEarliest) {
+		t.Errorf("organization earliest moved to %v, want %v: a later record does not change it", orgAfter, orgEarliest)
 	}
 }
 
