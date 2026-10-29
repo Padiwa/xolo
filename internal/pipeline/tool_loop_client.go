@@ -87,7 +87,7 @@ func injectPrefetched(messages []llm.Message, block string) []llm.Message {
 		return messages
 	}
 	if n := len(messages); n > 0 && messages[n-1].Role() == llm.RoleUser {
-		merged := llm.NewMessage(llm.RoleUser, messages[n-1].Content()+"\n\n"+block)
+		merged := &prefetchAppendedMessage{original: messages[n-1], content: messages[n-1].Content() + "\n\n" + block}
 		out := make([]llm.Message, len(messages))
 		copy(out, messages)
 		out[n-1] = merged
@@ -95,6 +95,23 @@ func injectPrefetched(messages []llm.Message, block string) []llm.Message {
 	}
 	return append(messages, llm.NewMessage(llm.RoleUser, block))
 }
+
+// prefetchAppendedMessage is the trailing user turn with the prefetched block
+// appended to its text.
+//
+// It wraps the original instead of building a plain text message: Content() is
+// only the text projection, so rebuilding would drop the attachments a
+// multimodal request carries (an image, a file) the moment a prefetch or a
+// configured resource is active. The proxy does the same when it rewrites a
+// message (see modifiedMessage), for the same reason.
+type prefetchAppendedMessage struct {
+	original llm.Message
+	content  string
+}
+
+func (m *prefetchAppendedMessage) Role() llm.Role                { return m.original.Role() }
+func (m *prefetchAppendedMessage) Content() string               { return m.content }
+func (m *prefetchAppendedMessage) Attachments() []llm.Attachment { return m.original.Attachments() }
 
 func (c *ToolLoopClient) toolByName(name string) llm.Tool {
 	for _, t := range c.tools {

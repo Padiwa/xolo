@@ -487,3 +487,42 @@ func TestToolLoop_PrefetchMergesIntoTheUserTurn(t *testing.T) {
 		t.Errorf("expected the user text and the block merged, got %q", last.Content())
 	}
 }
+
+// TestToolLoop_PrefetchKeepsAttachments pins the review's finding: the block used
+// to be merged by rebuilding a plain text message, so Content() was the only
+// thing carried over and a multimodal request lost its image or file the moment
+// a prefetch or a configured resource was active.
+func TestToolLoop_PrefetchKeepsAttachments(t *testing.T) {
+	prefetch := newPrefetchTool("search")
+	inner := &scriptedClient{responses: []*scriptedResponse{{content: "the answer"}}}
+
+	c := pipeline.NewToolLoopClient(inner, []llm.Tool{prefetch.tool}, 0, 0, nil).
+		WithConversationTools(
+			conversationToolSet(t, prefetch.tool, `{"query":"{{last_user_message}}"}`, "Docs", ""),
+			pipeline.ExecutionContext{},
+		)
+
+	img, err := llm.NewImageAttachment("image/png", "aGVsbG8=", false)
+	if err != nil {
+		t.Fatalf("NewImageAttachment: %v", err)
+	}
+	userTurn := llm.NewMessageWithAttachments(llm.RoleUser, "what is in this picture?", img)
+
+	if _, err := c.ChatCompletion(context.Background(),
+		llm.WithMessages(llm.NewMessage(llm.RoleSystem, "be helpful"), userTurn),
+	); err != nil {
+		t.Fatalf("ChatCompletion: %v", err)
+	}
+
+	sent := inner.calls[0]
+	last := sent[len(sent)-1]
+	if got := len(last.Attachments()); got != 1 {
+		t.Fatalf("expected the attachment preserved, got %d", got)
+	}
+	if !strings.Contains(last.Content(), "what is in this picture?") {
+		t.Errorf("expected the user text kept, got %q", last.Content())
+	}
+	if !strings.Contains(last.Content(), "Docs") {
+		t.Errorf("expected the prefetched block appended, got %q", last.Content())
+	}
+}
