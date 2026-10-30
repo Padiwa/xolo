@@ -36,6 +36,12 @@ type ToolLoopClient struct {
 	maxIterations           int
 	maxConsecutiveToolCalls int
 	inspectors              *ToolInspectorSet
+	// ec carries the caller identity and the conversation's key, which the
+	// placeholders of a conversation tool's arguments are filled from.
+	ec ExecutionContext
+	// conversation holds the tools to resolve before the first model call and
+	// the values to inject with them. Nil injects nothing.
+	conversation *ConversationTools
 }
 
 // NewToolLoopClient creates a ToolLoopClient. maxIterations <= 0 falls back
@@ -56,6 +62,56 @@ func NewToolLoopClient(inner llm.Client, tools []llm.Tool, maxIterations int, ma
 		inspectors:              inspectors,
 	}
 }
+
+// WithConversationTools makes the loop resolve these tools once, before the
+// first model call, and inject their results (plus the resolved values) into
+// the conversation. ec supplies the identity the arguments are mapped from.
+func (c *ToolLoopClient) WithConversationTools(conversation *ConversationTools, ec ExecutionContext) *ToolLoopClient {
+	c.conversation = conversation
+	c.ec = ec
+	return c
+}
+
+// injectPrefetched places the prefetched block in the conversation.
+//
+// It is merged into the trailing user turn rather than appended as its own
+// message: a second consecutive user message is rejected by providers enforcing
+// strict alternation (Anthropic Messages among them) and silently folded into the
+// user's text by the others. The block then reads as context attached to the
+// request, which is what it is.
+//
+// With no trailing user turn to attach it to, it becomes a user message of its
+// own: the alternative is dropping what the operator configured.
+func injectPrefetched(messages []llm.Message, block string) []llm.Message {
+	if block == "" {
+		return messages
+	}
+	if n := len(messages); n > 0 && messages[n-1].Role() == llm.RoleUser {
+		merged := &prefetchAppendedMessage{original: messages[n-1], content: messages[n-1].Content() + "\n\n" + block}
+		out := make([]llm.Message, len(messages))
+		copy(out, messages)
+		out[n-1] = merged
+		return out
+	}
+	return append(messages, llm.NewMessage(llm.RoleUser, block))
+}
+
+// prefetchAppendedMessage is the trailing user turn with the prefetched block
+// appended to its text.
+//
+// It wraps the original instead of building a plain text message: Content() is
+// only the text projection, so rebuilding would drop the attachments a
+// multimodal request carries (an image, a file) the moment a prefetch or a
+// configured resource is active. The proxy does the same when it rewrites a
+// message (see modifiedMessage), for the same reason.
+type prefetchAppendedMessage struct {
+	original llm.Message
+	content  string
+}
+
+func (m *prefetchAppendedMessage) Role() llm.Role                { return m.original.Role() }
+func (m *prefetchAppendedMessage) Content() string               { return m.content }
+func (m *prefetchAppendedMessage) Attachments() []llm.Attachment { return m.original.Attachments() }
 
 func (c *ToolLoopClient) toolByName(name string) llm.Tool {
 	for _, t := range c.tools {
@@ -105,6 +161,12 @@ func (c *ToolLoopClient) ChatCompletion(ctx context.Context, funcs ...llm.ChatCo
 	opts := llm.NewChatCompletionOptions(funcs...)
 	messages := opts.Messages
 	tools := mergeTools(opts.Tools, c.tools)
+
+	prefetched, err := c.prefetchConversationTools(ctx, messages)
+	if err != nil {
+		return nil, err
+	}
+	messages = injectPrefetched(messages, prefetched)
 
 	for i := 0; i < c.maxIterations; i++ {
 		// A caller gone during a tool round needs no further turn.
@@ -187,6 +249,15 @@ func (c *ToolLoopClient) ChatCompletionStream(ctx context.Context, funcs ...llm.
 	tools := mergeTools(opts.Tools, c.tools)
 
 	outCh := make(chan llm.StreamChunk, 8)
+
+	// The prefetched context is resolved here rather than in the goroutine
+	// below: its failure is the request's, and a caller reading a stream has
+	// to be told before any chunk is sent.
+	prefetched, err := c.prefetchConversationTools(ctx, messages)
+	if err != nil {
+		return nil, err
+	}
+	messages = injectPrefetched(messages, prefetched)
 
 	// emit gives up once the caller is gone, instead of blocking this
 	// goroutine on a channel nobody reads anymore. The context is checked

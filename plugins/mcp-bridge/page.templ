@@ -8,6 +8,7 @@ import (
 	"github.com/xolo-gateway/xolo/internal/http/handler/webui/templui/component/card"
 	"github.com/xolo-gateway/xolo/internal/http/handler/webui/templui/component/input"
 	"github.com/xolo-gateway/xolo/internal/http/handler/webui/templui/component/label"
+	"github.com/xolo-gateway/xolo/internal/http/handler/webui/templui/component/textarea"
 	"github.com/xolo-gateway/xolo/internal/i18n"
 )
 
@@ -95,6 +96,66 @@ templ page(pd uiPageData) {
 									Value:       strings.Join(pd.Config.ToolFilter, ", "),
 									Placeholder: i18n.T(ctx, "plugin.mcp_bridge.tool_filter.placeholder"),
 								})
+							</div>
+							<div class="space-y-1">
+								@label.Label(label.Props{For: "resources"}) { { i18n.T(ctx, "plugin.mcp_bridge.resources.label") } }
+								@textarea.Textarea(textarea.Props{
+									ID:          "resources",
+									Name:        "resources",
+									Value:       strings.Join(pd.Config.Resources, "\n"),
+									Rows:        3,
+									Placeholder: "file:///contexte/procedure.md",
+								})
+								<p class="text-xs text-muted-foreground">
+									{ i18n.T(ctx, "plugin.mcp_bridge.resources.help") }
+								</p>
+							</div>
+							<div class="space-y-1">
+								@label.Label(label.Props{For: "prefetch_tool"}) { { i18n.T(ctx, "plugin.mcp_bridge.prefetch_tool.label") } }
+								@input.Input(input.Props{
+									ID:          "prefetch_tool",
+									Name:        "prefetch_tool",
+									Value:       pd.Config.PrefetchTool,
+									Placeholder: i18n.T(ctx, "plugin.mcp_bridge.prefetch_tool.placeholder"),
+								})
+								<p class="text-xs text-muted-foreground">
+									{ i18n.T(ctx, "plugin.mcp_bridge.prefetch_tool.help") }
+								</p>
+							</div>
+							<div class="space-y-1">
+								@label.Label(label.Props{For: "prefetch_arguments"}) { { i18n.T(ctx, "plugin.mcp_bridge.prefetch_arguments.label") } }
+								@textarea.Textarea(textarea.Props{
+									ID:          "prefetch_arguments",
+									Name:        "prefetch_arguments",
+									Value:       pd.Config.PrefetchArguments,
+									Rows:        3,
+									Placeholder: `{"query": "{{last_user_message}}"}`,
+								})
+								<p class="text-xs text-muted-foreground">
+									{ i18n.T(ctx, "plugin.mcp_bridge.prefetch_arguments.help") }
+								</p>
+							</div>
+							<div class="space-y-1">
+								@label.Label(label.Props{For: "prefetch_label"}) { { i18n.T(ctx, "plugin.mcp_bridge.prefetch_label.label") } }
+								@input.Input(input.Props{
+									ID:          "prefetch_label",
+									Name:        "prefetch_label",
+									Value:       pd.Config.PrefetchLabel,
+									Placeholder: i18n.T(ctx, "plugin.mcp_bridge.prefetch_label.placeholder"),
+								})
+							</div>
+							<div class="space-y-1">
+								@label.Label(label.Props{For: "prefetch_result_template"}) { { i18n.T(ctx, "plugin.mcp_bridge.prefetch_result_template.label") } }
+								@textarea.Textarea(textarea.Props{
+									ID:          "prefetch_result_template",
+									Name:        "prefetch_result_template",
+									Value:       pd.Config.PrefetchResultTemplate,
+									Rows:        3,
+									Placeholder: i18n.T(ctx, "plugin.mcp_bridge.prefetch_result_template.placeholder"),
+								})
+								<p class="text-xs text-muted-foreground">
+									{ i18n.T(ctx, "plugin.mcp_bridge.prefetch_result_template.help") }
+								</p>
 							</div>
 							<div class="space-y-1">
 								@label.Label(label.Props{For: "timeout_seconds"}) { { i18n.T(ctx, "plugin.mcp_bridge.timeout.label") } }
