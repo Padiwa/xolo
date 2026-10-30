@@ -282,9 +282,14 @@ func NewHTTPServerFromConfig(ctx context.Context, conf *config.Config) (*http.Se
 		return nil, errors.Wrap(err, "could not create invitation service")
 	}
 
-	webuiHandler := webui.NewHandler(taskRunner, userStore, orgStore, roleStore, providerStore, virtualModelStore, middlewareStore, personalVMStore, usageStore, inviteStore, invitationService, applicationStore, quotaStore, quotaService, exchangeRateService, secretStore, conf.SecretKey, pluginManager, subscriptionState, fairShareService, eventStore, alertStore, alertIncidentStore, eventSettingsStore, conf.Events.MaxPerOrg, conf.Events.DefaultPerOrg).WithTeams(teamStore)
+	catalogSource, err := getCatalogSourceFromConfig(ctx, conf)
+	if err != nil {
+		return nil, errors.Wrap(err, "could not create model catalog source")
+	}
 
-	apiHandler := api.NewHandler(providerStore, orgStore, virtualModelStore, personalVMStore, middlewareStore, secretStore, exchangeRateService, pluginManager).WithTeams(teamStore).WithUserQuota(quotaService, usageStore, time.Now)
+	webuiHandler := webui.NewHandler(taskRunner, userStore, orgStore, roleStore, providerStore, virtualModelStore, middlewareStore, personalVMStore, usageStore, inviteStore, invitationService, applicationStore, quotaStore, quotaService, exchangeRateService, secretStore, conf.SecretKey, pluginManager, subscriptionState, fairShareService, eventStore, alertStore, alertIncidentStore, eventSettingsStore, conf.Events.MaxPerOrg, conf.Events.DefaultPerOrg).WithTeams(teamStore).WithCatalog(catalogSource)
+
+	apiHandler := api.NewHandler(providerStore, orgStore, virtualModelStore, personalVMStore, middlewareStore, secretStore, exchangeRateService, pluginManager).WithTeams(teamStore).WithUserQuota(quotaService, usageStore, time.Now).WithCatalog(catalogSource)
 
 	proxyServer := proxy.NewServer(
 		proxy.WithAuthExtractor(proxyAdapter.XoloAuthExtractor()),
@@ -368,7 +373,7 @@ func NewHTTPServerFromConfig(ctx context.Context, conf *config.Config) (*http.Se
 		// single server address: like the catalogue, it is left out of the
 		// per-IP limiter.
 		http.WithRoute("GET /api/v1/quota", apiAuthChain(apiHandler)),
-		http.WithRoute("GET /api/models-dev/lookup", rateLimiter(apiAuthChain(apiHandler))),
+		http.WithRoute("GET /api/catalog/lookup", rateLimiter(apiAuthChain(apiHandler))),
 		http.WithRoute("GET /api/exchange-rate", rateLimiter(apiAuthChain(apiHandler))),
 		// Plugin UI config sync
 		http.WithRoute("PUT /api/orgs/{orgSlug}/plugin-ui-config", rateLimiter(apiAuthChain(apiHandler))),

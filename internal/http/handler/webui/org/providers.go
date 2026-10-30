@@ -64,10 +64,11 @@ func (h *Handler) getProvidersPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	vmodel := component.ProvidersPageVModel{
-		Org:         org,
-		Providers:   providers,
-		ModelCounts: modelCounts,
-		Success:     r.URL.Query().Get("success"),
+		CatalogEnabled: h.catalog != nil,
+		Org:            org,
+		Providers:      providers,
+		ModelCounts:    modelCounts,
+		Success:        r.URL.Query().Get("success"),
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
 			SelectedItem: "org-" + orgSlug + "-providers",
@@ -495,10 +496,11 @@ func (h *Handler) getModelsPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	vmodel := component.ModelsPageVModel{
-		Org:      org,
-		Provider: p,
-		Models:   filtered,
-		Success:  r.URL.Query().Get("success"),
+		CatalogEnabled: h.catalog != nil,
+		Org:            org,
+		Provider:       p,
+		Models:         filtered,
+		Success:        r.URL.Query().Get("success"),
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
 			SelectedItem: "org-" + orgSlug + "-providers",
@@ -530,9 +532,10 @@ func (h *Handler) getNewModelPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	vmodel := component.ModelFormVModel{
-		Org:      org,
-		Provider: p,
-		IsNew:    true,
+		CatalogEnabled: h.catalog != nil,
+		Org:            org,
+		Provider:       p,
+		IsNew:          true,
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
 			SelectedItem: "org-" + orgSlug + "-providers",
@@ -1309,10 +1312,11 @@ func (h *Handler) getEditModelPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	vmodel := component.ModelFormVModel{
-		Org:      org,
-		Provider: p,
-		Model:    m,
-		IsNew:    false,
+		CatalogEnabled: h.catalog != nil,
+		Org:            org,
+		Provider:       p,
+		Model:          m,
+		IsNew:          false,
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
 			SelectedItem: "org-" + orgSlug + "-providers",
@@ -1460,11 +1464,12 @@ func (h *Handler) updateModel(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) renderModelFormError(w http.ResponseWriter, r *http.Request, ctx context.Context, user model.User, orgSlug string, org model.Organization, p model.Provider, m model.LLMModel, isNew bool, errMsg string) {
 	vmodel := component.ModelFormVModel{
-		Org:      org,
-		Provider: p,
-		Model:    m,
-		IsNew:    isNew,
-		Error:    errMsg,
+		CatalogEnabled: h.catalog != nil,
+		Org:            org,
+		Provider:       p,
+		Model:          m,
+		IsNew:          isNew,
+		Error:          errMsg,
 		AppLayoutVModel: common.AppLayoutVModel{
 			User:         user,
 			SelectedItem: "org-" + orgSlug + "-providers",

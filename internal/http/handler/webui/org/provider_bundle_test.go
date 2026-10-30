@@ -11,10 +11,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/xolo-gateway/xolo/internal/catalog"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	httpCtx "github.com/xolo-gateway/xolo/internal/http/context"
 )
@@ -274,6 +276,178 @@ func TestProviderBundle_PreviewPostsBackTheConvertedBundle(t *testing.T) {
 	}
 }
 
+func TestCatalogImport_PreviewsTheCatalogProviderAsABundle(t *testing.T) {
+	h, s, tenant := importFixture(t, "https://opencode.ai/inference/go/v1", "sk")
+	h.SetCatalog(catalog.NewStaticSource(testCatalogRelease(t)))
+
+	fields := url.Values{"catalog_provider": {"opencode-go"}, "plan": {"go"}}
+	rr := httptest.NewRecorder()
+	h.previewCatalogImport(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+	page := rr.Body.String()
+	if !strings.Contains(page, `name="create"`) || !strings.Contains(page, `name="billing"`) || !strings.Contains(page, `name="bundle"`) {
+		t.Error("the preview should offer the models, the plan apart, and carry the bundle to apply")
+	}
+	if len(s.created) != 0 {
+		t.Error("the preview wrote to the store")
+	}
+}
+
+func TestCatalogImport_ConvertsPricesIntoTheProvidersCurrency(t *testing.T) {
+	h, s, tenant := importFixture(t, "https://opencode.ai/inference/go/v1", "sk")
+	s.provider = model.NewProvider(s.org.ID(), "OpenCode Go", "openai", "https://opencode.ai/inference/go/v1", s.provider.APIKey(), "EUR")
+	h.SetCatalog(catalog.NewStaticSource(testCatalogRelease(t)))
+	h.exchangeRateService = service.NewExchangeRateService(fixedRates{"USD>EUR": 0.5}, &memoryRates{rates: map[string]model.ExchangeRate{}}, time.Hour)
+
+	fields := url.Values{"catalog_provider": {"opencode-go"}, "plan": {"go"}}
+	rr := httptest.NewRecorder()
+	h.previewCatalogImport(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+	// The attribute value is read escaped: its JSON quotes are entities.
+	page := rr.Body.String()
+	i := strings.Index(page, `name="bundle" value="`)
+	if i < 0 {
+		t.Fatal("no bundle in the page")
+	}
+	raw := page[i+len(`name="bundle" value="`):]
+	raw = stdhtml.UnescapeString(raw[:strings.Index(raw, `"`)])
+	bundle, err := model.ParseProviderBundle([]byte(raw))
+	if err != nil {
+		t.Fatalf("bundle: %v", err)
+	}
+	if bundle.Provider.Currency != "EUR" {
+		t.Errorf("currency = %q, want the provider's", bundle.Provider.Currency)
+	}
+	snapshot := testCatalogRelease(t)
+	original, _ := snapshot.Bundle("opencode-go", "go")
+	if got, want := bundle.Models[0].Prices.Output, original.Models[0].Prices.Output/2; got != model.PricePerMillion(model.MicrocentsPer1K(want)) {
+		t.Errorf("output price = %v, want %v converted at 0.5", got, want)
+	}
+	// The plan's per-model value budgets are converted too.
+	converted, before := bundle.Provider.SubscriptionPlan.Constraints[0], original.Provider.SubscriptionPlan.Constraints[0]
+	checked := 0
+	for id, b := range before.ModelBudgets {
+		if b.ValueBudget == nil {
+			continue
+		}
+		got := converted.ModelBudgets[id].ValueBudget
+		if got == nil || *got != *b.ValueBudget/2 {
+			t.Errorf("budget of %s = %v, want %d converted at 0.5", id, got, *b.ValueBudget/2)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Error("the snapshot plan has no value budget to check")
+	}
+}
+
+func TestCatalogImport_RefusesWithoutAnExchangeRate(t *testing.T) {
+	h, s, tenant := importFixture(t, "https://opencode.ai/inference/go/v1", "sk")
+	s.provider = model.NewProvider(s.org.ID(), "OpenCode Go", "openai", "https://opencode.ai/inference/go/v1", s.provider.APIKey(), "EUR")
+	h.SetCatalog(catalog.NewStaticSource(testCatalogRelease(t)))
+
+	fields := url.Values{"catalog_provider": {"opencode-go"}, "plan": {"none"}}
+	rr := httptest.NewRecorder()
+	h.previewCatalogImport(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
+	if rr.Code != http.StatusUnprocessableEntity {
+		t.Errorf("status = %d, want the import refused rather than prices left in USD", rr.Code)
+	}
+}
+
+func TestConvertBundleCurrency_ConvertsConstraintBudgetsToo(t *testing.T) {
+	h := &Handler{exchangeRateService: service.NewExchangeRateService(fixedRates{"USD>EUR": 0.5}, &memoryRates{rates: map[string]model.ExchangeRate{}}, time.Hour)}
+	budget := int64(10_000_000)
+	bundle := model.ProviderBundle{Provider: model.ProviderBundleSettings{Currency: "USD", SubscriptionPlan: &model.SubscriptionPlan{
+		Constraints: []model.PlanConstraint{{Kind: model.ConstraintRollingWindow, Label: "5h", ValueBudget: &budget}},
+	}}}
+	if err := h.convertBundleCurrency(context.Background(), &bundle, "EUR"); err != nil {
+		t.Fatal(err)
+	}
+	if got := bundle.Provider.SubscriptionPlan.Constraints[0].ValueBudget; got == nil || *got != 5_000_000 {
+		t.Errorf("constraint budget = %v, want 5000000 microcents", got)
+	}
+	if budget != 10_000_000 {
+		t.Error("the conversion changed the source budget in place")
+	}
+}
+
+func TestCatalogImport_TellsAMalformedReleaseFromAnUnknownProvider(t *testing.T) {
+	h, s, tenant := importFixture(t, "https://acme.test/v1", "sk")
+	broken := &catalog.Catalog{Kind: catalog.Kind, Format: catalog.Format, Version: "v-broken", Providers: []catalog.Provider{{
+		ID: "acme", Name: "Acme", Currency: "USD",
+		Plans: []catalog.Plan{{ID: "pro", Name: "Pro", Constraints: []catalog.Constraint{{Kind: "rolling_window", Label: "5h", Duration: "five hours"}}}},
+	}}}
+	h.SetCatalog(catalog.NewStaticSource(broken))
+
+	for plan, want := range map[string]string{"pro": "v-broken", "gold": "pas dans le catalogue"} {
+		fields := url.Values{"catalog_provider": {"acme"}, "plan": {plan}}
+		rr := httptest.NewRecorder()
+		h.previewCatalogImport(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
+		page := stdhtml.UnescapeString(rr.Body.String())
+		if rr.Code != http.StatusUnprocessableEntity || !strings.Contains(page, want) {
+			t.Errorf("plan %s: status %d, want 422 mentioning %q", plan, rr.Code, want)
+		}
+		if strings.Contains(page, `name="bundle_file"`) || !strings.Contains(page, `name="catalog_provider"`) {
+			t.Errorf("plan %s: the refusal should be said on the catalog page, where the operator chooses again", plan)
+		}
+	}
+}
+
+// testCatalogRelease is the release of the catalog kept for the tests.
+func testCatalogRelease(t *testing.T) *catalog.Catalog {
+	t.Helper()
+	data, err := os.ReadFile("../../../../catalog/testdata/catalog.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := catalog.Parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func TestCatalogImport_IsNotOfferedWhenTheCatalogIsDisabled(t *testing.T) {
+	h, s, tenant := importFixture(t, "https://opencode.ai/inference/go/v1", "sk")
+	rr := httptest.NewRecorder()
+	h.getCatalogImportPage(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(""), "text/plain"))
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 with no catalog", rr.Code)
+	}
+}
+
+func TestCatalogImport_SaysWhenTheCatalogCannotBeRead(t *testing.T) {
+	h, s, tenant := importFixture(t, "https://opencode.ai/inference/go/v1", "sk")
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	defer down.Close()
+	source := catalog.NewSource(down.URL, time.Hour)
+	source.Refresh(context.Background())
+	h.SetCatalog(source)
+
+	rr := httptest.NewRecorder()
+	h.getCatalogImportPage(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(""), "text/plain"))
+	page := stdhtml.UnescapeString(rr.Body.String())
+	if rr.Code != http.StatusServiceUnavailable || !strings.Contains(page, "ne peut pas être lu") {
+		t.Errorf("status = %d, want 503 and the page saying the catalog cannot be read", rr.Code)
+	}
+	if strings.Contains(page, `name="bundle_file"`) {
+		t.Error("the catalog page should say it, not the bundle file import page")
+	}
+
+	fields := url.Values{"catalog_provider": {"opencode-go"}, "plan": {"none"}}
+	rr = httptest.NewRecorder()
+	h.previewCatalogImport(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
+	if page := stdhtml.UnescapeString(rr.Body.String()); rr.Code != http.StatusServiceUnavailable || strings.Contains(page, `name="bundle_file"`) || !strings.Contains(page, "ne peut pas être lu") {
+		t.Errorf("posted: status = %d, want 503 said on the catalog page", rr.Code)
+	}
+}
+
 func TestProviderBundle_ReportsARefusedTypeChangeNextToWrittenModels(t *testing.T) {
 	h, s, tenant := importFixture(t, "https://example.test/v1", "sk")
 	e := model.NewLLMModel(s.provider.ID(), s.org.ID(), "e", "embed-1", "", 10, 0)
@@ -346,6 +520,35 @@ func TestProviderBundle_ReportsAFailedUpdateAsAFailureNotAConflict(t *testing.T)
 	}
 }
 
+func TestCatalogImport_RefusesAReleaseWhoseBundleDoesNotValidate(t *testing.T) {
+	h, s, tenant := importFixture(t, "https://acme.test/v1", "sk")
+	p := catalog.Provider{ID: "acme", Name: "Acme", Currency: "USD", Offerings: []catalog.Offering{{Model: "glm", ModelID: "glm", Prices: catalog.Prices{Input: 1, Output: 2}}}}
+	p.Xolo.Type, p.Xolo.BaseURL = "no-such-type", "https://acme.test/v1"
+	h.SetCatalog(catalog.NewStaticSource(&catalog.Catalog{Kind: catalog.Kind, Format: catalog.Format, Version: "v-invalid", Providers: []catalog.Provider{p}}))
+
+	fields := url.Values{"catalog_provider": {"acme"}, "plan": {"none"}}
+	rr := httptest.NewRecorder()
+	h.previewCatalogImport(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
+	if page := stdhtml.UnescapeString(rr.Body.String()); rr.Code != http.StatusUnprocessableEntity || !strings.Contains(page, "v-invalid") || !strings.Contains(page, "no-such-type") {
+		t.Errorf("status %d, want 422 naming the release and the entry at fault rather than a dry run the apply would refuse", rr.Code)
+	}
+}
+
+func TestCatalogImport_RefusesAProviderWithoutCurrencyAtThePreview(t *testing.T) {
+	h, s, tenant := importFixture(t, "https://acme.test/v1", "sk")
+	s.provider.(*model.BaseProvider).SetCurrency("")
+	p := catalog.Provider{ID: "acme", Name: "Acme", Currency: "USD", Offerings: []catalog.Offering{{Model: "glm", ModelID: "glm", Prices: catalog.Prices{Input: 1, Output: 2}}}}
+	p.Xolo.Type, p.Xolo.BaseURL = "openai", "https://acme.test/v1"
+	h.SetCatalog(catalog.NewStaticSource(&catalog.Catalog{Kind: catalog.Kind, Format: catalog.Format, Version: "v1", Providers: []catalog.Provider{p}}))
+
+	fields := url.Values{"catalog_provider": {"acme"}, "plan": {"none"}}
+	rr := httptest.NewRecorder()
+	h.previewCatalogImport(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
+	if rr.Code != http.StatusUnprocessableEntity || !strings.Contains(stdhtml.UnescapeString(rr.Body.String()), "Renseignez la devise du fournisseur") {
+		t.Errorf("status %d, want 422 asking for the currency at the preview rather than a dry run the apply refuses", rr.Code)
+	}
+}
+
 func TestProviderBundle_AsksForTheCurrencyOfAProviderWithoutOne(t *testing.T) {
 	h, s, tenant := importFixture(t, "https://example.test/v1", "sk")
 	s.provider.(*model.BaseProvider).SetCurrency("")
@@ -355,6 +558,90 @@ func TestProviderBundle_AsksForTheCurrencyOfAProviderWithoutOne(t *testing.T) {
 	h.importProviderBundle(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
 	if rr.Code != http.StatusUnprocessableEntity || !strings.Contains(stdhtml.UnescapeString(rr.Body.String()), "Renseignez la devise du fournisseur") {
 		t.Errorf("status = %d, want the currency asked for rather than a rate to no currency", rr.Code)
+	}
+}
+
+func TestCatalogImport_RefusesAReleasePlanThePlanEditorRefuses(t *testing.T) {
+	h, s, tenant := importFixture(t, "https://acme.test/v1", "sk")
+	p := catalog.Provider{ID: "acme", Name: "Acme", Currency: "USD",
+		Offerings: []catalog.Offering{{Model: "glm", ModelID: "glm", Prices: catalog.Prices{Input: 1, Output: 2}}},
+		// A window of over ten years, which the plan editor refuses.
+		Plans: []catalog.Plan{{ID: "pro", Name: "Pro", Constraints: []catalog.Constraint{{Kind: "rolling_window", Label: "forever", Duration: "100000h"}}}}}
+	p.Xolo.Type, p.Xolo.BaseURL = "openai", "https://acme.test/v1"
+	h.SetCatalog(catalog.NewStaticSource(&catalog.Catalog{Kind: catalog.Kind, Format: catalog.Format, Version: "v-long", Providers: []catalog.Provider{p}}))
+
+	fields := url.Values{"catalog_provider": {"acme"}, "plan": {"pro"}}
+	rr := httptest.NewRecorder()
+	h.previewCatalogImport(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
+	if rr.Code != http.StatusUnprocessableEntity || !strings.Contains(stdhtml.UnescapeString(rr.Body.String()), "v-long") {
+		t.Errorf("status %d, want 422 naming the release rather than a dry run the apply would refuse", rr.Code)
+	}
+}
+
+func TestCatalogImport_KeepsTheEndpointsOfAnotherProviderOut(t *testing.T) {
+	h, s, tenant := importFixture(t, "https://acme.test/v1", "sk")
+	beta := catalog.Provider{ID: "beta", Name: "Beta", Currency: "USD", Offerings: []catalog.Offering{
+		{Model: "glm", ModelID: "glm", Prices: catalog.Prices{Input: 1, Output: 2}},
+		{Model: "haiku", ModelID: "haiku", APIType: "anthropic", BaseURL: "https://beta.test/anthropic/v1", Prices: catalog.Prices{Input: 1, Output: 5}},
+	}}
+	beta.Xolo.Type, beta.Xolo.BaseURL = "openrouter", "https://beta.test/v1"
+	h.SetCatalog(catalog.NewStaticSource(&catalog.Catalog{Kind: catalog.Kind, Format: catalog.Format, Version: "v1", Providers: []catalog.Provider{beta}}))
+
+	fields := url.Values{"catalog_provider": {"beta"}, "plan": {"none"}}
+	rr := httptest.NewRecorder()
+	h.previewCatalogImport(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
+	page := stdhtml.UnescapeString(rr.Body.String())
+	if rr.Code != http.StatusOK || strings.Contains(page, "beta.test") || strings.Contains(page, "openrouter") {
+		t.Errorf("status %d: the dry run offers Beta's endpoints or API to a provider at another address", rr.Code)
+	}
+	if !strings.Contains(page, "n'est pas à l'adresse de") {
+		t.Error("the page should say Beta's endpoints are left out")
+	}
+}
+
+func TestCatalogImport_KeepsOutTheEndpointsOfAProviderWithAnOfferingAtTheTarget(t *testing.T) {
+	h, s, tenant := importFixture(t, "https://acme.test/v1", "sk")
+	// Beta serves one model at the target's address, its own endpoint is
+	// elsewhere: the target is not Beta.
+	beta := catalog.Provider{ID: "beta", Name: "Beta", Currency: "USD", Offerings: []catalog.Offering{
+		{Model: "glm", ModelID: "glm", APIType: "openai", BaseURL: "https://acme.test/v1", Prices: catalog.Prices{Input: 1, Output: 2}},
+		{Model: "haiku", ModelID: "haiku", Prices: catalog.Prices{Input: 1, Output: 5}},
+	}}
+	beta.Xolo.Type, beta.Xolo.BaseURL = "openrouter", "https://beta.test/v1"
+	h.SetCatalog(catalog.NewStaticSource(&catalog.Catalog{Kind: catalog.Kind, Format: catalog.Format, Version: "v1", Providers: []catalog.Provider{beta}}))
+
+	fields := url.Values{"catalog_provider": {"beta"}, "plan": {"none"}}
+	rr := httptest.NewRecorder()
+	h.previewCatalogImport(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
+	if page := stdhtml.UnescapeString(rr.Body.String()); rr.Code != http.StatusOK || strings.Contains(page, "beta.test") || strings.Contains(page, "openrouter") {
+		t.Errorf("status %d: Beta's endpoint or API is offered to the provider at acme.test", rr.Code)
+	}
+}
+
+func TestCatalogImport_LeavesOutTheModelsTheTargetAPIDoesNotServe(t *testing.T) {
+	h, s, tenant := importFixture(t, "https://acme.test/v1", "sk")
+	s.provider.(*model.BaseProvider).SetType("anthropic")
+	beta := catalog.Provider{ID: "beta", Name: "Beta", Currency: "USD", Offerings: []catalog.Offering{
+		{Model: "chat", ModelID: "chat", Prices: catalog.Prices{Input: 1, Output: 2}},
+		{Model: "embed", ModelID: "embed", Prices: catalog.Prices{Input: 1}},
+	}, Plans: []catalog.Plan{{ID: "pro", Name: "Pro", Constraints: []catalog.Constraint{{
+		Kind: "rolling_window", Label: "5h", Duration: "5h", Scope: "model",
+		ModelBudgets: map[string]catalog.Budget{"chat": {}, "embed": {}},
+	}}}}}
+	beta.Xolo.Type, beta.Xolo.BaseURL = "openai", "https://beta.test/v1"
+	h.SetCatalog(catalog.NewStaticSource(&catalog.Catalog{Kind: catalog.Kind, Format: catalog.Format, Version: "v1",
+		Models:    []catalog.Model{{ID: "chat", Name: "Chat"}, {ID: "embed", Name: "Embed", Kind: "embeddings"}},
+		Providers: []catalog.Provider{beta}}))
+
+	fields := url.Values{"catalog_provider": {"beta"}, "plan": {"pro"}}
+	rr := httptest.NewRecorder()
+	h.previewCatalogImport(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
+	page := stdhtml.UnescapeString(rr.Body.String())
+	if strings.Contains(page, `"embed"`) || !strings.Contains(page, "Leurs budgets des contraintes par modèle sont retirés") {
+		t.Error("the plan posted back keeps a budget for the embeddings model left out, or does not say it goes")
+	}
+	if rr.Code != http.StatusOK || !strings.Contains(page, "Modèles laissés de côté, que l'API anthropic ne sert pas ici : 1.") {
+		t.Errorf("status %d, want the dry run with the embeddings model left out and said so", rr.Code)
 	}
 }
 
@@ -368,5 +655,117 @@ func TestProviderBundle_RefusesAtThePreviewAPriceTheConversionTakesOutOfBounds(t
 	h.importProviderBundle(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
 	if rr.Code != http.StatusUnprocessableEntity || !strings.Contains(stdhtml.UnescapeString(rr.Body.String()), "Converti en USD") {
 		t.Errorf("status = %d, want 5000000 USD refused at the preview, the conversion named", rr.Code)
+	}
+}
+
+func TestCatalogImport_DecidesTheAPIOfAnotherProvidersOfferingsOneByOne(t *testing.T) {
+	h, s, tenant := importFixture(t, "https://acme.test/v1", "sk")
+	beta := catalog.Provider{ID: "beta", Name: "Beta", Currency: "USD", Offerings: []catalog.Offering{
+		{Model: "glm", ModelID: "glm", Prices: catalog.Prices{Input: 1, Output: 2}},
+		// Served at the target's address through the Anthropic API.
+		{Model: "haiku", ModelID: "haiku", APIType: "anthropic", BaseURL: "https://acme.test/v1", Prices: catalog.Prices{Input: 1, Output: 5}},
+		// Served elsewhere through the Gemini API only.
+		{Model: "argon", ModelID: "argon", APIType: "gemini", BaseURL: "https://beta.test/gemini", Prices: catalog.Prices{Input: 1, Output: 4}},
+	}}
+	beta.Xolo.Type, beta.Xolo.BaseURL = "openai", "https://beta.test/v1"
+	h.SetCatalog(catalog.NewStaticSource(&catalog.Catalog{Kind: catalog.Kind, Format: catalog.Format, Version: "v1", Providers: []catalog.Provider{beta}}))
+
+	fields := url.Values{"catalog_provider": {"beta"}, "plan": {"none"}}
+	rr := httptest.NewRecorder()
+	h.previewCatalogImport(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
+	page := stdhtml.UnescapeString(rr.Body.String())
+	if rr.Code != http.StatusOK || strings.Contains(page, "beta.test") || strings.Contains(page, `"real_model":"argon"`) {
+		t.Errorf("status %d: argon, only served through Gemini at Beta's, should be left out", rr.Code)
+	}
+	if !strings.Contains(page, `"api_type":"anthropic"`) || !strings.Contains(page, "que l'API openai ne sert pas ici : 1.") {
+		t.Error("haiku should keep the Anthropic API served at the provider's address, and argon be counted out")
+	}
+}
+
+func TestCatalogImport_KeepsTheCatalogProvidersAPIForAnOfferingAtTheTarget(t *testing.T) {
+	// The provider is declared openai, at an address where Beta serves its
+	// own Anthropic API: the model takes that API, as the pre-fill gives it.
+	h, s, tenant := importFixture(t, "https://acme.test/v1", "sk")
+	beta := catalog.Provider{ID: "beta", Name: "Beta", Currency: "USD", Offerings: []catalog.Offering{
+		{Model: "haiku", ModelID: "haiku", APIType: "anthropic", BaseURL: "https://acme.test/v1", Prices: catalog.Prices{Input: 1, Output: 5}},
+	}}
+	beta.Xolo.Type, beta.Xolo.BaseURL = "anthropic", "https://beta.test/v1"
+	h.SetCatalog(catalog.NewStaticSource(&catalog.Catalog{Kind: catalog.Kind, Format: catalog.Format, Version: "v1", Providers: []catalog.Provider{beta}}))
+
+	fields := url.Values{"catalog_provider": {"beta"}, "plan": {"none"}}
+	rr := httptest.NewRecorder()
+	h.previewCatalogImport(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
+	if page := stdhtml.UnescapeString(rr.Body.String()); rr.Code != http.StatusOK || !strings.Contains(page, `"api_type":"anthropic"`) {
+		t.Errorf("status %d, want haiku on the Anthropic API served at the provider's address", rr.Code)
+	}
+}
+
+func TestCatalogImport_KeepsTheSharedBudgetsOfTheModelsItLeavesOut(t *testing.T) {
+	h, s, tenant := importFixture(t, "https://acme.test/v1", "sk")
+	s.provider.(*model.BaseProvider).SetType("anthropic")
+	tokens := func(v int64) *int64 { return &v }
+	beta := catalog.Provider{ID: "beta", Name: "Beta", Currency: "USD", Offerings: []catalog.Offering{
+		{Model: "chat", ModelID: "chat", Prices: catalog.Prices{Input: 1, Output: 2}},
+		{Model: "embed", ModelID: "embed", Prices: catalog.Prices{Input: 1}},
+	}, Plans: []catalog.Plan{{ID: "pro", Name: "Pro", Constraints: []catalog.Constraint{{
+		Kind: "rolling_window", Label: "5h", Duration: "5h", Scope: "shared", TokenBudget: tokens(1000),
+		ModelBudgets: map[string]catalog.Budget{"chat": {TokenBudget: tokens(1000)}, "embed": {TokenBudget: tokens(10)}},
+	}}}}}
+	beta.Xolo.Type, beta.Xolo.BaseURL = "openai", "https://beta.test/v1"
+	h.SetCatalog(catalog.NewStaticSource(&catalog.Catalog{Kind: catalog.Kind, Format: catalog.Format, Version: "v1",
+		Models:    []catalog.Model{{ID: "chat", Name: "Chat"}, {ID: "embed", Name: "Embed", Kind: "embeddings"}},
+		Providers: []catalog.Provider{beta}}))
+
+	fields := url.Values{"catalog_provider": {"beta"}, "plan": {"pro"}}
+	rr := httptest.NewRecorder()
+	h.previewCatalogImport(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
+	// The smallest budget weighs the models the plan does not list.
+	page := stdhtml.UnescapeString(rr.Body.String())
+	if rr.Code != http.StatusOK || !strings.Contains(page, `"embed":{"token_budget":10}`) {
+		t.Errorf("status %d, want the shared budget of embed kept in the plan posted back", rr.Code)
+	}
+	if strings.Contains(page, "Leurs budgets des contraintes par modèle sont retirés") {
+		t.Error("the page says budgets were removed, none was")
+	}
+}
+
+func TestCatalogImport_KeepsTheSettingsTheCatalogDoesNotDescribe(t *testing.T) {
+	h, s, tenant := importFixture(t, "https://acme.test/v1", "sk")
+	target := s.provider.(*model.BaseProvider)
+	target.SetCloudTier(2)
+	target.SetRetryConfig(&model.RetryConfig{Enabled: true, MaxAttempts: 7, Delay: time.Second})
+	target.SetBillingMode(model.BillingModeSubscription)
+	acme := catalog.Provider{ID: "acme", Name: "Acme", Currency: "USD", Offerings: []catalog.Offering{
+		{Model: "glm", ModelID: "glm", Prices: catalog.Prices{Input: 1, Output: 2}},
+	}}
+	acme.Xolo.Type, acme.Xolo.BaseURL = "openai", "https://acme.test/v1"
+	h.SetCatalog(catalog.NewStaticSource(&catalog.Catalog{Kind: catalog.Kind, Format: catalog.Format, Version: "v1", Providers: []catalog.Provider{acme}}))
+
+	fields := url.Values{"catalog_provider": {"acme"}, "plan": {"none"}}
+	rr := httptest.NewRecorder()
+	h.previewCatalogImport(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
+	page := stdhtml.UnescapeString(rr.Body.String())
+	for _, kept := range []string{`"cloud_tier":2`, `"max_attempts":7`, `"billing_mode":"subscription"`} {
+		if !strings.Contains(page, kept) {
+			t.Errorf("status %d: the bundle posted back lacks %s, which the catalog does not describe", rr.Code, kept)
+		}
+	}
+}
+
+func TestCatalogImport_NamesTheBudgetThatNamesNoOffering(t *testing.T) {
+	h, s, tenant := importFixture(t, "https://acme.test/v1", "sk")
+	acme := catalog.Provider{ID: "acme", Name: "Acme", Currency: "USD",
+		Offerings: []catalog.Offering{{Model: "glm", ModelID: "glm", Prices: catalog.Prices{Input: 1, Output: 2}}},
+		Plans: []catalog.Plan{{ID: "pro", Name: "Pro", Constraints: []catalog.Constraint{{
+			Kind: "rolling_window", Label: "5h", Duration: "5h", Scope: "model", ModelBudgets: map[string]catalog.Budget{"ghost": {}},
+		}}}}}
+	acme.Xolo.Type, acme.Xolo.BaseURL = "openai", "https://acme.test/v1"
+	h.SetCatalog(catalog.NewStaticSource(&catalog.Catalog{Kind: catalog.Kind, Format: catalog.Format, Version: "v-ghost", Providers: []catalog.Provider{acme}}))
+
+	fields := url.Values{"catalog_provider": {"acme"}, "plan": {"pro"}}
+	rr := httptest.NewRecorder()
+	h.previewCatalogImport(rr, bundleRequest(t, s, tenant, string(s.provider.ID()), bytes.NewBufferString(fields.Encode()), "application/x-www-form-urlencoded"))
+	if page := stdhtml.UnescapeString(rr.Body.String()); rr.Code != http.StatusUnprocessableEntity || !strings.Contains(page, "v-ghost") || !strings.Contains(page, `"ghost"`) {
+		t.Errorf("status %d, want 422 naming the release and the budget at fault", rr.Code)
 	}
 }

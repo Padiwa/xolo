@@ -313,19 +313,32 @@
     initRows(event.target);
   });
 
-  // ── Pré-remplissage depuis le catalogue models.dev ────────────────────────
+  // ── Pré-remplissage depuis le catalogue de modèles ───────────────────────
   //
-  // Le bouton interroge le catalogue public et remplit une dizaine de champs du
+  // Le bouton interroge le catalogue ouvert du projet et remplit les champs du
   // formulaire de modèle. Le faire côté serveur voudrait dire soumettre puis
-  // re-rendre le formulaire, en perdant la saisie déjà en cours.
+  // re-rendre le formulaire, en perdant la saisie déjà en cours. Les messages
+  // viennent du bouton, traduits par le serveur.
   document.addEventListener("click", async function (event) {
-    var button = event.target.closest("[data-xolo-models-dev]");
+    var button = event.target.closest("[data-xolo-catalog]");
     if (!button) return;
 
     var form = button.closest("form");
     var setValue = function (name, value) {
       var field = form.querySelector("[name=" + name + "]");
       if (field) field.value = value;
+    };
+    // Une liste templui ne prend qu'une valeur qu'elle propose, et pas
+    // désactivée : écrire son champ caché suffit, elle en suit la valeur.
+    var setSelected = function (name, value) {
+      var field = form.querySelector("[name=" + name + "]");
+      var trigger = field && field.closest(".select-trigger");
+      if (!trigger || trigger.disabled) return;
+      var content = document.getElementById(trigger.dataset.tuiSelectboxContentId);
+      var offered = content && Array.prototype.some.call(content.querySelectorAll(".select-item"), function (item) {
+        return item.dataset.tuiSelectboxValue === value;
+      });
+      if (offered) field.value = value;
     };
     var setChecked = function (name, value) {
       var field = form.querySelector("[name=" + name + "]");
@@ -334,55 +347,105 @@
 
     var realModel = form.querySelector("[name=real_model]").value.trim();
     if (!realModel) {
-      window.alert("Renseignez d'abord le nom du modèle réel.");
+      window.alert(button.dataset.msgMissing);
       return;
     }
 
     button.disabled = true;
     try {
-      var url = button.dataset.lookupUrl + "?id=" + encodeURIComponent(realModel);
-      if (button.dataset.providerType) {
-        url += "&provider=" + encodeURIComponent(button.dataset.providerType);
-      }
+      var url =
+        button.dataset.lookupUrl +
+        "?id=" + encodeURIComponent(realModel) +
+        "&provider=" + encodeURIComponent(button.dataset.providerType || "") +
+        "&base_url=" + encodeURIComponent(button.dataset.providerBaseUrl || "");
 
       var response = await fetch(url);
       if (!response.ok) {
-        window.alert("Modèle non trouvé dans le catalogue models.dev.");
+        // Seul un 404 dit le modèle inconnu : une session expirée ou une
+        // panne n'est pas son fait.
+        var messages = { 404: button.dataset.msgNotFound, 503: button.dataset.msgUnavailable };
+        window.alert(messages[response.status] || button.dataset.msgFailed);
         return;
       }
-      var catalog = await response.json();
+      var entry = await response.json();
+      var noRate = false;
+      var noCurrency = false;
 
-      if (catalog.context_window) setValue("context_window", catalog.context_window);
-      if (catalog.output_window) setValue("output_window", catalog.output_window);
+      if (entry.context_window) setValue("context_window", entry.context_window);
+      if (entry.output_window) setValue("output_window", entry.output_window);
+      if (entry.active_params) setValue("active_params", entry.active_params);
+      if (entry.tokens_per_sec_low) setValue("tokens_per_sec_low", entry.tokens_per_sec_low);
+      if (entry.tokens_per_sec_high) setValue("tokens_per_sec_high", entry.tokens_per_sec_high);
 
-      if (catalog.prompt_cost || catalog.completion_cost) {
-        // Le catalogue publie ses tarifs en USD ; l'organisation les stocke dans
-        // sa propre devise.
-        var currency = button.dataset.currency || "USD";
-        var rate = 1;
-        if (currency !== "USD") {
-          var rateResponse = await fetch(
-            button.dataset.exchangeRateUrl + "?from=USD&to=" + encodeURIComponent(currency)
-          );
-          if (rateResponse.ok) rate = (await rateResponse.json()).rate;
+      if ((entry.prompt_cost != null || entry.completion_cost != null) && !button.dataset.currency) {
+        // Un fournisseur sans devise ne reçoit pas de prix : ils seraient
+        // lus dans celle qu'il prendra plus tard.
+        noCurrency = true;
+      } else if (entry.prompt_cost != null || entry.completion_cost != null) {
+        // Le catalogue publie les prix dans la devise du fournisseur ;
+        // l'organisation les stocke dans celle de son fournisseur.
+        var currency = button.dataset.currency;
+        // Un prix sans devise n'est jamais rempli.
+        var rate = entry.currency ? 1 : null;
+        if (entry.currency && currency !== entry.currency) {
+          // Sans taux, les prix ne sont pas remplis : un montant dans une
+          // autre devise serait facturé comme s'il était dans la bonne.
+          rate = null;
+          try {
+            var rateResponse = await fetch(
+              button.dataset.exchangeRateUrl +
+                "?from=" + encodeURIComponent(entry.currency) +
+                "&to=" + encodeURIComponent(currency)
+            );
+            if (rateResponse.ok) rate = (await rateResponse.json()).rate || null;
+          } catch (e) {}
         }
-        if (catalog.prompt_cost) {
-          setValue("prompt_cost", ((catalog.prompt_cost / 1000) * rate).toFixed(6));
-        }
-        if (catalog.completion_cost) {
-          setValue("completion_cost", ((catalog.completion_cost / 1000) * rate).toFixed(6));
+        if (rate) {
+          var price = function (name, value) {
+            if (value != null) setValue(name, (value * rate).toFixed(6));
+          };
+          price("prompt_cost", entry.prompt_cost);
+          price("cached_prompt_cost", entry.cached_prompt_cost);
+          price("completion_cost", entry.completion_cost);
+        } else {
+          noRate = true;
         }
       }
 
-      setChecked("cap_tools", !!catalog.cap_tools);
-      setChecked("cap_vision", !!catalog.cap_vision);
-      setChecked("cap_reasoning", !!catalog.cap_reasoning);
-      setChecked("cap_audio", !!catalog.cap_audio);
+      if (entry.cap_tools != null) setChecked("cap_tools", entry.cap_tools);
+      if (entry.cap_vision != null) setChecked("cap_vision", entry.cap_vision);
+      if (entry.cap_reasoning != null) setChecked("cap_reasoning", entry.cap_reasoning);
+      if (entry.cap_audio != null) setChecked("cap_audio", entry.cap_audio);
 
-      if (catalog.name) {
-        var proxyName = form.querySelector("[name=proxy_name]");
-        if (proxyName && !proxyName.value) proxyName.value = catalog.name;
+      if (entry.kind) setSelected("kind", entry.kind);
+      if (entry.api_type) setSelected("api_type", entry.api_type);
+      if (entry.api_base_url) setValue("api_base_url", entry.api_base_url);
+
+      if (entry.name) {
+        var description = form.querySelector("[name=description]");
+        if (description && !description.value) description.value = entry.name;
       }
+
+      var notes = [];
+      if (noCurrency) notes.push(button.dataset.msgNoCurrency);
+      if (noRate) notes.push(button.dataset.msgNoRate);
+      if (entry.prices_vary) notes.push(button.dataset.msgPricesVary);
+      if (entry.estimated && entry.estimated.length) {
+        var labels = {};
+        try {
+          labels = JSON.parse(button.dataset.fieldLabels || "{}");
+        } catch (e) {}
+        var names = [];
+        entry.estimated.forEach(function (field) {
+          var name = labels[field] || field;
+          if (names.indexOf(name) < 0) names.push(name);
+        });
+        notes.push(button.dataset.msgEstimated + "\n- " + names.join("\n- "));
+      }
+      if (notes.length) window.alert(notes.join("\n\n"));
+    } catch (e) {
+      // Le serveur n'a pas répondu : rien n'est rempli.
+      window.alert(button.dataset.msgFailed);
     } finally {
       button.disabled = false;
     }

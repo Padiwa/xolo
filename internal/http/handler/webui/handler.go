@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/xolo-gateway/xolo/internal/catalog"
 	"github.com/xolo-gateway/xolo/internal/core/port"
 	"github.com/xolo-gateway/xolo/internal/core/service"
 	"github.com/xolo-gateway/xolo/internal/http/handler/webui/admin"
@@ -46,6 +47,12 @@ type Handler struct {
 func (h *Handler) WithTeams(teams port.TeamStore) *Handler {
 	h.orgHandler.SetTeams(teams)
 	h.profileHandler.SetTeams(teams)
+	return h
+}
+
+// WithCatalog lets the provider pages import from the open model catalog.
+func (h *Handler) WithCatalog(source *catalog.Source) *Handler {
+	h.orgHandler.SetCatalog(source)
 	return h
 }
 

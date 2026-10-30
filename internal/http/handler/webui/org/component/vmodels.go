@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/xolo-gateway/xolo/internal/catalog"
 	"github.com/xolo-gateway/xolo/internal/core/model"
 	"github.com/xolo-gateway/xolo/internal/core/port"
 	"github.com/xolo-gateway/xolo/internal/core/service"
@@ -31,10 +32,13 @@ type MembersPageVModel struct {
 
 type ProvidersPageVModel struct {
 	common.AppLayoutVModel
-	Org         model.Organization
-	Providers   []model.Provider
-	ModelCounts map[model.ProviderID]int
-	Success     string
+	// CatalogEnabled offers the import from, or pre-fill by, the model
+	// catalog: false when it is disabled.
+	CatalogEnabled bool
+	Org            model.Organization
+	Providers      []model.Provider
+	ModelCounts    map[model.ProviderID]int
+	Success        string
 }
 
 type ProviderFormVModel struct {
@@ -51,10 +55,13 @@ type ProviderFormVModel struct {
 
 type ModelsPageVModel struct {
 	common.AppLayoutVModel
-	Org      model.Organization
-	Provider model.Provider
-	Models   []model.LLMModel
-	Success  string
+	// CatalogEnabled offers the import from, or pre-fill by, the model
+	// catalog: false when it is disabled.
+	CatalogEnabled bool
+	Org            model.Organization
+	Provider       model.Provider
+	Models         []model.LLMModel
+	Success        string
 }
 
 // ModelImportVModel is the page listing the models a provider serves, to
@@ -91,11 +98,14 @@ type ModelImportCandidate struct {
 
 type ModelFormVModel struct {
 	common.AppLayoutVModel
-	Org      model.Organization
-	Provider model.Provider
-	Model    model.LLMModel
-	IsNew    bool
-	Error    string
+	// CatalogEnabled offers the import from, or pre-fill by, the model
+	// catalog: false when it is disabled.
+	CatalogEnabled bool
+	Org            model.Organization
+	Provider       model.Provider
+	Model          model.LLMModel
+	IsNew          bool
+	Error          string
 }
 
 type QuotaPageVModel struct {
@@ -408,4 +418,19 @@ type ProviderBundleImportVModel struct {
 	// OmittedHeaders names the credential-looking request headers the
 	// bundle left out, to configure again on the provider.
 	OmittedHeaders string
+}
+
+// CatalogImportVModel is the choice of a provider of the open model catalog
+// to import from, before the dry run of the bundle it converts into.
+type CatalogImportVModel struct {
+	common.AppLayoutVModel
+	Org model.Organization
+	// Provider is the provider the models go to, nil when the import creates
+	// a new provider.
+	Provider model.Provider
+	Catalog  *catalog.Catalog
+	// Suggested is the catalog provider the existing provider most likely
+	// is, listed first.
+	Suggested string
+	Error     string
 }
